@@ -389,3 +389,507 @@ The most concerning new discovery is actually **the transfer path**. `todos.md` 
 ```lisp
 (reuse >= 3) AND (no severe regression)
 ```
+
+Yes. Fresh `main` has enough new code that I found **9 additional issues plus 2 important reopenings**. The repo has improved materially, but a few of the new protections have bypasses.
+
+### New issues to add
+
+**71. Risk classification is optional and missing classification fails open — CRITICAL**
+
+`run_candidate(..., risk_fn=None)` marks risk as `"unclassified"` but records the risk stage as **pass** and proceeds with execution. `_risk_blocks()` only blocks R6/explicit `blocked`, so “we don't know the risk” is currently treated as safe enough to rehearse. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/pipeline.py)
+
+**Fix:** absence of a classifier or any `unclassified` result must fail closed before execution.
+
+---
+
+**72. Entire mutation pipeline can return PASS without running a single test — CRITICAL**
+
+If `tests` is `{}` or all stages are absent/`None`, `ran_any` remains false and the pipeline returns:
+
+```text
+candidate parsed; no checks requested
+```
+
+with `ok=True`. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/pipeline.py)
+
+That means parsing alone can produce a green verdict if a caller misconfigures the pipeline.
+
+**Fix:** zero executed verification stages must always be non-promotable. Require a minimum gate set derived from risk level.
+
+---
+
+**73. Python S-expression parser and the real Lisp reader do not have the same semantics — HIGH**
+
+This is subtle and potentially nasty.
+
+Your Python parser implements only a subset: parentheses, strings, `'` quote sugar, atoms, and treats comma as whitespace. It does **not** implement Common Lisp reader semantics for backquote, unquote, dispatch macros, escaped symbols, reader conditionals, pathname syntax, etc. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/s_expr.py)
+
+But the worker later hands source to the actual SBCL reader. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/workers.py)
+
+Therefore you effectively have:
+
+```text
+Python interpretation used for security/risk
+             ≠
+SBCL interpretation used for execution
+```
+
+That is a classic parser-differential attack surface.
+
+**Fix:** don't risk-scan one representation and execute another. Parse the constrained grammar once, then **generate canonical Lisp from the validated AST** and execute that canonical form.
+
+This is probably the most important architectural security change I'd make.
+
+---
+
+**74. Hard process-deny can be hidden inside quoted code passed to `eval` — HIGH**
+
+`sandbox._payload_walk()` deliberately skips quoted subtrees. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/sandbox.py)
+
+So something conceptually like:
+
+```lisp
+(eval '(sb-ext:run-program ...))
+```
+
+has an outer `eval` that risk classification recognizes as dynamic/R4, but the sandbox's “process effects are never rehearsed” scanner can skip the quoted `run-program`. `eval` itself is explicitly considered dynamic by the risk classifier. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/risk.py)
+
+If that R4 mutation gets approval for rehearsal, you've bypassed the intended unconditional process deny.
+
+The Lisp-level sandbox may still stop the obvious API call, but you've explicitly documented that it is bypassable.
+
+**Fix:** for the hard-deny layer, dynamic evaluation (`eval`, `compile`, `load`, `funcall` over computed targets, etc.) should either:
+- be unrehearsable, or
+- require a much stronger execution boundary.
+
+---
+
+**75. Sandbox silently disappears if `sandbox.py` fails to import — CRITICAL**
+
+Workers default to `sandbox=True`, which sounds fail-closed.
+
+But:
+
+```python
+try:
+    import sandbox as _sandbox
+except ImportError:
+    _sandbox = None
+```
+
+and then `_sandbox_prelude()` returns `""` if `_sandbox is None`. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/workers.py)
+
+So an installation/package error silently transforms:
+
+```text
+sandbox=True
+```
+
+into:
+
+```text
+run completely unsandboxed
+```
+
+**Fix:** if sandboxing is requested and sandbox initialization is unavailable, worker startup must fail.
+
+---
+
+**76. Caller-provided prelude runs with enough authority to dismantle the sandbox — HIGH**
+
+Current order is:
+
+```text
+sandbox containment prelude
+→ caller-supplied prelude
+→ candidate
+```
+
+because `effective_prelude` concatenates the sandbox guard followed by the supplied prelude. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/workers.py)
+
+If `prelude` ever contains generated/task-controlled content, it gets an opportunity to restore functions, unlock packages, rebind globals, etc. before the candidate executes.
+
+**Fix:** formally designate prelude as trusted-kernel input and enforce that boundary. Better:
+
+```text
+trusted setup
+→ lockdown as final setup operation
+→ candidate
+```
+
+so no mutable setup executes after lockdown.
+
+---
+
+**77. Performance benchmark mostly measures SBCL startup, not candidate performance — HIGH**
+
+The performance stage uses `record["elapsed_ms"]`, which comes from `run_lisp()`'s wall-clock timer. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/pipeline.py)
+
+But every `run_lisp()` currently launches a fresh SBCL, loads worker packages, loads rehearsal code, installs sandboxing, evaluates the prelude, and only then executes the candidate. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/workers.py)
+
+So:
+
+```text
+reported candidate performance =
+process spawn
++ SBCL startup
++ source loads
++ sandbox install
++ candidate
+```
+
+This can completely drown out a 50 μs versus 5 ms algorithmic regression.
+
+**Fix:** transport both:
+
+```text
+worker_wall_ms
+candidate_cpu_ms
+candidate_wall_ms
+alloc_bytes
+GC time
+```
+
+and base capability performance gates on in-worker candidate measurements.
+
+---
+
+**78. Performance stage can pass despite having no performance threshold — MEDIUM**
+
+If samples exist but `budget_ms` is missing, the performance stage explicitly records a note and returns success. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/pipeline.py)
+
+That's useful for telemetry but should not satisfy a mandatory `performance-checks` gate.
+
+**Fix:** distinguish:
+
+```text
+MEASURED
+PASS
+FAIL
+```
+
+A measurement without an acceptance threshold is not verification.
+
+---
+
+**79. State sandbox exposes an escape hatch that can desynchronize transaction bookkeeping — MEDIUM**
+
+`StateSandbox.connection` publicly exposes the raw SQLite connection. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/effects.py)
+
+The sandbox separately maintains:
+
+```python
+_savepoints
+_sp_counter
+```
+
+as its authoritative nesting state.
+
+External code can therefore do things like direct `COMMIT`, `ROLLBACK`, create savepoints, alter pragmas, etc., leaving GrayGoo's bookkeeping inconsistent with SQLite.
+
+**Fix:** generated/speculative consumers should never receive the raw connection. Keep the escape hatch explicitly trusted-only, or remove it.
+
+---
+
+### Reopen / sharpen two existing issues
+
+**#1 reader-eval is not fully fixed.**
+
+The new code correctly binds:
+
+```lisp
+(*read-eval* nil)
+```
+
+while looping over forms. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/workers.py)
+
+But the code reads **one form, evaluates it, then reads the next form**:
+
+```text
+READ form1
+EVAL form1
+READ form2
+EVAL form2
+```
+
+Because `*read-eval*` is dynamically bound but mutable, form 1 can potentially alter the current binding before form 2 is read.
+
+Conceptually:
+
+```lisp
+(setq *read-eval* t)
+#.(dangerous-reader-time-code)
+```
+
+So the current comment claiming reader evaluation “never fires here” is stronger than the implementation guarantees. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/workers.py)
+
+**Better fix:** parse all forms while `*read-eval*` is unchangeably controlled **before evaluating any of them**, or—better—execute only canonical forms generated from your Python validated AST.
+
+That also solves #73.
+
+---
+
+**#46 host environment inheritance still appears unresolved.**
+
+The current `subprocess.Popen()` still supplies no explicit sanitized `env=`. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/workers.py)
+
+So the worker still inherits the coordinator environment.
+
+Given that the Lisp-level sandbox is explicitly documented as bypassable, this remains a P0 until OS/process isolation lands.
+
+---
+
+## One design change fixes several of these at once
+
+I would now strongly recommend changing the worker boundary from:
+
+```text
+LLM source string
+↓
+Python parses it
+↓
+Python security-scans it
+↓
+original source string
+↓
+SBCL READ again
+↓
+EVAL
+```
+
+to:
+
+```text
+LLM source
+↓
+restricted parser
+↓
+validated GrayGoo AST
+↓
+risk/effect classification
+↓
+canonical Lisp emitter
+↓
+ONE known canonical form
+↓
+COMPILE
+↓
+execute
+```
+
+That eliminates a whole class of:
+
+- reader-macro tricks,
+- parser differentials,
+- multiple-form `*read-eval*` attacks,
+- hidden syntax,
+- ambiguity between what the security layer approved and what SBCL executed.
+
+The latest code is moving in a good direction—the risk classifier in particular is now substantially more serious—but **the parser/executor split is becoming the next major attack surface**. [GitHub](https://raw.githubusercontent.com/monstercameron/GrayGoo/main/risk.py)
+
+So I’d add **#71–79**, reopen **#1**, and keep **#46** P0.
+
+
+Yes. Based on the **experiment docs specifically**, I’d add these issues to the backlog. These are mostly scientific-validity and measurement gaps rather than implementation bugs.
+
+71. **No frozen benchmark version / benchmark manifest**
+   - If Family A tasks change while GrayGoo evolves, results across runs stop being comparable.
+   - Add a versioned benchmark manifest with task hashes, split IDs, generator version, and seed.
+
+72. **Exposure / transfer / held-out split needs leakage protection**
+   - The docs define these splits, but the system needs explicit guarantees that task generation, lesson mining, and replay cannot leak held-out examples into training memory.
+   - Hidden test/task IDs should never enter mutable memory.
+
+73. **Independent reuse is underspecified**
+   - “3 independent reuses” needs a formal definition.
+   - Three syntactic variants of the same task should not count as independent transfer.
+
+74. **Negative transfer needs an explicit severity taxonomy**
+   - The docs track “severe negative transfer,” but severity needs objective criteria.
+   - Example: accuracy regression, latency regression, token regression, state-safety regression should be separated.
+
+75. **Promotion thresholds are currently arbitrary**
+   - `>=3 reuses`, zero severe regressions, etc. are reasonable starting points but unvalidated.
+   - Add a threshold-calibration experiment instead of treating them as fixed truth.
+
+76. **No statistical significance / uncertainty plan**
+   - Results like “tokens/task fell 12%” are meaningless without variance and repeated runs.
+   - Track confidence intervals or bootstrap intervals for key deltas.
+
+77. **No preregistered experiment stopping criteria**
+   - Without fixed stopping rules, it is easy to keep iterating until the desired result appears.
+   - Define number of runs/tasks/seeds before evaluating success.
+
+78. **Baseline C is underspecified**
+   - “Qwen + conventional coding tools” needs a precise toolset, prompt, context budget, and repair budget.
+   - Otherwise GrayGoo can accidentally compare against a weak strawman baseline.
+
+79. **Baseline token budgets must be normalized**
+   - A learned-memory system should not get a larger inference budget than the no-memory baseline.
+   - Define equal or explicitly reported resource budgets across arms.
+
+80. **Model/provider version drift can invalidate longitudinal comparisons**
+   - Cerebras/Qwen behavior may change over time.
+   - Record exact provider model ID, API version, sampling parameters, and date for every run.
+
+81. **No benchmark contamination check for pretrained model knowledge**
+   - Some benchmark tasks may already be trivial for Qwen due to pretraining.
+   - Include procedurally generated or synthetic task families where contamination is unlikely.
+
+82. **Capability reuse can improve latency while hurting generalization**
+   - The experiment needs to separately measure:
+     - raw reuse rate
+     - useful reuse rate
+     - harmful reuse rate
+   - High reuse alone is not evidence of learning.
+
+83. **Zero-model-call success can be gamed by memorization**
+   - Reaching zero calls on repeated tasks is not impressive if the system just stores exact task solutions.
+   - Zero-call success should be measured primarily on unseen members of a task family.
+
+84. **Capability-library growth needs a normalized metric**
+   - “Growth slows” is currently qualitative.
+   - Track capabilities per solved novel task and bytes/tokens of learned memory per task.
+
+85. **Capability entropy is not formally defined**
+   - The docs reference entropy/complexity, but the metric needs a stable definition before it can support conclusions.
+   - Consider overlap, unused-capability ratio, graph depth, and semantic duplication as separate metrics first.
+
+86. **Lesson-memory experiment has a confound between better context and actual learning**
+   - Distilled lessons may simply provide better prompting, not durable learning.
+   - Add a control where equivalent handcrafted guidance is supplied.
+
+87. **Raw transcript baseline may be unfairly weak**
+   - Dumping raw history verbatim can create an intentionally bad baseline.
+   - Give transcript memory a reasonable retrieval/compression strategy.
+
+88. **Replay validation can overfit the replay corpus**
+   - Lessons validated repeatedly on the same historical trajectories may specialize to those trajectories.
+   - Use a second held-out replay set for lesson validation.
+
+89. **Lesson acceptance needs negative evidence**
+   - A lesson should store not only supporting cases but counterexamples where it hurt.
+   - Otherwise confidence only ratchets upward.
+
+90. **No explicit measure of first-pass synthesis quality**
+   - Track:
+     - first candidate pass rate
+     - repair count
+     - total candidates/task
+   - This is central to measuring whether the learning layer actually accelerates development.
+
+91. **Time-to-verified-mutation needs decomposition**
+   - Break out:
+     - context retrieval
+     - model inference
+     - worker startup
+     - compile
+     - tests
+     - evaluator
+     - promotion
+   - Otherwise you cannot tell where GrayGoo is improving or regressing.
+
+92. **Cost/task is provider-price dependent**
+   - Dollar cost can change independently of system quality.
+   - Always report raw input/output tokens and model calls alongside USD cost.
+
+93. **No explicit failure criterion for the core thesis**
+   - Define what result would make you conclude executable memory is not useful.
+   - Example: if held-out success does not improve and tokens/task do not fall after N tasks, hypothesis fails.
+
+94. **No cross-family transfer test**
+   - Current design focuses heavily on within-family transfer.
+   - Add a later experiment for whether a procedural abstraction learned in one family helps another related family.
+
+95. **No forgetting-vs-retention experiment**
+   - TTL/retirement is part of the architecture, but there should be an explicit A/B test:
+     - no forgetting
+     - TTL forgetting
+     - usage-weighted forgetting
+
+96. **No consolidation ablation**
+   - To prove consolidation matters, compare:
+     - flat skill library
+     - consolidated procedural families
+   - Measure retrieval accuracy, latency, and negative transfer.
+
+97. **No lesson retrieval precision metric**
+   - Track whether retrieved lessons were actually useful for the mutation.
+   - Otherwise more retrieved lessons may silently degrade performance.
+
+98. **No causal attribution between capability memory and lesson memory**
+   - Full GrayGoo combines both, so improvements can be hard to attribute.
+   - Keep factorial experiments:
+     - neither
+     - capability only
+     - lesson only
+     - both
+
+99. **Task-family difficulty should be calibrated**
+   - If early tasks are harder than later tasks, decreasing tokens/task could be falsely interpreted as learning.
+   - Randomize or stratify task difficulty across sequence position.
+
+100. **Task ordering can bias the learning curve**
+   - A fixed curriculum may make later tasks naturally easier.
+   - Run multiple randomized task orders/seeds.
+
+101. **No cold-start vs warm-start comparison**
+   - Measure the same held-out tasks with:
+     - empty memory
+     - mature memory
+   - This gives a clean estimate of accumulated system value.
+
+102. **No catastrophic-memory test**
+   - Inject one bad promoted skill/lesson and measure whether GrayGoo detects, contains, and recovers from it.
+   - This is essential for long-running self-learning systems.
+
+103. **No measurement of memory retrieval overhead**
+   - As capability/lesson memory grows, retrieval itself may become expensive.
+   - Track retrieval latency and context size against memory size.
+
+104. **No benchmark for misleading near-match capabilities**
+   - Add tasks where an existing capability looks semantically relevant but is subtly wrong.
+   - This tests applicability boundaries and negative transfer.
+
+105. **No explicit “learning efficiency” metric**
+   - Add something like:
+   ```text
+   improvement on held-out tasks
+   -----------------------------
+   total mutation + inference cost
+   ```
+   - This captures how expensive the learning process itself is.
+
+106. **No durability test across process restart**
+   - Since persistence is central to the thesis, prove that learned capabilities and lessons survive restart and still reproduce the same behavior.
+
+107. **No reproducibility target**
+   - Define what another machine should be able to reproduce from a run artifact:
+     - benchmark
+     - model config
+     - runtime version
+     - capability state
+     - random seeds
+     - final metrics
+
+108. **No experiment artifact bundle**
+   - Every major run should produce a self-contained report:
+     - config
+     - benchmark version
+     - commits
+     - metrics
+     - event log hash
+     - plots
+     - promoted skills
+     - failures
+
+109. **The core thesis lacks a single canonical headline experiment**
+   - The docs contain many good experiments, but you need one primary result everyone can understand.
+   - I’d define:
+   > “Across 100 unseen related tasks, does mature GrayGoo beat the same Qwen model with memory disabled on held-out success while using materially fewer model calls and tokens?”
+
+110. **Success criteria should include system simplicity**
+   - A 20% token reduction is not impressive if it requires 10× more infrastructure and validation cost.
+   - Report total compute and end-to-end latency, not only model inference savings.
+
+The **highest-value ones to add immediately** are **#71–80, #83, #88, #93, #98–100, and #109**. Those determine whether the eventual result is scientifically convincing rather than merely a cool demo.

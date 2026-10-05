@@ -86,3 +86,54 @@ body of `generation_fingerprint(epoch_id)` with
 `fingerprint.compute_string(epoch_id=epoch_id)`. Same signature,
 stronger digest; `pool.py` already consumes `fingerprint` for its
 default generation.
+
+## Round 3 (2026-10-05): issues #71-79 + #1 reopen + #46
+
+Source: follow-up review appended to `issues.md` (found #71-79 plus 2
+reopenings). Coordinator verified every premise against code with
+executable probes where applicable.
+
+FIXED this round (fail-closed, with regression tests):
+
+- #71 (CRITICAL): `risk_fn=None` / `unclassified` executed candidates.
+  Probed `ok=True` + worker called; now fails at `risk` with zero
+  worker use. `pipeline.py`, tests in `test_qa_pipeline.py` +
+  `test_pipeline.py` (old fail-open test rewritten to the new
+  contract).
+- #72 (CRITICAL): `tests={}` / `None` returned `ok=True` with zero
+  checks. Now fails at `tests`. `pipeline.py`, tests added.
+- #75 (CRITICAL): missing `sandbox.py` silently ran unsandboxed.
+  `_sandbox_prelude` now raises when sandboxing is requested but the
+  module is absent. `workers.py`, test added.
+- #78 (MEDIUM): performance stage passed with samples but no budget.
+  Now records `measured: True` and FAILS (measurement is not
+  verification). `pipeline.py`, test added.
+- #79 (MEDIUM): `StateSandbox.connection` exposed the raw sqlite3
+  handle (zero in-repo users). Removed. `effects.py`, test added.
+- #1 (reopen, HIGH): interleaved READ/EVAL let an evaluated form
+  re-enable `#.` for later reads. `graygoo-eval-all` now reads ALL
+  forms under `*read-eval* NIL` before evaluating any. `workers.py`
+  template, live SBCL regression test added.
+- #46 (P0, kept): worker inherited the full coordinator env. `Popen`
+  now uses `_sanitized_env()` (allowlist: SYSTEMROOT/WINDIR/PATH/
+  PATHEXT/TEMP/TMP). `workers.py`, tests added; full worker suite
+  proves SBCL still starts.
+
+ACCEPTED, documented, not yet fixed:
+
+- #73 (HIGH) parser differential (Python scan vs SBCL read): real;
+  fix is the canonical-emitter architecture the issue proposes —
+  project-scale, tracked for the hardening milestone.
+- #74 (HIGH) `eval`-quoted hard-deny bypass: premise verified
+  (`_payload_walk` skips quoted subtrees); fix direction (eval-family
+  unrehearsable or stronger boundary) is a policy change needing a
+  deliberate decision — recorded, not unilaterally changed.
+- #76 (HIGH) caller prelude runs post-lockdown: order verified;
+  reorder is risky (trusted setup may need pre-lockdown authority),
+  so the trust boundary is now explicit in the `run_lisp` docstring
+  (trusted-kernel preludes only). Full lockdown-last reorder is
+  future work.
+- #77 (HIGH) perf stage measures SBCL startup: real, independently
+  corroborated by `documents/ttvm.md` (worker share is an upper
+  bound); fix needs in-worker candidate timing transport — future
+  work.

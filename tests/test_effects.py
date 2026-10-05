@@ -202,6 +202,11 @@ class StateSandboxTest(unittest.TestCase):
         return [row[0] for row in (db or self.db).query(
             "SELECT name FROM items ORDER BY id")]
 
+    def test_no_raw_connection_escape_hatch(self):
+        # Issue 79: the raw sqlite3 connection must not be exposed;
+        # external COMMIT/ROLLBACK would desync savepoint bookkeeping.
+        self.assertFalse(hasattr(self.db, "connection"))
+
     def test_rollback_leaves_no_trace(self):
         self.db.begin()
         self.db.execute("INSERT INTO items (name) VALUES (?)", ("ghost",))

@@ -346,11 +346,6 @@ class StateSandbox:
         """Current transaction nesting depth (0 = idle)."""
         return len(self._savepoints)
 
-    @property
-    def connection(self):
-        """The underlying sqlite3 connection (escape hatch for power users)."""
-        return self._conn
-
     def begin(self):
         """Open a transaction (or nested savepoint); return the new depth."""
         if not self._savepoints:
