@@ -264,17 +264,17 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] Control worker network egress (remove socket primitives or firewall worker identity)
   - [ ] Re-run adversarial suite until all attacks fail safely
 
-- [ ] **Fix QA findings (qa-report 2026-10-05)**
+- [x] **Fix QA findings (qa-report 2026-10-05)**
   - [x] QA-01: coerce non-string recorded output in runner exact compare
   - [x] QA-02: runner exits nonzero when filter selects zero tasks
-  - [ ] QA-03: pipeline fails on unknown stage names
-  - [ ] QA-04: normalize worker return_value comparison in pipeline checks
+  - [x] QA-03: pipeline fails on unknown stage names
+  - [x] QA-04: normalize worker return_value comparison in pipeline checks
   - [x] QA-05: collision-proof promotion version filenames
   - [x] QA-06: promotion ledger outage returns reject dict (fail closed)
   - [x] QA-07: risk scan value-position atoms, not just head position
   - [x] QA-08: flag mutation targets naming core dynamic forms
   - [x] QA-09: reject promotion on corrupt versions/epochs state
-  - [ ] QA-10: fail (or skip explicitly) stages running zero checks
+  - [x] QA-10: fail (or skip explicitly) stages running zero checks
   - [x] QA-11: depth guard in risk walker
   - [x] QA-12: type-check check values in runner validate_tasks
 

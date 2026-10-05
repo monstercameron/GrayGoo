@@ -87,13 +87,30 @@ def _run_worker(worker_fn, code):
     return passed, record
 
 
+def _return_values_match(actual, expected):
+    """True when a worker ``return_value`` matches the expected value.
+
+    The real worker always reports ``return_value`` as a PRIN1 string
+    (e.g. ``"3"``), so a raw ``==`` against a numeric ``expect`` (``3``)
+    can never pass. Compare printed representations as a fallback so
+    equivalent numeric expects match the real envelope.
+    """
+    if actual == expected:
+        return True
+    try:
+        return str(actual).strip() == str(expected).strip()
+    except Exception:  # noqa: BLE001 - unprintable values simply mismatch
+        return False
+
+
 def _eval_code_item(item, worker_fn):
     """Evaluate one direct/regression/property item.
 
     An item is either a ``str`` of code (passes when the worker envelope
     reports ``ok`` without timeout) or a ``{"code", "expect"?}`` dict
-    (additionally requires ``return_value == expect``; the ``"expected"``
-    spelling is accepted as an alias).
+    (additionally requires ``return_value`` to match ``expect`` under
+    :func:`_return_values_match`; the ``"expected"`` spelling is
+    accepted as an alias).
     """
     if isinstance(item, str):
         return _run_worker(worker_fn, item)
@@ -108,7 +125,7 @@ def _eval_code_item(item, worker_fn):
         return passed, record
     if "expect" in item or "expected" in item:
         expected = item.get("expect", item.get("expected"))
-        if record.get("return_value") != expected:
+        if not _return_values_match(record.get("return_value"), expected):
             record = dict(record)
             record["pass"] = False
             record["error"] = "return_value %r != expected %r" % (
@@ -120,7 +137,10 @@ def _eval_code_item(item, worker_fn):
 
 
 def _run_item_stage(items, worker_fn):
-    """Run a list of code items; returns ``(passed, evidence)``."""
+    """Run a list of code items; returns ``(passed, evidence)``.
+
+    A stage that runs zero items fails instead of passing vacuously.
+    """
     if isinstance(items, (str, dict)):
         items = [items]
     evidence_items = []
@@ -136,6 +156,9 @@ def _run_item_stage(items, worker_fn):
         "failed": failures,
         "items": evidence_items,
     }
+    if not evidence_items:
+        evidence["error"] = "stage ran zero items; empty check list fails"
+        return False, evidence
     return failures == 0, evidence
 
 
@@ -196,6 +219,11 @@ def check_differential(parsed, spec, worker_fn):
     if not isinstance(cases, (list, tuple)):
         return False, {"error": "differential cases must be a list, got %r"
                        % (cases,)}
+    if len(cases) == 0:
+        return False, {"total": 0, "divergences": 0, "errors": 0,
+                       "cases": [],
+                       "error": "differential ran zero cases; "
+                       "empty check list fails"}
     evidence_cases = []
     divergences = 0
     errors = 0
@@ -246,7 +274,8 @@ def check_performance(parsed, spec, worker_fn):
     are code snippets executed in workers (their ``elapsed_ms`` is
     measured), ``samples`` are pre-measured ``elapsed_ms`` numbers.
     Any sample exceeding ``budget_ms`` fails the stage. With no budget
-    the stage records its samples and passes.
+    the stage records its samples and passes. A spec that yields zero
+    samples fails instead of passing vacuously.
     """
     del parsed
     if not isinstance(spec, dict):
@@ -281,6 +310,9 @@ def check_performance(parsed, spec, worker_fn):
         "errors": errors,
     }
     if errors:
+        return False, evidence
+    if not samples:
+        evidence["error"] = "performance ran zero samples; empty check list fails"
         return False, evidence
     if violations:
         return False, evidence
@@ -321,7 +353,8 @@ def run_candidate(candidate_text, *, tests, worker_fn, risk_fn=None):
     :param candidate_text: raw ``(candidate ...)`` S-expression text.
     :param tests: mapping of stage name to stage spec (``"direct"``,
         ``"regression"``, ``"property"``, ``"differential"``,
-        ``"performance"``); absent stages are skipped.
+        ``"performance"``); absent stages are skipped. Unknown stage
+        names fail the run instead of being silently ignored.
     :param worker_fn: injected ``worker_fn(code)`` callable returning the
         worker envelope.
     :param risk_fn: injected ``risk_fn(parsed)`` classifier, or ``None``.
@@ -428,6 +461,16 @@ def run_candidate(candidate_text, *, tests, worker_fn, risk_fn=None):
         _skip_rest(list(STAGE_ORDER)[1:],
                    "short-circuited after invalid tests mapping")
         return _finish(False, "direct", failures[-1]["reason"])
+    unknown = sorted((k for k in tests if k not in STAGE_ORDER), key=repr)
+    if unknown:
+        reason = "unknown stage(s): %s; known stages: %s" % (
+            ", ".join(repr(k) for k in unknown), ", ".join(STAGE_ORDER))
+        evidence["unknown_stages"] = list(unknown)
+        failed_name = unknown[0] if isinstance(unknown[0], str) else "tests"
+        _fail(failed_name, reason)
+        _skip_rest(list(STAGE_ORDER),
+                   "short-circuited after unknown stage key(s)")
+        return _finish(False, failed_name, reason)
     ran_any = False
     for position, name in enumerate(STAGE_ORDER):
         if name not in tests or tests[name] is None:
