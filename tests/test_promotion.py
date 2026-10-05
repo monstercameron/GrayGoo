@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import promotion
 import risk
+import transfer
 from evaluator import service as evaluator_service
 from events import EventLedger
 
@@ -195,6 +196,63 @@ class PromotionGateTest(unittest.TestCase):
         self.assertEqual(again["decision"], "reject")
         self.assertTrue(any("immutable" in r.lower()
                             for r in again["reasons"]))
+
+    # -- transfer corroboration (issue 63) -----------------------------------
+
+    def _recorded_tracker(self, rows):
+        tracker = transfer.TransferTracker()
+        for row in rows:
+            tracker.record_outcome(dict(row, patch_id="cand-1"))
+        return tracker
+
+    def test_fabricated_transfer_rows_rejected_with_tracker(self):
+        tracker = self._recorded_tracker(good_transfer_outcomes())
+        forged = good_transfer_outcomes() + [
+            {"patch_id": "cand-1", "task_id": "ghost-task",
+             "helped": True, "tokens_saved": 999.0,
+             "latency_saved_ms": 999.0}]
+        evidence = green_evidence(transfer={"outcomes": forged})
+        result = promotion.evaluate_promotion(
+            "cand-1", evidence, generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions,
+            transfer_tracker=tracker)
+        self.assertEqual(result["decision"], "reject")
+        self.assertTrue(any("corroborat" in r.lower()
+                            for r in result["reasons"]))
+        self.assertFalse(os.path.exists(self.versions))
+
+    def test_flipped_helped_bit_rejected_with_tracker(self):
+        rows = good_transfer_outcomes()
+        tracker = self._recorded_tracker(rows)
+        flipped = [dict(rows[0], helped=False)] + rows[1:]
+        evidence = green_evidence(transfer={"outcomes": flipped})
+        result = promotion.evaluate_promotion(
+            "cand-1", evidence, generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions,
+            transfer_tracker=tracker)
+        self.assertEqual(result["decision"], "reject")
+        self.assertTrue(any("corroborat" in r.lower()
+                            for r in result["reasons"]))
+
+    def test_recorded_rows_promote_with_tracker(self):
+        rows = good_transfer_outcomes()
+        tracker = self._recorded_tracker(rows)
+        evidence = green_evidence(transfer={"outcomes": rows})
+        result = promotion.evaluate_promotion(
+            "cand-1", evidence, generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions,
+            transfer_tracker=tracker)
+        self.assertEqual(result["decision"], "promote")
+
+    def test_subset_of_recorded_rows_promote_with_tracker(self):
+        rows = good_transfer_outcomes(4)
+        tracker = self._recorded_tracker(rows)
+        evidence = green_evidence(transfer={"outcomes": rows[:3]})
+        result = promotion.evaluate_promotion(
+            "cand-1", evidence, generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions,
+            transfer_tracker=tracker)
+        self.assertEqual(result["decision"], "promote")
 
     # -- rollback ------------------------------------------------------------
 

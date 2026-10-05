@@ -217,6 +217,42 @@ def _transfer_outcomes_of(evidence):
     return None
 
 
+def _corroborated_by_tracker(outcomes, tracker, candidate_id):
+    """Check caller transfer rows against tracker-recorded outcomes.
+
+    Returns ``(True, "")`` when every caller row matches a recorded
+    row for ``candidate_id`` on ``(task_id, helped)``, else
+    ``(False, reason)`` naming the first uncorroborated row. A caller
+    may submit a subset of recorded rows (conservative); it may not
+    invent rows the tracker never recorded (issues.md #63).
+    """
+    get = getattr(tracker, "get_outcomes", None)
+    if not callable(get):
+        return False, "transfer_tracker provides no get_outcomes"
+    try:
+        recorded = get(candidate_id) or []
+    except Exception as exc:
+        return False, "transfer tracker unreadable: %s" % (exc,)
+    recorded_keys = set()
+    for row in recorded:
+        if isinstance(row, dict):
+            recorded_keys.add((row.get("task_id"),
+                               bool(row.get("helped",
+                                            row.get("success", False)))))
+    for index, row in enumerate(outcomes):
+        if not isinstance(row, dict):
+            return False, "row %d is not an outcome dict" % index
+        key = (row.get("task_id"),
+               bool(row.get("helped", row.get("success", False))))
+        if key[0] is None:
+            return False, "row %d carries no task_id" % index
+        if key not in recorded_keys:
+            return False, ("row %d (task_id=%r, helped=%r) matches no "
+                           "tracker-recorded outcome" % (index, key[0],
+                                                         key[1]))
+    return True, ""
+
+
 def _checked_fresh(fresh):
     """Normalize a fresh-eval spec; raise ValueError when malformed."""
     if not isinstance(fresh, dict):
@@ -321,7 +357,8 @@ def _append_ledger(ledger, event_type, candidate_id, capability_id, version,
 
 def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
                        versions_dir=None, service_path=None,
-                       evaluator_timeout=60, fresh=None):
+                       evaluator_timeout=60, fresh=None,
+                       transfer_tracker=None):
     """Decide whether *candidate_id* may be promoted.
 
     *evidence* carries the promotion inputs (plan.md section 28)::
@@ -344,6 +381,14 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
     :func:`fetch_fresh_inputs`) with the outputs submitted in
     ``evidence["outputs"]``. Missing fresh outputs fail like any other
     missing output. A malformed spec rejects (fail closed).
+
+    ``transfer_tracker`` (optional, issues.md #63) is a
+    ``transfer.TransferTracker`` holding recorded reuse outcomes.
+    When provided, every caller-submitted transfer row must match a
+    recorded row on ``(task_id, helped)`` or promotion rejects —
+    fabricated rows cannot sail the gate. When omitted, transfer rows
+    are caller-asserted (legacy behavior; wire a tracker in
+    production).
 
     Returns ``{"decision": "promote"|"reject", "reasons": [...],
     "version": int|None, "epoch": int|None}``. Rejections always carry
@@ -406,6 +451,13 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
     outcomes = _transfer_outcomes_of(evidence)
     transfer_metrics = None
     if outcomes is not None:
+        if transfer_tracker is not None:
+            corroborated, why = _corroborated_by_tracker(
+                outcomes, transfer_tracker, candidate_id)
+            if not corroborated:
+                return reject(
+                    "transfer evidence not corroborated by tracker: %s"
+                    % (why,), capability_id)
         transfer_result = _transfer.promote_or_hold(
             candidate_id, outcomes,
             baseline_success=(evidence.get("transfer_baseline_success", 0.0)
