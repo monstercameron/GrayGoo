@@ -1,8 +1,12 @@
-;;;; src/kernel/effects.lisp — Effect categories and declaration checking.
+;;;; src/kernel/effects.lisp — Effect vocabulary + declaration checking.
 ;;;;
 ;;;; Plan reference: plan.md §22 (effect system), §23 (effect
-;;;; virtualization). Generated code must declare its effects; rehearsal
-;;;; virtualizes every non-pure effect.
+;;;; virtualization). This file validates declaration SHAPE (known
+;;;; keywords, :PURE exclusivity). Observed-vs-declared enforcement —
+;;;; rejecting operations the candidate did not declare (issues.md
+;;;; #48) — lives in the Python broker layer effects.py (EffectGrant,
+;;;; OverlayFS, DenyNetwork, StateSandbox), which interposes on every
+;;;; operation; nothing in-image can reliably self-report.
 
 (in-package :evo.effects)
 
@@ -17,8 +21,14 @@
   (and (member effect *known-effects*) t))
 
 (defun check-declared-effects (declared)
-  "Validate a DECLARED effect list. Signals an error on unknown effects.
-Returns DECLARED unchanged when valid."
-  (dolist (effect declared declared)
+  "Validate a DECLARED effect list. Signals an error on unknown effects
+and on contradictory declarations (:PURE alongside any other effect).
+Returns DECLARED unchanged when valid. Shape-only (issues.md #48):
+observed-vs-declared enforcement lives in effects.py."
+  (dolist (effect declared)
     (unless (known-effect-p effect)
-      (error "Unknown declared effect: ~S." effect))))
+      (error "Unknown declared effect: ~S." effect)))
+  (when (and (member :pure declared)
+             (> (length (remove-duplicates declared)) 1))
+    (error "Contradictory effects: :PURE must be the sole declared effect."))
+  declared)

@@ -21,6 +21,7 @@ Reference runtime: SBCL 2.6.9 (repo standard). Locate it the same way
 | `capability-identity.lisp` | #15 stable UUID ids + display names | mint/validate, constructor defaults, explicit identity, derivation inheritance, registry save/load round-trip in `%TEMP%` |
 | `persistence-integrity.lisp` | #42–#45 registry persistence | package-escaped filenames, write-once versions, temp+rename, FNV integrity hash, tamper refusal, `.tmp` invisibility |
 | `capability-model.lisp` | #49–#54 model + registry | explicit-NIL clearing, risk validation, lifecycle monotonicity, lineage validation, atomic concurrent versions, order-free reload |
+| `kernel-stubs.lisp` | #47–#48 honesty boundaries | advisory-flag limitation pinned, pure-exclusivity + vocabulary validation |
 | `schema-stubs.lisp` | #18 migration design, evolution disabled | flag on, `apply-migration` refuses, inert design records, compatibility stub verdicts |
 
 ## Run them

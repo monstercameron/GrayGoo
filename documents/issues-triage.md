@@ -160,8 +160,23 @@ probes and fixed:
   12/12 suite, #61 wired fingerprint + 12/12, #62 distinct-task
   counting, #64/#65 dashboard-only metrics + dead Lisp).
 
-Still REAL, not yet fixed: #47/#48 (Lisp security/effects stubs),
-#66-70 (provenance/metrics/source-of-truth).
+Still REAL, not yet fixed: #66-70 (provenance/metrics/source-of-truth).
+
+## Round 8 (2026-10-05): issues #47-48
+
+- #47 (CRITICAL): verified zero code callers — the flag guards
+  nothing. No in-image behavioral fix exists (any lock is rebindable
+  by definition), so: headers now state NOT-A-BOUNDARY with pointers
+  to the real layers (sandbox.py, worker sandbox, workers.py,
+  risk.py), and new probe `kernel-stubs.lisp` PINS the limitation
+  (rebinding defeats the flag) so nobody builds on it.
+- #48 (HIGH): declaration contradictions now rejected
+  (`:pure` must be exclusive); unknown keywords still rejected.
+  Observed-vs-declared enforcement stays in effects.py (25 tests);
+  headers document the split. Probe covers both.
+- Evidence: 9/9 probes PASS (incl. new 6-check probe), ASDF 25
+  packages. Full Lisp-side enforcement remains milestone-scale
+  (brokered handles, OS sandboxing) per adversarial-report.
 
 ## Round 7 (2026-10-05): issues #57-60
 

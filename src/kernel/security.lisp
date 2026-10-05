@@ -1,8 +1,14 @@
-;;;; src/kernel/security.lisp — Permission-enforcement surface (bootstrap stub).
+;;;; src/kernel/security.lisp — Permission vocabulary (NOT a boundary).
 ;;;;
 ;;;; Plan reference: plan.md §56 (security model), §58-60 (filesystem,
-;;;; network, resource limits). Generated code gets no ambient authority;
-;;;; real enforcement (brokered handles, OS sandboxing) arrives later.
+;;;; network, resource limits). THIS FILE IS NOT A SECURITY BOUNDARY
+;;;; (issues.md #47): *RESTRICTED* is an advisory dynamic flag any
+;;;; in-image code can rebind, and DENY-BY-DEFAULT only fires when
+;;;; called voluntarily. Real enforcement lives in sandbox.py (static
+;;;; hard-deny), src/worker/worker.lisp INSTALL-WORKER-SANDBOX
+;;;; (in-image clobbering), workers.py (process isolation, sanitized
+;;;; env), and risk.py (classification gates) — see
+;;;; documents/adversarial-report.md. Do not build checks on this flag.
 
 (in-package :evo.security)
 
