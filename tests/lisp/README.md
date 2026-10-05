@@ -19,6 +19,7 @@ Reference runtime: SBCL 2.6.9 (repo standard). Locate it the same way
 | `epoch-rollback.lisp` | #17 rollback visibility | instant pointer move, pinned epochs unaffected, re-promotion, nothing deleted |
 | `dispatch-concurrency.lisp` | #16 control-plane lock | 4 threads × 60 register/promote/invoke/pin cycles, all `:OK`, pins drain to zero |
 | `capability-identity.lisp` | #15 stable UUID ids + display names | mint/validate, constructor defaults, explicit identity, derivation inheritance, registry save/load round-trip in `%TEMP%` |
+| `persistence-integrity.lisp` | #42–#45 registry persistence | package-escaped filenames, write-once versions, temp+rename, FNV integrity hash, tamper refusal, `.tmp` invisibility |
 | `schema-stubs.lisp` | #18 migration design, evolution disabled | flag on, `apply-migration` refuses, inert design records, compatibility stub verdicts |
 
 ## Run them

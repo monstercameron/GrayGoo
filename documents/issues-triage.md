@@ -129,6 +129,41 @@ FIXED this round (fail-closed, with regression tests):
   prefers it (fallback: driver wall time). `workers.py`,
   `pipeline.py`, 4 tests added (2 live SBCL, 2 preference/fallback).
 
+## Round 4 (2026-10-05): issues #41-70 triage + top fixes
+
+Triage lane checked all 29 against current code (offline probes):
+REAL 23 · ALREADY-FIXED 5 (#41, #61, #62, #64, #65) · DUPLICATE 1
+(#55→#42) · INVALID 0. Coordinator verified the top items with own
+probes and fixed:
+
+- #56 (HIGH): worker envelope spoofable — PROVEN live (`ok=True`,
+  `return_value='SPOOFED'` even sandboxed: fake envelope via
+  unbound `*terminal-io*` + first-marker-wins + in-image fingerprint
+  read). Fixed: bind `*terminal-io*` to captured output + last-pair
+  envelope parsing (real prints last). 5 tests (2 live SBCL spoof
+  defeats, 3 parser unit). Residual (documented): no in-band secret
+  can authenticate when attacker shares image+stream; sleeper
+  threads / exotic raw fds remain theoretical post-daters.
+- #63 (HIGH): transfer rows caller-fabricated. Fixed:
+  `evaluate_promotion(..., transfer_tracker=...)` corroborates every
+  row against tracker-recorded `(task_id, helped)`; uncorroborated
+  rows reject. Opt-in (legacy callers unchanged); 4 tests.
+- #42/#43/#44/#45 (HIGH): registry persistence — package-escaped
+  filenames (cross-package collision gone), write-once versions
+  (identical re-save idempotent, differing overwrite errors),
+  temp+rename atomic writes (`.tmp` invisible to the registry glob),
+  FNV-1a integrity hash with v2 format (legacy v1 loads with a
+  warning). New SBCL probe `persistence-integrity.lisp` (7 checks);
+  all 7 Lisp probes PASS. Hash is corruption-detection, not a MAC
+  (stated in code).
+- Already-fixed claims accepted on triage evidence (#41 gate logic +
+  12/12 suite, #61 wired fingerprint + 12/12, #62 distinct-task
+  counting, #64/#65 dashboard-only metrics + dead Lisp).
+
+Still REAL, not yet fixed: #47/#48 (Lisp security/effects stubs),
+#49-54 (capability-model validation), #57-60 (worker protocol
+semantics/compile), #66-70 (provenance/metrics/source-of-truth).
+
 ACCEPTED, documented, not yet fixed:
 
 - #73 (HIGH) parser differential (Python scan vs SBCL read): real;

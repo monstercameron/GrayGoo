@@ -101,13 +101,58 @@ plist shape. Signals an error when STABLE-ID is malformed."
   (ensure-directories-exist (merge-pathnames #P"dummy" dir))
   dir)
 
+(defun %filename-escape (name)
+  "Downcase NAME, replacing every non-alphanumeric char with underscore."
+  (with-output-to-string (out)
+    (loop for ch across (string-downcase (string name))
+          do (write-char (if (alphanumericp ch) ch #\_) out))))
+
 (defun version-pathname (id version &optional (dir *registry-data-dir*))
-  "Pathname of the persisted file for ID at VERSION under DIR."
+  "Pathname of the persisted file for ID at VERSION under DIR.
+
+The file name embeds the escaped package identity
+(issues.md #42): PACKAGE-A:FOO and PACKAGE-B:FOO persist to
+different files. Uninterned symbols use the NIL-PACKAGE marker."
   (merge-pathnames (make-pathname
-                    :name (format nil "~A-v~D"
-                                  (string-downcase (symbol-name id)) version)
+                    :name (format nil "~A--~A-v~D"
+                                  (%filename-escape (symbol-name id))
+                                  (%filename-escape
+                                   (or (and (symbol-package id)
+                                            (package-name
+                                             (symbol-package id)))
+                                       "nil-package"))
+                                  version)
                     :type "lisp")
                    dir))
+
+(defun %fnv1a-64 (string)
+  "FNV-1a 64-bit checksum of STRING, as an unsigned integer.
+Pure Lisp, no dependencies. Corruption detection, NOT a cryptographic
+MAC: adversarial integrity needs the OS/user separation layer."
+  (let ((hash #xCBF29CE484222325))
+    (loop for ch across string
+          do (setf hash (logxor hash (char-code ch))
+                   hash (logand #xFFFFFFFFFFFFFFFF
+                                (* hash #x100000001B3))))
+    hash))
+
+(defun %serialize (object)
+  "Deterministic readable serialization of OBJECT for hashing/storage."
+  (let ((*print-readably* t)
+        (*print-pretty* t)
+        (*print-right-margin* 80)
+        (*print-base* 10)
+        (*print-radix* nil)
+        (*print-case* :upcase)
+        (*print-length* nil)
+        (*print-level* nil)
+        (*print-circle* t)
+        (*package* (find-package :cl-user)))
+    (write-to-string object :readably t :pretty t)))
+
+(defun payload-hash (payload)
+  "Hex integrity checksum (issues.md #45) for a capability payload plist."
+  (format nil "~16,'0X" (%fnv1a-64 (%serialize payload))))
 
 (defun capability->plist (capability)
   "Serialize CAPABILITY to a printable plist (plan.md §43).
@@ -155,11 +200,31 @@ time are interned in CL-USER."
         ((find-package package-name) (intern name package-name))
         (t (intern name :cl-user))))
 
+(declaim (ftype (function (t) t) %plist->capability-v1))
+
 (defun plist->capability (plist)
+  "Rebuild a capability struct from a persisted plist.
+
+Format 2 (current): verifies :CONTENT-HASH over :PAYLOAD first and
+signals an error on mismatch (issues.md #45). Format 1 (legacy):
+loads with a warning and no verification; re-save to upgrade."
+  (let ((version (getf plist :format-version)))
+    (cond ((eql version 2)
+           (let ((payload (getf plist :payload))
+                 (expected (getf plist :content-hash)))
+             (unless (and (stringp expected)
+                          (string= expected (payload-hash payload)))
+               (error "Capability payload hash mismatch: file corrupt ~
+                       or tampered (issues.md #45)."))
+             (%plist->capability-v1 payload)))
+          ((eql version 1)
+           (warn "Loading legacy v1 capability file without integrity ~
+                  hash; re-save to upgrade to v2.")
+           (%plist->capability-v1 plist))
+          (t (error "Unsupported capability plist format: ~S." version)))))
+
+(defun %plist->capability-v1 (plist)
   "Rebuild a capability struct from a CAPABILITY->PLIST plist."
-  (unless (eql (getf plist :format-version) 1)
-    (error "Unsupported capability plist format: ~S."
-           (getf plist :format-version)))
   (let ((intent-plist (getf plist :intent))
         (contract-plist (getf plist :contract)))
     (evo.capability:make-capability
@@ -186,21 +251,50 @@ time are interned in CL-USER."
      :stable-id (getf plist :stable-id)
      :display-name (getf plist :display-name))))
 
+(defun %read-file-string (path)
+  "Read the whole text file at PATH into a string."
+  (with-open-file (in path :direction :input :external-format :utf-8)
+    (let ((out (make-string-output-stream)))
+      (loop for ch = (read-char in nil nil)
+            while ch do (write-char ch out))
+      (get-output-stream-string out))))
+
 (defun save-capability (capability &optional (dir *registry-data-dir*))
   "Persist CAPABILITY to a printable file under DIR; return the pathname.
-Signals a print error when any field is not readably printable."
+Signals a print error when any field is not readably printable.
+
+Version files are write-once (issues.md #43): an existing file with
+identical bytes returns the path (idempotent re-save); an existing
+file with different bytes signals an error instead of overwriting.
+Writes go to a same-directory temp file (type TMP, invisible to the
+*.lisp registry glob) and are renamed into place (issues.md #44), so
+a crash can leave a stray temp but never a half-written version."
   (ensure-data-dir dir)
-  (let ((path (version-pathname (evo.capability:capability-id capability)
-                                (evo.capability:capability-version capability)
-                                dir)))
-    (with-open-file (out path :direction :output :if-exists :supersede
-                              :external-format :utf-8)
-      (let ((*print-readably* t)
-            (*print-pretty* t)
-            (*package* (find-package :cl-user)))
-        (write (capability->plist capability) :stream out
-               :readably t :pretty t)
-        (terpri out)))
+  (let* ((path (version-pathname (evo.capability:capability-id capability)
+                                 (evo.capability:capability-version capability)
+                                 dir))
+         (payload (capability->plist capability))
+         (document (list :format-version 2
+                         :content-hash (payload-hash payload)
+                         :payload payload))
+         (bytes (concatenate 'string (%serialize document)
+                             (string #\Newline))))
+    (when (probe-file path)
+      (if (string= (%read-file-string path) bytes)
+          (return-from save-capability path)
+          (error "Version file exists and differs: ~A is immutable ~
+                  (issues.md #43)." path)))
+    (let ((tmp (make-pathname :name (format nil "~A-tmp-~D-~D"
+                                            (pathname-name path)
+                                            (get-universal-time)
+                                            (random 1000000))
+                              :type "tmp"
+                              :defaults path)))
+      (with-open-file (out tmp :direction :output :if-exists :supersede
+                                :external-format :utf-8)
+        (write-string bytes out)
+        (finish-output out))
+      (rename-file tmp path))
     path))
 
 (defun load-capability (id version &optional (dir *registry-data-dir*))
