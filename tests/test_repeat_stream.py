@@ -69,6 +69,28 @@ class RepeatStreamTest(unittest.TestCase):
         self.assertEqual(rows[0]["library_size"],
                          rows[2]["library_size"])
 
+    def test_churn_retires_never_hit_patches(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = os.path.join(tmp.name, "artifacts")
+
+        def make_inner():
+            return runner.StubAdapter(Path(RECORDED))
+
+        # Round 1 stores tasks 1-2; round 2 churns to 3-4 (no repeats);
+        # retiring after round 2 must drop the never-hit round-1
+        # patches; round 3 repeats 3-4 and must still hit them.
+        payload = repeat_stream.run_stream(
+            _exposure_tasks(4), out, make_inner,
+            rounds=("1-2", "3-4", "3-4"), retire_unused_after=2)
+        first, second, third = payload["round_rows"]
+        self.assertEqual(first["stored"], 4)
+        self.assertEqual(second["retired"], 4)
+        self.assertEqual(second["library_size"], 8 - 4)
+        self.assertEqual(third["fast_path_hits"], 4)
+        self.assertEqual(third["hit_helped"], 4)
+        self.assertEqual(third["passed"], third["tasks"])
+
     def test_summary_json_written(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

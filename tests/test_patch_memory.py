@@ -87,6 +87,19 @@ class FindFastPathTest(unittest.TestCase):
         self.assertIsNone(self.mem.find_fast_path(
             task, history=self.history, check_input="IN-1"))
 
+    def test_retired_patch_is_invisible_to_reuse(self):
+        import consolidate
+        self.assertTrue(self.mem.has_check("A-EXP-07", 0))
+        report = consolidate.retire(
+            self.mem.store, [self.patch["patch_id"]])
+        self.assertEqual(report["count"], 1)
+        self.assertFalse(self.mem.has_check("A-EXP-07", 0))
+        self.assertEqual(self.mem.capability_count(), 0)
+        self.assertEqual(self.mem.retrieve(_transfer_task()), [])
+        self.assertIsNone(self.mem.find_fast_path(
+            _transfer_task(), history=self.history,
+            check_input="IN-1"))
+
 
 if __name__ == "__main__":
     unittest.main()

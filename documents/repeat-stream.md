@@ -71,5 +71,37 @@ stays closed; see `documents/core-experiment-gate.md`.
 
 Cost: prefix run 62 assisted calls ≈ $0.0087 (usage zeroed by the
 key bug; estimated at the measured $0.0001405/call) + 2 × $0.005198
-(37 calls each) ≈ **$0.019**. New-experiment spend this segment ≈
-**$0.062**; session total ≈ **$0.29 of the $50 cap**.
+(37 calls each) ≈ **$0.019**.
+
+## Churn + consolidation follow-up (same day)
+
+Second stream with task churn and `consolidate.retire` wired into
+the reuse path (previously retirement only marked status — retrieval
+never filtered it, so it was decorative; `retrieve`,
+`find_fast_path`, `capability_count`, and new `has_check` now all
+exclude retired patches):
+
+`--rounds 1-6,7-12,7-12 --retire-unused-after 2`
+(`artifacts/repeat-stream-churn/`, $0.0035).
+
+| Round | Tasks | Passed | Hits/helped | Stored | Retired | Lib | Calls/task |
+|---|---|---|---|---|---|---|---|
+| 1 | 1–6 | 6/6 | 0/0 | 12 | 0 | 12 | 2.000 |
+| 2 | 7–12 | 5/6 | 0/0 | 11 | 12 | 11 | 2.000 |
+| 3 | 7–12 | 5/6 | 11/11 | 0 | 0 | 11 | 0.167 |
+
+Round 2 churns to new tasks (0 repeats → 0 hits, correct), stores 11
+(EXP-08 fails as ever), then retires round 1's 12 never-hit patches:
+live library 12 → 11 despite 6 new tasks — growth CONTROLLED, not
+just concave. Round 3 repeats round 2: 11/11 hits help (fails only
+EXP-08), one $0.000096 round. Retired patches stay retired (same-task
++ input match no longer fires them — pinned by test), and
+`has_check` lets a churned task that reappears re-store instead of
+missing forever.
+
+This closes the gate doc's last open measurement: #6 now holds via
+dedup AND consolidation, with the policy (retire never-hit after one
+full round of chances) executed live, not just described.
+
+Spend tally: stream $0.019 + churn $0.0035. New-experiment total this
+segment ≈ **$0.066**; session total ≈ **$0.30 of the $50 cap**.

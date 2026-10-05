@@ -44,6 +44,7 @@ sys.path.insert(0, str(_ROOT))
 
 import runner  # noqa: E402
 import patch_memory_adapter as patch_mem_mod  # noqa: E402
+import consolidate as consolidate_mod  # noqa: E402
 from experiments.matched_rerun import FastPathAdapter  # noqa: E402
 
 DEFAULT_ROUNDS = (6, 12, 18)
@@ -75,18 +76,14 @@ def _empty_block(task):
                 "retrieval": "stream-from-scratch"}
 
 
-def _stored_keys(patch_mem):
-    keys = set()
-    for patch in patch_mem.store.list_patches():
-        candidate = patch.get("candidate", {}) or {}
-        if not isinstance(candidate, dict):
-            continue
-        keys.add((patch.get("task_id"), candidate.get("check")))
-    return keys
+def run_round(round_no, tasks, patch_mem, make_inner, out_dir,
+              stored_rounds=None, hit_patches=None):
+    """Run one round; return the round metrics dict.
 
-
-def run_round(round_no, tasks, patch_mem, make_inner, out_dir):
-    """Run one cumulative round; return the round metrics dict."""
+    ``stored_rounds`` (patch_id -> round stored) and ``hit_patches``
+    (patch_ids hit at least once) are updated in place for
+    retire-unused decisions across rounds.
+    """
     history = patch_mem.reuse_history()
     inner = RecordingAdapter(make_inner())
     adapter = FastPathAdapter(inner, patch_mem, history, _empty_block,
@@ -109,15 +106,19 @@ def run_round(round_no, tasks, patch_mem, make_inner, out_dir):
                 hit_helped += 1 if passed else 0
                 patch_id = info.get("patch_id")
                 if patch_id:
+                    if hit_patches is not None:
+                        hit_patches.add(patch_id)
                     patch = (patch_mem.store.get_patch(patch_id)
                              or {"patch_id": patch_id})
                     patch_mem.record_reuse(patch, task,
                                            helped=passed, hit=True)
             elif passed:
-                if (task["id"], j) not in _stored_keys(patch_mem):
+                if not patch_mem.has_check(task["id"], j):
                     output = inner.outputs.get((task["id"], j), "")
                     patch = patch_mem.add_success(
                         task, j, check["input"], output)
+                    if stored_rounds is not None:
+                        stored_rounds[patch.get("patch_id")] = round_no
                     patch_mem.record_reuse(
                         patch, task, helped=True, seeded=True)
                     stored += 1
@@ -143,29 +144,62 @@ def run_round(round_no, tasks, patch_mem, make_inner, out_dir):
     }
 
 
-def run_stream(tasks, out_root, make_inner, rounds=DEFAULT_ROUNDS):
-    """Run expanding cumulative rounds; write artifacts; return payload."""
+def _round_subset(tasks, spec):
+    """Task slice for a round spec: int N = prefix 1..N, "A-B" = slice."""
+    if isinstance(spec, int):
+        return tasks[:max(0, min(spec, len(tasks)))]
+    start, _, end = str(spec).partition("-")
+    lo = max(1, int(start)) - 1
+    hi = min(int(end), len(tasks))
+    return tasks[lo:max(lo, hi)]
+
+
+def run_stream(tasks, out_root, make_inner, rounds=DEFAULT_ROUNDS,
+               retire_unused_after=0):
+    """Run expanding rounds; write artifacts; return payload.
+
+    ``rounds`` items are prefix sizes (int) or "A-B" 1-based slices.
+    When ``retire_unused_after`` is K>0, after round K every patch
+    stored before round K with zero hits so far is retired via
+    ``consolidate.retire`` (growth control under churn); the count is
+    recorded on that round's row as ``"retired"``.
+    """
     out_root = Path(out_root)
     if out_root.exists():
         shutil.rmtree(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     patch_mem = patch_mem_mod.PatchMemory(str(out_root / "memory"))
+    stored_rounds = {}
+    hit_patches = set()
     round_rows = []
-    for i, size in enumerate(rounds, 1):
-        subset = tasks[:max(0, min(size, len(tasks)))]
-        row = run_round(i, subset, patch_mem, make_inner, out_root)
+    for i, spec in enumerate(rounds, 1):
+        subset = _round_subset(tasks, spec)
+        row = run_round(i, subset, patch_mem, make_inner, out_root,
+                        stored_rounds=stored_rounds,
+                        hit_patches=hit_patches)
+        retired = 0
+        if retire_unused_after and i == retire_unused_after:
+            stale = [pid for pid, stored_in in stored_rounds.items()
+                     if stored_in < i and pid not in hit_patches]
+            if stale:
+                report = consolidate_mod.retire(
+                    patch_mem.store, stale)
+                retired = report["count"]
+            row["library_size"] = patch_mem.capability_count()
+        row["retired"] = retired
         round_rows.append(row)
         with open(out_root / ("round-%d.json" % i), "w",
                   encoding="utf-8") as handle:
             json.dump(row, handle, indent=2)
-        print("round %d: %d/%d passed, %d hits, lib=%d, "
+        print("round %d: %d/%d passed, %d hits, lib=%d, retired=%d, "
               "calls/task=%.3f, tokens/task=%.1f" % (
                   i, row["passed"], row["tasks"],
-                  row["fast_path_hits"], row["library_size"],
+                  row["fast_path_hits"], row["library_size"], retired,
                   row["calls_per_task"], row["tokens_per_task"]),
               flush=True)
     payload = {"experiment": "repeat-stream",
                "rounds": [r for r in rounds],
+               "retire_unused_after": retire_unused_after,
                "round_rows": round_rows}
     with open(out_root / "summary.json", "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
@@ -183,14 +217,23 @@ def main(argv=None):
         _ROOT / "artifacts" / "repeat-stream"))
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--rounds", default=",".join(
-        str(r) for r in DEFAULT_ROUNDS))
+        str(r) for r in DEFAULT_ROUNDS),
+        help="comma list of prefix sizes (N) or 1-based slices (A-B)")
+    parser.add_argument("--retire-unused-after", type=int, default=0,
+                        help="retire never-hit patches after round K")
     args = parser.parse_args(argv)
 
     tasks = sorted(
         (t for t in runner.load_tasks(Path(args.tasks))
          if t.get("split") == "exposure"),
         key=lambda t: t["id"])
-    rounds = tuple(int(r) for r in args.rounds.split(",") if r.strip())
+
+    def _parse(spec):
+        spec = spec.strip()
+        return int(spec) if "-" not in spec else spec
+
+    rounds = tuple(_parse(r) for r in args.rounds.split(",")
+                   if r.strip())
 
     def make_inner():
         if args.adapter == "stub":
@@ -200,7 +243,8 @@ def main(argv=None):
             return runner.StubAdapter(Path(args.recorded))
         return runner.CerebrasAdapter(max_tokens=args.max_tokens)
 
-    run_stream(tasks, args.artifacts, make_inner, rounds=rounds)
+    run_stream(tasks, args.artifacts, make_inner, rounds=rounds,
+               retire_unused_after=args.retire_unused_after)
     return 0
 
 

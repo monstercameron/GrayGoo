@@ -79,5 +79,6 @@ remaining ~$49 budget):
    closed on held-out tasks. Needs repeated-input streams instead.
 4. ~~Multi-timepoint reuse/growth series~~ DONE
    (`documents/repeat-stream.md`): reuse 0%→50%→64%, growth concave
-   — via dedup-by-check, not consolidation. Consolidation-on growth
-   remains unmeasured (open).
+   via dedup — AND consolidation-on now measured too (churn stream:
+   12 retired, lib 12→11 under churn, 11/11 hits help). #6 holds via
+   both mechanisms.

@@ -35,6 +35,25 @@ from pathlib import Path
 _PatchStore = None
 _patches_import_error = None
 
+_is_retired = None
+
+
+def _get_is_retired():
+    """consolidate.is_retired, with a local fallback (same statuses)."""
+    global _is_retired
+    if _is_retired is not None:
+        return _is_retired
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import consolidate  # noqa: PLC0415
+        _is_retired = consolidate.is_retired
+    except Exception:
+        _is_retired = lambda record: (  # noqa: E731
+            isinstance(record, dict)
+            and record.get("status") in ("retired", "deprecated",
+                                         "expired"))
+    return _is_retired
+
 
 def _get_patch_store_cls():
     global _PatchStore, _patches_import_error
@@ -130,6 +149,11 @@ class PatchMemory:
         patches = self.store.find_for_task(
             task_family="A", tags=[category] if category else None
         )
+        # Retired patches are invisible to reuse: consolidate.retire()
+        # must actually remove them from the retrieval pool, not just
+        # mark them (repeat-stream churn experiment).
+        is_retired = _get_is_retired()
+        patches = [p for p in patches if not is_retired(p)]
         base = task.get("derived_from")
         if base:
             patches = sorted(
@@ -229,8 +253,11 @@ class PatchMemory:
             history = self.reuse_history()
         candidates = []
         seen = set()
+        is_retired = _get_is_retired()
         for patch in self.store.list_patches():
             if patch.get("task_id") == task.get("id"):
+                if is_retired(patch):
+                    continue
                 candidates.append(patch)
                 seen.add(patch.get("patch_id"))
         for patch in self.retrieve(task, limit=2):
@@ -264,9 +291,29 @@ class PatchMemory:
         return output if isinstance(output, str) else str(output)
 
     # -- library metrics ----------------------------------------------
+    def has_check(self, task_id, check):
+        """True when a LIVE patch stores (task_id, check).
+
+        Retired/expired exemplars do not count, so a churned task
+        that reappears re-stores instead of missing forever.
+        """
+        is_retired = _get_is_retired()
+        for patch in self.store.list_patches():
+            if is_retired(patch):
+                continue
+            if patch.get("task_id") != task_id:
+                continue
+            candidate = patch.get("candidate", {}) or {}
+            if isinstance(candidate, dict) and candidate.get(
+                    "check") == check:
+                return True
+        return False
+
     def capability_count(self):
-        """Number of live (unexpired) patches in the library."""
-        return len(self.store.list_patches())
+        """Number of live (unexpired, unretired) patches in the library."""
+        is_retired = _get_is_retired()
+        return sum(1 for p in self.store.list_patches()
+                   if not is_retired(p))
 
     def get_reuses(self):
         return self.store.get_reuses()
