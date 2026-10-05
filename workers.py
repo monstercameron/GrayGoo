@@ -215,7 +215,8 @@ this driver path; candidate-initiated reads are the candidate's own."
       (ok nil)
       (payload "")
       (bt "")
-      (user-out ""))
+      (user-out "")
+      (cand-ms 0))
   (let ((*standard-output* captured)
         (*error-output* captured)
         (*trace-output* captured)
@@ -228,10 +229,13 @@ this driver path; candidate-initiated reads are the candidate's own."
                  (graygoo-eval-all *graygoo-prelude*))
                nil))
           (if pre-ok
-              (multiple-value-bind (ok2 payload2 bt2)
-                  (evo.worker:run-test-thunk
-                   (lambda () (graygoo-eval-all *graygoo-code*)))
-                (setf ok ok2 payload payload2 bt bt2))
+              (let ((t0 (get-internal-real-time)))
+                (multiple-value-bind (ok2 payload2 bt2)
+                    (evo.worker:run-test-thunk
+                     (lambda () (graygoo-eval-all *graygoo-code*)))
+                  (setf ok ok2 payload payload2 bt bt2
+                        cand-ms (float (* 1000 (/ (- (get-internal-real-time) t0)
+                                                  internal-time-units-per-second))))))
               (setf ok nil
                     payload (concatenate 'string "prelude error: " pre-payload)
                     bt pre-bt)))
@@ -241,13 +245,14 @@ this driver path; candidate-initiated reads are the candidate's own."
               bt (graygoo-backtrace))))
     (setf user-out (get-output-stream-string captured)))
   (format real-out "~&@@BEGIN@@~%")
-  (format real-out "{\\"ok\\": ~A, \\"stdout\\": \\"~A\\", \\"return_value\\": \\"~A\\", \\"error\\": \\"~A\\", \\"backtrace\\": \\"~A\\", \\"fingerprint\\": \\"~A\\"}~%"
+  (format real-out "{\\"ok\\": ~A, \\"stdout\\": \\"~A\\", \\"return_value\\": \\"~A\\", \\"error\\": \\"~A\\", \\"backtrace\\": \\"~A\\", \\"fingerprint\\": \\"~A\\", \\"candidate_ms\\": ~A}~%"
           (if ok "true" "false")
           (graygoo-json-escape user-out)
           (graygoo-json-escape (if ok payload ""))
           (graygoo-json-escape (if ok "" payload))
           (graygoo-json-escape bt)
-          (graygoo-json-escape *graygoo-fingerprint*))
+          (graygoo-json-escape *graygoo-fingerprint*)
+          cand-ms)
   (format real-out "@@END@@~%")
   (finish-output real-out))
 (sb-ext:exit :code 0)
@@ -353,12 +358,16 @@ def run_lisp(code, *, timeout_s=10.0, memory_mb=512, prelude="", epoch_id="",
     root. Neither OS-confines the child (see :mod:`sandbox`).
 
     Returns exactly ``{"ok", "stdout", "return_value", "error",
-    "timed_out", "elapsed_ms"}``: ``ok`` is True only when the code ran
-    cleanly; ``stdout`` is the code's captured output; ``return_value``
-    is the PRIN1 string ("" unless ok); ``error`` holds the condition
-    plus backtrace ("" when ok); ``timed_out`` flags wall-clock expiry;
-    ``elapsed_ms`` is wall time. Worker-side failures never raise; only
-    API misuse (bad types, non-positive timeout/memory) raises.
+    "timed_out", "elapsed_ms", "candidate_ms"}``: ``ok`` is True only
+    when the code ran cleanly; ``stdout`` is the code's captured
+    output; ``return_value`` is the PRIN1 string ("" unless ok);
+    ``error`` holds the condition plus backtrace ("" when ok);
+    ``timed_out`` flags wall-clock expiry; ``elapsed_ms`` is driver
+    wall time (spawn + SBCL startup + candidate); ``candidate_ms`` is
+    the in-worker candidate-eval time (issues.md #77; None when the
+    worker never reached the candidate). Worker-side failures never
+    raise; only API misuse (bad types, non-positive timeout/memory)
+    raises.
     """
     if not isinstance(code, str):
         raise TypeError("code must be str, got %s" % type(code).__name__)
@@ -375,7 +384,8 @@ def run_lisp(code, *, timeout_s=10.0, memory_mb=512, prelude="", epoch_id="",
 
     started = time.perf_counter()
 
-    def _result(ok, stdout, return_value, error, timed_out):
+    def _result(ok, stdout, return_value, error, timed_out,
+                candidate_ms=None):
         return {
             "ok": ok,
             "stdout": stdout,
@@ -383,6 +393,7 @@ def run_lisp(code, *, timeout_s=10.0, memory_mb=512, prelude="", epoch_id="",
             "error": error,
             "timed_out": timed_out,
             "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+            "candidate_ms": candidate_ms,
         }
 
     exe = resolve_sbcl(sbcl_exe)
@@ -455,7 +466,14 @@ def run_lisp(code, *, timeout_s=10.0, memory_mb=512, prelude="", epoch_id="",
         return_value = ""
         error = ("generation fingerprint mismatch: expected %r, worker ran %r"
                  % (fingerprint, envelope.get("fingerprint", "")))
-    return _result(ok, stdout, return_value, error, False)
+    raw_candidate = envelope.get("candidate_ms")
+    candidate_ms = None
+    if isinstance(raw_candidate, bool):
+        pass
+    elif isinstance(raw_candidate, (int, float)) and raw_candidate >= 0:
+        candidate_ms = float(raw_candidate)
+    return _result(ok, stdout, return_value, error, False,
+                   candidate_ms=candidate_ms)
 
 
 class WorkerPool:

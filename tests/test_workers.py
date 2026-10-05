@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import workers
 
 SBCL_AVAILABLE = os.path.exists(workers.resolve_sbcl())
-RESULT_KEYS = {"ok", "stdout", "return_value", "error", "timed_out", "elapsed_ms"}
+RESULT_KEYS = {"ok", "stdout", "return_value", "error", "timed_out",
+               "elapsed_ms", "candidate_ms"}
 
 
 @unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
@@ -114,6 +115,24 @@ class SandboxPreludeTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             workers._sandbox_prelude(True, None)
         self.assertEqual(workers._sandbox_prelude(False, None), "")
+
+
+class CandidateTimingTest(unittest.TestCase):
+    @unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
+    def test_candidate_ms_excludes_spawn_overhead(self):
+        """Issue 77: in-worker time present and below wall time."""
+        result = workers.run_lisp("(+ 1 2)")
+        self.assertTrue(result["ok"], result)
+        candidate_ms = result["candidate_ms"]
+        self.assertIsInstance(candidate_ms, float)
+        self.assertGreaterEqual(candidate_ms, 0.0)
+        self.assertLess(candidate_ms, result["elapsed_ms"])
+
+    @unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
+    def test_failed_candidate_still_reports_time(self):
+        result = workers.run_lisp('(error "timed-boom")')
+        self.assertFalse(result["ok"])
+        self.assertIsInstance(result["candidate_ms"], float)
 
 
 @unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")

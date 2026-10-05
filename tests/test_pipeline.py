@@ -213,6 +213,33 @@ class RunCandidateTest(unittest.TestCase):
         self.assertEqual(result["verdict"]["failed_stage"], "performance")
         self.assertTrue(result["evidence"]["performance"]["measured"])
 
+    def test_performance_prefers_candidate_ms_over_wall(self):
+        # Issue 77: in-worker candidate time excludes spawn overhead.
+        def handler(code):
+            envelope = ok_envelope(elapsed_ms=500)
+            envelope["candidate_ms"] = 2.0
+            return envelope
+
+        result = pipeline.run_candidate(
+            GOOD_CANDIDATE,
+            tests={"performance": {"budget_ms": 100, "cases": ["(t)"]}},
+            worker_fn=CountingWorker(handler),
+            risk_fn=risk_r0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["evidence"]["performance"]["samples"],
+                         [2.0])
+
+    def test_performance_falls_back_to_elapsed_ms(self):
+        result = pipeline.run_candidate(
+            GOOD_CANDIDATE,
+            tests={"performance": {"budget_ms": 100, "cases": ["(t)"]}},
+            worker_fn=CountingWorker(lambda code: ok_envelope(
+                elapsed_ms=7)),
+            risk_fn=risk_r0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["evidence"]["performance"]["samples"],
+                         [7])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,8 @@ Contracts for the injected callables:
 
 * ``worker_fn(code)`` takes a ``str`` of code and returns the worker
   envelope dict ``{"ok", "stdout", "return_value", "error", "timed_out",
-  "elapsed_ms"}``.
+  "elapsed_ms", "candidate_ms?"}`` (``candidate_ms`` is the in-worker
+  candidate-eval time; older doubles may omit it).
 * ``risk_fn(parsed)`` takes the parsed-candidate dict from
   :func:`s_expr.parse_candidate` and returns a dict with at least
   ``"level"`` (``"R0"``..``"R6"`` per plan.md section 7). ``None``, a
@@ -79,6 +80,7 @@ def _run_worker(worker_fn, code):
     record = {
         "pass": passed,
         "elapsed_ms": result.get("elapsed_ms"),
+        "candidate_ms": result.get("candidate_ms"),
         "stdout": result.get("stdout"),
         "return_value": result.get("return_value"),
     }
@@ -271,8 +273,9 @@ def check_performance(parsed, spec, worker_fn):
     """Run performance checks against a wall-clock budget (plan.md G).
 
     ``spec`` is a ``{"budget_ms"?, "cases"?, "samples"?}`` dict: ``cases``
-    are code snippets executed in workers (their ``elapsed_ms`` is
-    measured), ``samples`` are pre-measured ``elapsed_ms`` numbers.
+    are code snippets executed in workers (their in-worker
+    ``candidate_ms`` is measured when reported, else driver
+    ``elapsed_ms``), ``samples`` are pre-measured numbers.
     Any sample exceeding ``budget_ms`` fails the stage. With no budget
     the stage records its samples (``measured: True``) and FAILS: a
     measurement without a threshold is not verification. A spec that
@@ -296,7 +299,13 @@ def check_performance(parsed, spec, worker_fn):
             errors.append("case %d failed: %s"
                           % (index, record.get("error", "worker failure")))
             continue
-        elapsed = record.get("elapsed_ms")
+        # Issues.md #77: prefer in-worker candidate time (excludes
+        # spawn + SBCL startup); fall back to driver wall time for
+        # workers that predate candidate_ms.
+        elapsed = record.get("candidate_ms")
+        if isinstance(elapsed, bool) or not isinstance(
+                elapsed, (int, float)):
+            elapsed = record.get("elapsed_ms")
         if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)):
             errors.append("case %d reported non-numeric elapsed_ms %r"
                           % (index, elapsed))

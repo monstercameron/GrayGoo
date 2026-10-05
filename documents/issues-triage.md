@@ -123,6 +123,11 @@ FIXED this round (fail-closed, with regression tests):
   quoted subtrees under eval-like operators (`eval/apply/funcall/
   compile/load`); plain quoted data stays unscanned (no false
   positive). `sandbox.py`, 2 tests added (refusal + no-false-positive).
+- #77 (HIGH): performance stage measured spawn+startup, not the
+  candidate. Worker template now times the candidate eval in-worker
+  and reports `candidate_ms` in the envelope; the performance stage
+  prefers it (fallback: driver wall time). `workers.py`,
+  `pipeline.py`, 4 tests added (2 live SBCL, 2 preference/fallback).
 
 ACCEPTED, documented, not yet fixed:
 
@@ -134,7 +139,7 @@ ACCEPTED, documented, not yet fixed:
   so the trust boundary is now explicit in the `run_lisp` docstring
   (trusted-kernel preludes only). Full lockdown-last reorder is
   future work.
-- #77 (HIGH) perf stage measures SBCL startup: real, independently
-  corroborated by `documents/ttvm.md` (worker share is an upper
-  bound); fix needs in-worker candidate timing transport — future
-  work.
+- TTVM note: `documents/ttvm.md`'s worker share is now directly
+  measurable per-check via `candidate_ms`; the sampler still uses
+  envelope `elapsed_ms` (upper bound) — a one-line sampler switch is
+  future work.
