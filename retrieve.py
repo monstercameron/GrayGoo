@@ -34,6 +34,19 @@ similarity. There are no embeddings yet, so paraphrased intents with no
 shared tokens will not match ("semantic similarity" in plan.md section 12
 is a stub). Type, effect, and reuse signals compensate in part; a future
 version should add an embedding or synonym back end behind the same API.
+
+Semantic retrieval (additive; closes the "semantic similarity" gap above):
+
+- :func:`build_semantic_index`: fit an embedding backend over the
+  capability corpus and store one vector per capability id.
+- :func:`find_capabilities_semantic`: the same ranking as
+  :func:`find_capabilities` plus an embedding-cosine term
+  (``score + _W_SEMANTIC * cosine``).
+
+Backends live in embeddings.py behind the ``EmbeddingBackend`` protocol
+(``embed(texts) -> vectors``); the default TF-IDF backend is offline and
+deterministic, and hosted embedding models can implement the same
+protocol later without changing this API.
 """
 
 from __future__ import annotations
@@ -58,6 +71,13 @@ _W_OUTPUT_TYPE = 3.0
 _W_FAMILY = 1.0
 _W_EFFECT = 2.0
 _W_REUSE = 1.5
+
+# Semantic fusion weight (used only by find_capabilities_semantic).
+# Embedding cosine lives in [0, 1], so a perfect paraphrase contributes
+# _W_SEMANTIC points — on par with one input/output type match (3.0) plus
+# keyword overlap (1.0): enough to rescue a reworded intent that keyword
+# overlap misses, not enough to override type/effect fit on its own.
+_W_SEMANTIC = 4.0
 
 
 def tokenize(text: str):
@@ -337,3 +357,78 @@ def compose_plan(goal, index, max_depth=4):
                 visited.add(key)
                 queue.append((key, new_chain))
     return None
+
+
+def _semantic_document(cap: Capability) -> str:
+    """Text embedded for one capability: intent + family + type names."""
+    parts = [cap.intent or "", cap.family or ""]
+    parts.extend(cap.input_types)
+    parts.extend(cap.output_types)
+    return " ".join(p for p in parts if p)
+
+
+def build_semantic_index(capabilities, backend):
+    """Fit ``backend`` on the capability corpus; return a vector index.
+
+    ``capabilities`` is a :class:`CapabilityIndex` or an iterable of
+    :class:`Capability`. The backend is fitted (TF-IDF: IDF weights) on
+    one document per capability (see :func:`_semantic_document`) and each
+    document vector is stored under the capability id in a
+    ``VectorIndex`` (see embeddings.py). Fitting mutates the backend, so
+    pass a prebuilt index via ``find_capabilities_semantic``'s
+    ``semantic_index`` argument to reuse it across queries.
+    """
+    from embeddings import VectorIndex
+    if isinstance(capabilities, CapabilityIndex):
+        caps = list(capabilities)
+    else:
+        caps = list(capabilities or [])
+    docs = [(cap.id, _semantic_document(cap)) for cap in caps]
+    backend.fit([doc for _, doc in docs])
+    index = VectorIndex(backend)
+    index.add_many(docs)
+    return index
+
+
+def find_capabilities_semantic(goal, index, backend, k=8, constraints=None,
+                               semantic_index=None):
+    """Rank capabilities fusing base signals with embedding similarity.
+
+    Weighted sum per capability: ``base_score + _W_SEMANTIC * cosine``,
+    where ``base_score`` is the standard keyword + input/output type +
+    family + effect + reuse score and ``cosine`` is the embedding cosine
+    between the goal text and the capability document (see
+    :func:`build_semantic_index`). Hard family/effect filters and the
+    ``score <= 0`` exclusion match :func:`find_capabilities`, and results
+    are ``(capability, fused_score)`` tuples, highest first, top ``k``.
+
+    ``index`` is a :class:`CapabilityIndex` (or None to read it from
+    ``goal``/``constraints``, as :func:`find_capabilities` does) and
+    ``backend`` is an ``EmbeddingBackend``. When ``semantic_index`` (a
+    ``VectorIndex`` from :func:`build_semantic_index`) is omitted it is
+    built on the fly, which refits the backend per call.
+    """
+    goal = _normalize_goal(goal)
+    constraints = _normalize_constraints(constraints)
+    if index is None:
+        index = constraints.get("index", goal.get("index"))
+    if index is None:
+        raise ValueError("no capability index supplied "
+                         "(pass index=... or index=... in goal or constraints)")
+    if k is None or k <= 0:
+        return []
+    if semantic_index is None:
+        semantic_index = build_semantic_index(index, backend)
+
+    goal_text = goal.get("text", goal.get("intent", "")) or ""
+    cosines = dict(semantic_index.top_k(goal_text, k=None)) if goal_text else {}
+
+    scored = []
+    for entry in index.entries():
+        base = _score_entry(entry, goal, constraints)
+        if base is None or base <= 0:
+            continue
+        fused = base + _W_SEMANTIC * cosines.get(entry.capability.id, 0.0)
+        scored.append((entry.capability, fused))
+    scored.sort(key=lambda pair: (-pair[1], pair[0].id))
+    return scored[:k]
