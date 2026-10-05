@@ -25,6 +25,9 @@ DEFAULT_THRESHOLDS = {
 PROMOTE = "promote"
 REJECT = "reject"
 
+#: Neutral hold recommendation returned by :func:`measure_lesson_effect`.
+HOLD = "hold"
+
 
 def _normalize_result(result, task):
     if not isinstance(result, dict):
@@ -141,4 +144,72 @@ def ab_replay(task_fn, tasks, *, lesson_text, thresholds=None,
         "per_task": per_task,
         "thresholds": effective,
         "recommendation": recommendation,
+    }
+
+
+def measure_lesson_effect(lesson_text, ab_result):
+    """Convert an :func:`ab_replay` report into a lesson impact record.
+
+    Maps replay ``deltas`` (lesson minus control) to the lesson
+    ``impact`` convention (``first_pass_success``, ``repairs``,
+    ``tokens``, ``time_ms``, ``regressions``, with ``repair_count``
+    and ``wall_time_ms`` aliases) and derives the first
+    recommendation: ``promote`` when the replay recommends promote,
+    ``reject`` when the replay shows harm (first-pass regression or
+    added regressions), otherwise ``hold`` for neutral outcomes that
+    neither help nor harm.
+
+    Returns ``{"lesson_text", "impact", "recommendation", "deltas",
+    "n_tasks", "thresholds"}``. Neither input is mutated.
+    """
+    if not lesson_text or not isinstance(lesson_text, str):
+        raise ValueError("measure_lesson_effect() requires a non-empty "
+                         "'lesson_text'")
+    if not isinstance(ab_result, dict):
+        raise TypeError("ab_result must be a dict, got %s"
+                        % type(ab_result).__name__)
+    deltas = ab_result.get("deltas")
+    if not isinstance(deltas, dict):
+        raise ValueError("ab_result must contain a 'deltas' dict")
+    for key in ("first_pass_delta", "repair_delta", "token_delta",
+                "time_delta", "regression_delta"):
+        value = deltas.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("ab_result deltas %r must be numeric, got %r"
+                             % (key, value))
+    impact = {
+        "first_pass_success": deltas["first_pass_delta"],
+        "repairs": deltas["repair_delta"],
+        "repair_count": deltas["repair_delta"],
+        "tokens": deltas["token_delta"],
+        "time_ms": deltas["time_delta"],
+        "wall_time_ms": deltas["time_delta"],
+        "regressions": deltas["regression_delta"],
+    }
+    base = ab_result.get("recommendation")
+    if base == PROMOTE:
+        recommendation = PROMOTE
+    elif base == REJECT:
+        if deltas["first_pass_delta"] < 0 or deltas["regression_delta"] > 0:
+            recommendation = REJECT
+        else:
+            recommendation = HOLD
+    else:
+        improved = (deltas["first_pass_delta"] > 0
+                    or deltas["repair_delta"] < 0
+                    or deltas["token_delta"] < 0
+                    or deltas["time_delta"] < 0)
+        if deltas["first_pass_delta"] < 0 or deltas["regression_delta"] > 0:
+            recommendation = REJECT
+        elif improved:
+            recommendation = PROMOTE
+        else:
+            recommendation = HOLD
+    return {
+        "lesson_text": lesson_text,
+        "impact": impact,
+        "recommendation": recommendation,
+        "deltas": dict(deltas),
+        "n_tasks": ab_result.get("n_tasks"),
+        "thresholds": dict(ab_result.get("thresholds", {})),
     }

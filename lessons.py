@@ -250,6 +250,20 @@ class LessonStore:
         lesson["counterexamples"].append(counterexample)
         return lesson["counterexamples"]
 
+    def record_counterexample(self, lesson_id, task_id, note):
+        """Append {"task_id", "note} to a stored lesson (memory.md 17)."""
+        lesson = self._lessons.get(lesson_id)
+        if lesson is None:
+            raise KeyError("unknown lesson id %r" % lesson_id)
+        if not task_id or not isinstance(task_id, str):
+            raise ValueError("task_id must be a non-empty string, got %r"
+                             % (task_id,))
+        if not note or not isinstance(note, str):
+            raise ValueError("note must be a non-empty string, got %r"
+                             % (note,))
+        lesson["counterexamples"].append({"task_id": task_id, "note": note})
+        return lesson["counterexamples"]
+
     def decay_confidence(self, factor):
         """Multiply every active/candidate confidence by *factor*.
 
@@ -590,3 +604,181 @@ class LessonRegistry:
                            lesson["id"], lesson))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [lesson for _, _, lesson in scored[:limit]]
+
+
+#: Factor applied by :func:`decay_confidence` when the runtime or model
+#: version differs from the lesson's last-validated versions.
+DECAY_FACTOR = 0.8
+
+#: Counterexample count that triggers applicability narrowing in
+#: :func:`refine_or_deprecate`.
+COUNTEREXAMPLE_REFINE_THRESHOLD = 1
+
+#: Counterexample count that triggers deprecation in
+#: :func:`refine_or_deprecate`.
+COUNTEREXAMPLE_DEPRECATE_THRESHOLD = 3
+
+
+def _stored_versions(lesson):
+    """Return (runtime, model) versions recorded on *lesson* (or Nones)."""
+    runtime = lesson.get("runtime_version")
+    if runtime is None:
+        runtime = lesson.get("last_validated_runtime")
+    model = lesson.get("model_version")
+    if model is None:
+        model = lesson.get("last_validated_model")
+    validated = lesson.get("validated_versions")
+    if isinstance(validated, dict):
+        if runtime is None:
+            runtime = validated.get("runtime",
+                                    validated.get("runtime_version"))
+        if model is None:
+            model = validated.get("model",
+                                  validated.get("model_version"))
+    return runtime, model
+
+
+def decay_confidence(lesson, *, runtime_version, model_version):
+    """Decay *lesson* confidence when versions changed (memory.md 16).
+
+    Compares *runtime_version*/*model_version* against the versions
+    recorded on the lesson (``runtime_version``/``model_version``,
+    with ``last_validated_runtime``/``last_validated_model`` and
+    ``validated_versions`` accepted as aliases). First call on a
+    lesson with no recorded versions establishes the baseline with
+    no decay. A mismatch multiplies confidence by :data:`DECAY_FACTOR`
+    (rounded to 4 decimals, like :meth:`LessonStore.decay_confidence`),
+    records the new versions, and sets ``needs_revalidation`` True.
+    A match leaves confidence untouched and preserves any pending
+    ``needs_revalidation`` flag (missing flag defaults to False).
+
+    Mutates *lesson* in place and returns it.
+    """
+    if not isinstance(lesson, dict):
+        raise TypeError("lesson must be a dict, got %s"
+                        % type(lesson).__name__)
+    confidence = lesson.get("confidence")
+    if not _is_number(confidence) or not 0.0 <= confidence <= 1.0:
+        raise ValueError("lesson confidence must be a number in [0, 1], "
+                         "got %r" % (confidence,))
+    for name, value in (("runtime_version", runtime_version),
+                        ("model_version", model_version)):
+        if not value or not isinstance(value, str):
+            raise ValueError("%s must be a non-empty string, got %r"
+                             % (name, value))
+    stored_runtime, stored_model = _stored_versions(lesson)
+    has_any = (
+        "runtime_version" in lesson or "model_version" in lesson
+        or "last_validated_runtime" in lesson
+        or "last_validated_model" in lesson
+        or isinstance(lesson.get("validated_versions"), dict)
+    )
+    if not has_any:
+        lesson["runtime_version"] = runtime_version
+        lesson["model_version"] = model_version
+        lesson.setdefault("needs_revalidation", False)
+        return lesson
+    if stored_runtime == runtime_version and stored_model == model_version:
+        lesson.setdefault("runtime_version", runtime_version)
+        lesson.setdefault("model_version", model_version)
+        lesson.setdefault("needs_revalidation", False)
+        return lesson
+    lesson["confidence"] = round(float(confidence) * DECAY_FACTOR, 4)
+    lesson["runtime_version"] = runtime_version
+    lesson["model_version"] = model_version
+    if "last_validated_runtime" in lesson:
+        lesson["last_validated_runtime"] = runtime_version
+    if "last_validated_model" in lesson:
+        lesson["last_validated_model"] = model_version
+    validated = lesson.get("validated_versions")
+    if isinstance(validated, dict):
+        validated["runtime"] = runtime_version
+        validated["model"] = model_version
+    lesson["needs_revalidation"] = True
+    return lesson
+
+
+def record_counterexample(lesson_id, task_id, note):
+    """Record a counterexample (memory.md 17).
+
+    Dual form: when *lesson_id* is a lesson dict, append
+    ``{"task_id": task_id, "note": note}`` to its ``counterexamples``
+    list (mutating in place) and return that list. When *lesson_id*
+    is a lesson-id string, no store is available at module level, so
+    return the standalone record ``{"lesson_id": ..., "task_id": ...,
+    "note": ...}`` for the caller to persist (see
+    :meth:`LessonStore.record_counterexample` for the storing form).
+    """
+    if not task_id or not isinstance(task_id, str):
+        raise ValueError("task_id must be a non-empty string, got %r"
+                         % (task_id,))
+    if not note or not isinstance(note, str):
+        raise ValueError("note must be a non-empty string, got %r"
+                         % (note,))
+    if isinstance(lesson_id, dict):
+        counterexamples = lesson_id.get("counterexamples")
+        if counterexamples is None:
+            counterexamples = lesson_id["counterexamples"] = []
+        if not isinstance(counterexamples, list):
+            raise ValueError("lesson 'counterexamples' must be a list")
+        counterexamples.append({"task_id": task_id, "note": note})
+        return counterexamples
+    if not lesson_id or not isinstance(lesson_id, str):
+        raise TypeError("lesson_id must be a lesson dict or a non-empty "
+                        "lesson-id string, got %r" % (lesson_id,))
+    return {"lesson_id": lesson_id, "task_id": task_id, "note": note}
+
+
+def refine_or_deprecate(lesson):
+    """Refine or deprecate *lesson* from its counterexamples (memory.md 17).
+
+    With at least :data:`COUNTEREXAMPLE_DEPRECATE_THRESHOLD`
+    counterexamples, set ``status`` to ``"deprecated"``. With at
+    least :data:`COUNTEREXAMPLE_REFINE_THRESHOLD` (but below the
+    deprecate threshold), narrow applicability by appending the
+    latest counterexample as an exception to both ``applies_when``
+    ``when`` and ``when_not`` (idempotent: re-running without a new
+    counterexample changes nothing). Below the refine threshold the
+    lesson is returned unchanged. Mutates in place and returns it.
+    """
+    if not isinstance(lesson, dict):
+        raise TypeError("lesson must be a dict, got %s"
+                        % type(lesson).__name__)
+    counterexamples = lesson.get("counterexamples", [])
+    if not isinstance(counterexamples, list):
+        raise ValueError("lesson 'counterexamples' must be a list")
+    count = len(counterexamples)
+    if count >= COUNTEREXAMPLE_DEPRECATE_THRESHOLD:
+        lesson["status"] = "deprecated"
+        return lesson
+    if count < COUNTEREXAMPLE_REFINE_THRESHOLD:
+        return lesson
+    applies = lesson.get("applies_when")
+    if not isinstance(applies, dict):
+        raise ValueError("lesson requires 'applies_when' dict to refine")
+    when = applies.get("when")
+    when_not = applies.get("when_not")
+    if not when or not isinstance(when, str):
+        raise ValueError("lesson 'applies_when.when' must be a non-empty "
+                         "string to refine")
+    if not when_not or not isinstance(when_not, str):
+        raise ValueError("lesson 'applies_when.when_not' must be a "
+                         "non-empty string to refine")
+    latest = counterexamples[-1]
+    if isinstance(latest, dict):
+        note = str(latest.get("note", "")).strip()
+        task = str(latest.get("task_id", "")).strip()
+    else:
+        note = str(latest).strip()
+        task = ""
+    detail = note or task or "reported failure"
+    if task and note and task not in note:
+        detail = "%s (cf. %s)" % (note, task)
+    when_suffix = " (except: %s)" % detail
+    if when_suffix not in when:
+        when = when.rstrip() + when_suffix
+    not_suffix = "; except where %s" % detail
+    if not_suffix not in when_not:
+        when_not = when_not.rstrip() + not_suffix
+    lesson["applies_when"] = {"when": when, "when_not": when_not}
+    return lesson
