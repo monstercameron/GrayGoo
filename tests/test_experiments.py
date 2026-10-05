@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from experiments import key_experiment, semantic_compare
+from experiments import key_experiment, semantic_compare, ttvm_sample
 
 
 def _record(task_id, passed, usage, injected_chars=0):
@@ -291,6 +291,34 @@ class SummarizeModeTest(unittest.TestCase):
     def test_missing_baseline_yields_no_deltas(self):
         self.assertEqual(
             semantic_compare.compute_mode_deltas({}), [])
+
+
+class SamplerTimingTest(unittest.TestCase):
+    """TTVM sampler prefers in-worker candidate_ms (issues.md #77)."""
+
+    def test_prefers_candidate_ms(self):
+        evidence = {"direct": {"items": [
+            {"elapsed_ms": 900.0, "candidate_ms": 12.5},
+            {"elapsed_ms": 800.0, "candidate_ms": 7.5},
+        ]}}
+        self.assertAlmostEqual(
+            ttvm_sample._worker_elapsed_ms(evidence), 20.0)
+
+    def test_falls_back_to_elapsed_ms(self):
+        evidence = {"direct": {"items": [
+            {"elapsed_ms": 900.0},
+            {"elapsed_ms": 800.0, "candidate_ms": None},
+            {"elapsed_ms": 700.0, "candidate_ms": True},
+        ]}}
+        self.assertAlmostEqual(
+            ttvm_sample._worker_elapsed_ms(evidence), 2400.0)
+
+    def test_ignores_malformed_evidence(self):
+        self.assertEqual(ttvm_sample._worker_elapsed_ms(None), 0.0)
+        self.assertEqual(ttvm_sample._worker_elapsed_ms({}), 0.0)
+        self.assertEqual(
+            ttvm_sample._worker_elapsed_ms({"direct": {"items": [None]}}),
+            0.0)
 
 
 if __name__ == "__main__":

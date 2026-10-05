@@ -67,6 +67,9 @@ PROMPT = ("Return ONLY a Common Lisp expression that %s. "
 
 
 def _worker_elapsed_ms(evidence):
+    # Issues.md #77 follow-up: prefer in-worker candidate_ms (pure
+    # candidate-eval time) over driver elapsed_ms (spawn + SBCL
+    # startup dominated); fall back for workers that predate the key.
     total = 0.0
     if not isinstance(evidence, dict):
         return total
@@ -74,9 +77,13 @@ def _worker_elapsed_ms(evidence):
         if not isinstance(stage, dict):
             continue
         for item in stage.get("items", []) or []:
-            if isinstance(item, dict):
+            if not isinstance(item, dict):
+                continue
+            elapsed = item.get("candidate_ms")
+            if (isinstance(elapsed, bool)
+                    or not isinstance(elapsed, (int, float))):
                 elapsed = item.get("elapsed_ms", 0.0) or 0.0
-                total += float(elapsed)
+            total += float(elapsed)
     return total
 
 

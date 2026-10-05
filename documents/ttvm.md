@@ -51,3 +51,10 @@ Per-stage breakdown (mean / share of stage-mean sum):
   the model stage (longer generations, repairs).
 - Single-machine, fresh SBCL per check (no warm pool): the worker share
   is an upper bound; `pool.py` long-lived workers should cut it.
+- Timing-source change (post-measurement): the sampler's worker stage
+  summed driver `elapsed_ms` (spawn + SBCL startup dominated). It now
+  prefers in-worker `candidate_ms` with `elapsed_ms` fallback
+  (issues.md #77 follow-up; `tests/test_experiments.py`
+  `SamplerTimingTest`). The 330 ms worker figure above is therefore a
+  ceiling — re-running the sampler will report strictly purer
+  candidate-eval time. No re-run yet (would cost fresh live calls).
