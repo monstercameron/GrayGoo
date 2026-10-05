@@ -308,6 +308,13 @@ _R6_REDEFINITION_HEADS = frozenset({"defun", "defmethod"})
 _R6_SETF_FUNCTION_PLACES = frozenset(
     {"symbol-function", "fdefinition", "macro-function"})
 
+# Recursion cap for the structural scans (s_expr caps parse-built input at
+# depth 200; direct callers bypass the parser, so the scans enforce their
+# own documented ValueError instead of escaping as RecursionError).
+_MAX_WALK_DEPTH = 500
+# Dangerous operators flagged even in value (non-head) position.
+_R4_VALUE_ATOMS = _R4_HEADS | _R4_DYNAMIC_HEADS
+
 
 def _normalize(name):
     """Lowercase a symbol/keyword body with separators unified to '-'."""
@@ -388,7 +395,7 @@ def _unwrap_quoted_symbol(node):
     return None
 
 
-def _scan_dispatch_redefinition(node, hits):
+def _scan_dispatch_redefinition(node, hits, depth=0):
     """Append R6 hits for redefinitions of protected dispatch symbols.
 
     Covers ``(defun NAME ...)`` / ``(defmethod NAME ...)`` and
@@ -397,6 +404,9 @@ def _scan_dispatch_redefinition(node, hits):
     literal protected symbol. Quoted subtrees are skipped and string
     contents never inspected, matching :func:`_walk` hygiene.
     """
+    if depth > _MAX_WALK_DEPTH:
+        raise ValueError("unclassifiable: definition exceeds maximum scan "
+                         "depth %d" % _MAX_WALK_DEPTH)
     if isinstance(node, s_expr.SString):
         return
     if isinstance(node, str):
@@ -408,15 +418,15 @@ def _scan_dispatch_redefinition(node, hits):
     head = node[0]
     if isinstance(head, (list, tuple)):
         for element in node:
-            _scan_dispatch_redefinition(element, hits)
+            _scan_dispatch_redefinition(element, hits, depth + 1)
         return
     if not isinstance(head, str) or isinstance(head, s_expr.SString):
         for element in node[1:]:
-            _scan_dispatch_redefinition(element, hits)
+            _scan_dispatch_redefinition(element, hits, depth + 1)
         return
     if head.startswith(":"):
         for element in node:
-            _scan_dispatch_redefinition(element, hits)
+            _scan_dispatch_redefinition(element, hits, depth + 1)
         return
     if head.lower() == "quote":
         return
@@ -441,7 +451,7 @@ def _scan_dispatch_redefinition(node, hits):
                                        "of %s (promotion-forbidden)"
                                  % (name, place_head)))
     for element in node[1:]:
-        _scan_dispatch_redefinition(element, hits)
+        _scan_dispatch_redefinition(element, hits, depth + 1)
 
 
 def _scan_atom(atom, is_head, hits, origin):
@@ -479,6 +489,10 @@ def _scan_atom(atom, is_head, hits, origin):
         if base in _R1_HEADS:
             hits.append(("R1", "R1: %s head (%s ...) signals local state "
                                "operation" % (origin, base)))
+    if not is_head and not is_keyword and base in _R4_VALUE_ATOMS:
+        hits.append(("R4", "R4: %s symbol %r in value position names an "
+                           "external-effect or dynamically-dispatched "
+                           "operator (conservative)" % (origin, atom)))
     if is_keyword and body.lower() in _KEYWORD_LEVELS:
         level = _KEYWORD_LEVELS[body.lower()]
         hits.append((level, "%s: %s keyword %r declares %s"
@@ -503,8 +517,11 @@ def _scan_atom(atom, is_head, hits, origin):
                             _FAMILY[level], token)))
 
 
-def _walk(node, hits, origin="definition"):
+def _walk(node, hits, origin="definition", depth=0):
     """Recursively scan one parsed definition node for risk signals."""
+    if depth > _MAX_WALK_DEPTH:
+        raise ValueError("unclassifiable: definition exceeds maximum scan "
+                         "depth %d" % _MAX_WALK_DEPTH)
     if isinstance(node, s_expr.SString):
         return  # string literal contents are data, never scanned
     if isinstance(node, str):
@@ -518,19 +535,19 @@ def _walk(node, hits, origin="definition"):
         head = node[0]
         if isinstance(head, (list, tuple)):
             for element in node:
-                _walk(element, hits, origin)
+                _walk(element, hits, origin, depth + 1)
             return
         if not isinstance(head, str) or isinstance(head, s_expr.SString):
             hits.append(("R4", "R4: %s form headed by %r is statically "
                                "unclassifiable (conservative)"
                          % (origin, head)))
             for element in node[1:]:
-                _walk(element, hits, origin)
+                _walk(element, hits, origin, depth + 1)
             return
         if head.startswith(":"):
             # Keyword-headed (:key ...) metadata/data: scan contents as data.
             for element in node:
-                _walk(element, hits, origin)
+                _walk(element, hits, origin, depth + 1)
             return
         if head.lower() == "quote":
             return  # quoted data is inert
@@ -550,7 +567,7 @@ def _walk(node, hits, origin="definition"):
                                        "(shared canonical state)"
                                  % (origin, place_head)))
         for element in node[1:]:
-            _walk(element, hits, origin)
+            _walk(element, hits, origin, depth + 1)
         return
     hits.append(("R4", "R4: %s node of type %s is statically "
                        "unclassifiable (conservative)"
@@ -616,6 +633,12 @@ def classify(candidate_dict, context=None):
             # (but prompt-user itself is just console I/O).
             hits.append(("R5", "R5: mutation target %r names the prompting "
                                "surface (agent policy)" % (target,)))
+        target_base = target.lstrip(":").split(":")[-1].lower()
+        if target_base in _R4_DYNAMIC_HEADS:
+            # Redefining a core dynamic form (eval/apply/load/...) changes
+            # evaluation semantics globally: statically unclassifiable.
+            hits.append(("R4", "R4: mutation target %r names a core dynamic "
+                               "form (conservative)" % (target,)))
     _walk(definition, hits)
     # Adversarial hardening (additive): protected dispatch/kernel targets
     # and redefinitions are trust-root mutations (R6, promotion-forbidden).

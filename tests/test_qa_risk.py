@@ -20,7 +20,6 @@ def _classify(definition_text, target="do-it"):
 
 
 class RiskBlindSpotTest(unittest.TestCase):
-    @unittest.expectedFailure  # KNOWN-FAIL QA-07
     def test_dangerous_primitive_as_function_value_flags_r4(self):
         """QA-07: `(mapcar open xs)` opens files but classifies R0.
 
@@ -31,7 +30,6 @@ class RiskBlindSpotTest(unittest.TestCase):
         """
         self.assertEqual(_classify("(mapcar open xs)")["level"], "R4")
 
-    @unittest.expectedFailure  # KNOWN-FAIL QA-08
     def test_target_naming_core_dynamic_form_is_not_pure(self):
         """QA-08: redefining `eval` classifies R0.
 
@@ -43,7 +41,6 @@ class RiskBlindSpotTest(unittest.TestCase):
         self.assertNotEqual(_classify("(defun eval (x) x)",
                                       target="eval")["level"], "R0")
 
-    @unittest.expectedFailure  # KNOWN-FAIL QA-11
     def test_deep_definition_raises_documented_error(self):
         """QA-11: hostile nesting escapes as RecursionError.
 
