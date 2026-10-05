@@ -1,0 +1,22 @@
+[
+  {
+    "id": "W-NOV-01",
+    "family": "W",
+    "split": "transfer",
+    "category": "sched",
+    "prompt": "Given a time t plus JSON pairs of name and period, reply with the names due at t (t divisible by period). Reply with a JSON array of names.",
+    "checks": [
+      {
+        "input": "{\"t\": 12, \"jobs\": [{\"name\": \"a\", \"period\": 5}, {\"name\": \"b\", \"period\": 4}, {\"name\": \"c\", \"period\": 6}]}",
+        "expected": "[\"b\", \"c\"]",
+        "compare": "json"
+      },
+      {
+        "input": "{\"t\": 7, \"jobs\": [{\"name\": \"x\", \"period\": 7}]}",
+        "expected": "[\"x\"]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Novelty probe: no capability applies, nothing retrieves."
+  }
+]

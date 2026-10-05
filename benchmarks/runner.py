@@ -29,8 +29,9 @@ from pathlib import Path
 SPLITS = ("exposure", "transfer", "adversarial", "equivalent-transform")
 COMPARE_MODES = ("exact", "json")
 # Task families: A = parsing/data-transformation procedures,
-# R = reuse-designed held-out tasks (same-procedure REUSE + COMPOSE).
-FAMILIES = ("A", "R")
+# R = reuse-designed held-out tasks (same-procedure REUSE + COMPOSE),
+# W = API-workflow primitives + reuse/compose/adapt/novel transfer.
+FAMILIES = ("A", "R", "W")
 
 # Mirrors cerebras_client qwen-3.8-27b pricing (USD per million tokens).
 # Kept local (not imported) so the offline path never touches the client.

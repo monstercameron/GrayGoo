@@ -1,0 +1,44 @@
+[
+  {
+    "id": "W-REU-01",
+    "family": "W",
+    "split": "transfer",
+    "category": "api",
+    "prompt": "Paginate to collect items across pages: each input line holds one page object with an items array with a next cursor flag. Concatenate every page's items in order. Output a JSON array.",
+    "checks": [
+      {
+        "input": "{\"items\": [\"x\"], \"next\": true}\n{\"items\": [], \"next\": true}\n{\"items\": [\"y\", \"z\"], \"next\": false}",
+        "expected": "[\"x\", \"y\", \"z\"]",
+        "compare": "json"
+      },
+      {
+        "input": "{\"items\": [{\"n\": 1}], \"next\": false}",
+        "expected": "[{\"n\": 1}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Same-procedure reuse of cap-paginate.",
+    "derived_from": "W-EXP-01"
+  },
+  {
+    "id": "W-REU-02",
+    "family": "W",
+    "split": "transfer",
+    "category": "api",
+    "prompt": "Normalize each record to trim whitespace and lowercase email values: strip every string value. Output a JSON array.",
+    "checks": [
+      {
+        "input": "[{\"email\": \" Z@Q.ME \", \"t\": \" hi \"}]",
+        "expected": "[{\"email\": \"z@q.me\", \"t\": \"hi\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "[{\"a\": \"  1  \"}, {\"a\": \"2\"}]",
+        "expected": "[{\"a\": \"1\"}, {\"a\": \"2\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Same-procedure reuse of cap-normalize.",
+    "derived_from": "W-EXP-05"
+  }
+]

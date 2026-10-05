@@ -1,0 +1,162 @@
+[
+  {
+    "id": "W-EXP-01",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Paginate to collect items across pages: each input line holds one page object with an items array with a next cursor flag. Concatenate every page's items in order. Output a JSON array.",
+    "checks": [
+      {
+        "input": "{\"items\": [1, 2], \"next\": true}\n{\"items\": [3], \"next\": false}",
+        "expected": "[1, 2, 3]",
+        "compare": "json"
+      },
+      {
+        "input": "{\"items\": [], \"next\": true}\n{\"items\": [\"a\", \"b\", \"c\"], \"next\": true}\n{\"items\": [], \"next\": false}",
+        "expected": "[\"a\", \"b\", \"c\"]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Exposure primitive for cap-paginate."
+  },
+  {
+    "id": "W-EXP-02",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Compute the retry schedule with exponential backoff for bounded attempts: input holds attempts made, max attempts, and base milliseconds. Output a JSON object with the next wait and retries left.",
+    "checks": [
+      {
+        "input": "{\"attempts\": 0, \"max\": 4, \"base_ms\": 100}",
+        "expected": "{\"next_wait_ms\": 100, \"retries_left\": 4}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"attempts\": 3, \"max\": 3, \"base_ms\": 50}",
+        "expected": "{\"next_wait_ms\": null, \"retries_left\": 0}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Exposure primitive for cap-retry-schedule."
+  },
+  {
+    "id": "W-EXP-03",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Enforce the ratelimit throttle window with a fixed quota: input holds the allowance limit, window seconds, and ascending hit timestamps. Output allow or deny per hit as a JSON array.",
+    "checks": [
+      {
+        "input": "{\"limit\": 2, \"window_s\": 10, \"hits\": [0, 3, 9, 10, 21]}",
+        "expected": "[\"allow\", \"allow\", \"deny\", \"allow\", \"allow\"]",
+        "compare": "json"
+      },
+      {
+        "input": "{\"limit\": 1, \"window_s\": 5, \"hits\": [7, 7, 12]}",
+        "expected": "[\"allow\", \"deny\", \"allow\"]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Exposure primitive for cap-ratelimit."
+  },
+  {
+    "id": "W-EXP-04",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Check auth token session expiry with a safety margin: input holds expires_at, now, and margin seconds. Output ok, or refresh when inside the margin.",
+    "checks": [
+      {
+        "input": "{\"expires_at\": 1000, \"now\": 900, \"margin_s\": 50}",
+        "expected": "ok",
+        "compare": "exact"
+      },
+      {
+        "input": "{\"expires_at\": 1000, \"now\": 960, \"margin_s\": 50}",
+        "expected": "refresh",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Exposure primitive for cap-auth."
+  },
+  {
+    "id": "W-EXP-05",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Normalize each record to trim whitespace and lowercase email values: strip every string value. Output a JSON array.",
+    "checks": [
+      {
+        "input": "[{\"name\": \"  Ann \", \"email\": \"ANN@X.IO \"}]",
+        "expected": "[{\"name\": \"Ann\", \"email\": \"ann@x.io\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "[{\"a\": 1, \"b\": \"x\"}, {\"email\": \"B@Y.IO\", \"n\": \" q \"}]",
+        "expected": "[{\"a\": 1, \"b\": \"x\"}, {\"email\": \"b@y.io\", \"n\": \"q\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Exposure primitive for cap-normalize."
+  },
+  {
+    "id": "W-EXP-06",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Dedup rows by dropping exact duplicate whole rows, keeping the first identical occurrence. Output a JSON array.",
+    "checks": [
+      {
+        "input": "[{\"k\": 1}, {\"k\": 1}, {\"k\": 2}]",
+        "expected": "[{\"k\": 1}, {\"k\": 2}]",
+        "compare": "json"
+      },
+      {
+        "input": "[1, \"a\", 1, \"a\", null]",
+        "expected": "[1, \"a\", null]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Exposure primitive for cap-dedup."
+  },
+  {
+    "id": "W-EXP-07",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Cache lookup over stored entries: input holds an entries object and a lookup key. Output the hit value, or miss.",
+    "checks": [
+      {
+        "input": "{\"entries\": {\"a\": 1}, \"key\": \"a\"}",
+        "expected": "1",
+        "compare": "exact"
+      },
+      {
+        "input": "{\"entries\": {\"a\": 1}, \"key\": \"zzz\"}",
+        "expected": "MISS",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Exposure primitive for cap-cache."
+  },
+  {
+    "id": "W-EXP-08",
+    "family": "W",
+    "split": "exposure",
+    "category": "api",
+    "prompt": "Validate a record against a schema of required fields: output ok, or the missing fields.",
+    "checks": [
+      {
+        "input": "{\"required\": [\"a\", \"b\"], \"record\": {\"a\": 1, \"b\": 2}}",
+        "expected": "ok",
+        "compare": "exact"
+      },
+      {
+        "input": "{\"required\": [\"a\", \"b\"], \"record\": {\"b\": 2}}",
+        "expected": "missing:a",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Exposure primitive for cap-validate."
+  }
+]

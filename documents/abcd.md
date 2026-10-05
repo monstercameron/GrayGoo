@@ -66,6 +66,64 @@ reasoning on the edge case. The trap passed live in all arms (the
 model solved the ISO-week line; C/D abstained and fell back).
 C's 5/7 matches the offline prediction exactly (same two misfires).
 
+## Since then (same session)
+
+- **Novelty rung**: Family R gained R-NOV-01 (8 tasks); C/D fall back
+  through adaptation (retrieved top-1 + model) to novel synthesis
+  (model scratch). Offline: D 8/8 at 3 calls vs A 8/8 at 15.
+- **Composition search**: plans are discovered (SEQ chains to depth 3
+  + MAP over prompt-nominated fields) under effect, per-step
+  evidence, output-demand, trial, and non-vacuity gates — nothing is
+  pre-registered. Two regressions found and fixed along the way
+  (coarse JSON demand admitted a lossy roundtrip; demand words
+  inflated step evidence).
+- **Family W** (`benchmarks/family-w/`): 8 API-workflow primitives +
+  6 transfer tasks (2 reuse, 2-compose, 3-compose, adapt trap,
+  novelty). Offline transfer split:
+
+| Arm | Passed | Outcomes | Calls/task |
+|---|---|---|---|
+| A | 6/6 | 6 NOVEL | 2.000 |
+| B | 6/6 | 5 ADAPT + 1 NOVEL | 2.000 |
+| C | 4/6 | 4 REUSE + ADAPT + NOVEL | 0.667 |
+| D | 6/6 | 2 REUSE + 2 COMPOSE + ADAPT + NOVEL | 0.667 |
+
+Live Family-W transfer (32 calls, $0.005, `artifacts/abcd-w-live/`):
+
+| Arm | Passed | Calls/task | Tokens/task | Cost | Latency |
+|---|---|---|---|---|---|
+| A | 4/6 | 2.000 | 185.8 | $0.0012 | 8437 ms |
+| B | 6/6 | 2.000 | 394.8 | $0.0024 | 6156 ms |
+| C | 4/6 | 0.667 | 92.3 | $0.0006 | 2469 ms |
+| D | 6/6 | 0.667 | 92.3 | $0.0006 | 1344 ms |
+
+D matches B's 6/6 at 1/3 the calls, 1/4 the tokens, 1/4 the cost,
+and 1/5 the latency; it beats A (4/6) on success too. A's live
+failures are genuine model errors (an emptied single-page result, a
+fenced mistyped composite row) that retrieval (B) and execution (D)
+both repair. C matches the offline prediction exactly (same two
+composite misfires).
+
+## Experiment machinery (all pinned in tests)
+
+- **Hierarchy**: reuse → compose → adapt (top-1 exemplar + declined
+  line) → novel. Acceptance tests: `tests/test_thesis_acceptance.py`.
+- **Evidence + applicability**: per-artifact positive/negative task
+  ledgers; precision, harmful-reuse rate, FP tasks, counterfactual
+  FN checks in every C/D summary.
+- **Promotion** (§9): ≥2 distinct positive tasks + arm ≥ baseline →
+  stable; any negative → quarantined; else provisional.
+- **Verdict** (§6+§15): supported iff success held + calls fell +
+  tokens fell; §15 adds sublinear-growth and clean-transfer checks
+  with pre-registered thresholds. Offline Family-W verdict:
+  supported=True, failed_section_15=True (growth still one-for-one
+  — reported, not hidden).
+- **Multi-order** (§5): `--orders N --seed S`; 3 stub orders are
+  bit-identical (stateless arms); live reruns measure variance.
+- **Curves** (§7): cumulative series per arm in every summary
+  (`curves` key). With fixed seeds these show end-state composition,
+  not learning over time — documented in `outcomes.py`.
+
 ## What this proves (and does not)
 
 Proves: the reuse/composition mechanics work end-to-end (applicability

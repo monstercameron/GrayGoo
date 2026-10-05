@@ -1,0 +1,22 @@
+[
+  {
+    "id": "R-NOV-01",
+    "family": "R",
+    "split": "transfer",
+    "category": "math",
+    "prompt": "Given a positive integer n on the input line, return the nth Fibonacci number (F(1)=1, F(2)=1). Reply with the bare integer.",
+    "checks": [
+      {
+        "input": "10",
+        "expected": "55",
+        "compare": "exact"
+      },
+      {
+        "input": "1\n20",
+        "expected": "1\n6765",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Novelty probe: no capability applies (category math) and no exposure exemplar retrieves (zero keyword overlap), so every arm must solve from scratch via the model. Exercises the NOVEL acceptance path."
+  }
+]

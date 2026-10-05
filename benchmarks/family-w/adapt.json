@@ -1,0 +1,22 @@
+[
+  {
+    "id": "W-ADP-01",
+    "family": "W",
+    "split": "transfer",
+    "category": "api",
+    "prompt": "Drop rows with duplicate emails, keeping the first occurrence. Output a JSON array.",
+    "checks": [
+      {
+        "input": "[{\"email\": \"a@x.io\", \"n\": 1}, {\"email\": \"a@x.io\", \"n\": 2}, {\"email\": \"b@x.io\", \"n\": 3}]",
+        "expected": "[{\"email\": \"a@x.io\", \"n\": 1}, {\"email\": \"b@x.io\", \"n\": 3}]",
+        "compare": "json"
+      },
+      {
+        "input": "[{\"email\": \"z@q.me\", \"n\": 1}, {\"email\": \"z@q.me\", \"n\": 2}]",
+        "expected": "[{\"email\": \"z@q.me\", \"n\": 1}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Near-match trap: whole-row dedup must abstain (prompt demands key-based dedup); the model adapts with context."
+  }
+]

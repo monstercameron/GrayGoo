@@ -48,10 +48,51 @@ class AggregateTest(unittest.TestCase):
         self.assertEqual(agg["n"], 0)
         self.assertEqual(agg["reuse_rate"], 0.0)
 
+    def test_optional_token_and_time_means(self):
+        records = [
+            {"outcome": "REUSE", "calls": 0, "tokens": 0,
+             "input_tokens": 0, "output_tokens": 0, "seconds": 0.01,
+             "passed": True},
+            {"outcome": "NOVEL", "calls": 2, "tokens": 300,
+             "input_tokens": 200, "output_tokens": 100, "seconds": 1.0,
+             "passed": True},
+        ]
+        agg = outcomes.aggregate(records)
+        self.assertAlmostEqual(agg["input_tokens_per_task"], 100.0)
+        self.assertAlmostEqual(agg["output_tokens_per_task"], 50.0)
+        self.assertAlmostEqual(agg["seconds_per_task"], 0.505)
+
+    def test_missing_optionals_default_to_zero(self):
+        agg = outcomes.aggregate(
+            [{"outcome": "REUSE", "calls": 0, "tokens": 0,
+              "passed": True}])
+        self.assertEqual(agg["input_tokens_per_task"], 0.0)
+        self.assertEqual(agg["seconds_per_task"], 0.0)
+
     def test_unknown_outcome_falls_back_to_novel(self):
         agg = outcomes.aggregate(
             [{"outcome": "BOGUS", "calls": 1, "tokens": 1, "passed": True}])
         self.assertEqual(agg["outcomes"]["NOVEL"], 1)
+
+
+class CurvesTest(unittest.TestCase):
+    def test_cumulative_prefix_means(self):
+        records = [
+            {"outcome": "REUSE", "calls": 0, "tokens": 0, "passed": True},
+            {"outcome": "NOVEL", "calls": 2, "tokens": 200,
+             "passed": False},
+        ]
+        curves = outcomes.cumulative_curves(records)
+        self.assertEqual(curves["n"], [1, 2])
+        self.assertEqual(curves["calls_per_task"], [0.0, 1.0])
+        self.assertEqual(curves["zero_llm_share"], [1.0, 0.5])
+        self.assertEqual(curves["reuse_share"], [1.0, 0.5])
+        self.assertEqual(curves["novel_share"], [0.0, 0.5])
+        self.assertEqual(curves["success_rate"], [1.0, 0.5])
+
+    def test_empty_records_yield_empty_series(self):
+        curves = outcomes.cumulative_curves([])
+        self.assertEqual(curves["n"], [])
 
 
 class CompressionTest(unittest.TestCase):

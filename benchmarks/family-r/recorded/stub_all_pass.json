@@ -25,5 +25,9 @@
   "R-CMP-02": [
     "key,value\na.b,1\nc,x",
     "key,value\nx[0],true\nx[1],null\ny,{}"
+  ],
+  "R-NOV-01": [
+    "55",
+    "1\n6765"
   ]
 }

@@ -49,12 +49,17 @@ def classify(model_calls: int, executed: int, retrieved: bool) -> str:
 def aggregate(records: list) -> dict:
     """Aggregate per-task records into outcome counts + inference means.
 
-    Each record needs ``outcome`` plus ``calls``, ``tokens``, ``passed``.
+    Each record needs ``outcome`` plus ``calls``, ``tokens``, ``passed``;
+    ``input_tokens``, ``output_tokens``, and ``seconds`` are optional
+    (default 0) and produce the §6 in/out-token and latency means.
     Returns counts per outcome, means per task, success rate, and n.
     """
     counts = {name: 0 for name in OUTCOMES}
     calls = 0
     tokens = 0
+    in_tokens = 0
+    out_tokens = 0
+    seconds = 0.0
     passed = 0
     for record in records:
         outcome = record.get("outcome", NOVEL)
@@ -64,6 +69,9 @@ def aggregate(records: list) -> dict:
             counts[NOVEL] += 1
         calls += record.get("calls", 0) or 0
         tokens += record.get("tokens", 0) or 0
+        in_tokens += record.get("input_tokens", 0) or 0
+        out_tokens += record.get("output_tokens", 0) or 0
+        seconds += record.get("seconds", 0.0) or 0.0
         passed += 1 if record.get("passed") else 0
     n = len(records)
     return {
@@ -72,8 +80,59 @@ def aggregate(records: list) -> dict:
         "reuse_rate": (counts[REUSE] + counts[COMPOSE]) / n if n else 0.0,
         "calls_per_task": calls / n if n else 0.0,
         "tokens_per_task": tokens / n if n else 0.0,
+        "input_tokens_per_task": in_tokens / n if n else 0.0,
+        "output_tokens_per_task": out_tokens / n if n else 0.0,
+        "seconds_per_task": seconds / n if n else 0.0,
         "success_rate": passed / n if n else 0.0,
     }
+
+
+def cumulative_curves(records: list) -> dict:
+    """Cumulative learning curves over run order (directive §7).
+
+    For each prefix 1..n of ``records`` (in run order), record the
+    cumulative means: calls/task, tokens/task, zero-LLM share, reuse
+    share, composition share, novel share, success rate. With fixed
+    seed capabilities these curves show the END-state composition,
+    not learning over time; true learning-over-time curves await
+    synthesis-learned capabilities (tracked follow-up). Series are
+    honest about what varies: per-task cost distribution and the
+    cumulative reuse advantage.
+    """
+    curves = {"n": [], "calls_per_task": [], "tokens_per_task": [],
+              "zero_llm_share": [], "reuse_share": [],
+              "composition_share": [], "novel_share": [],
+              "success_rate": []}
+    calls = 0
+    tokens = 0
+    zero = 0
+    reuse = 0
+    comp = 0
+    novel = 0
+    passed = 0
+    for i, record in enumerate(records, 1):
+        calls += record.get("calls", 0) or 0
+        tokens += record.get("tokens", 0) or 0
+        if not record.get("calls"):
+            zero += 1
+        outcome = record.get("outcome", NOVEL)
+        if outcome == REUSE:
+            reuse += 1
+        elif outcome == COMPOSE:
+            comp += 1
+        elif outcome == NOVEL:
+            novel += 1
+        if record.get("passed"):
+            passed += 1
+        curves["n"].append(i)
+        curves["calls_per_task"].append(calls / i)
+        curves["tokens_per_task"].append(tokens / i)
+        curves["zero_llm_share"].append(zero / i)
+        curves["reuse_share"].append(reuse / i)
+        curves["composition_share"].append(comp / i)
+        curves["novel_share"].append(novel / i)
+        curves["success_rate"].append(passed / i)
+    return curves
 
 
 def compression(tasks_solved: int, capability_count: int) -> dict:

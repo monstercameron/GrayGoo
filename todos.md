@@ -284,9 +284,17 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Build composition executor: plans reusing >=2 capabilities, zero model calls
   - [x] Add reuse-designed held-out tasks (`benchmarks/family-r/`: 4 reuse + 1 trap + 2 compose)
   - [x] Build canonical A/B/C/D driver (`benchmarks/run_abcd.py`)
-  - [x] Verify offline: D 7/7 at 1 call vs A 7/7 at 13 calls; C 5/7 honest misfire pinned
+  - [x] Verify offline Family-R: D 8/8 at 3 calls vs A 8/8 at 15 calls; C 6/8 honest misfire pinned
   - [x] Compression warning live: 7 tasks / 7 artifacts = 1.0, warning firing (see `documents/abcd.md`)
   - [x] Run live Family-R comparison (28 calls, $0.007): D 7/7 dominates A/B 6/7 at 13x fewer calls
+  - [x] Full hierarchy in C/D: reuse → compose → adapt (retrieve-closest + minimal context) → novel
+  - [x] Evidence ledgers (positive/negative per artifact) + applicability metrics (precision/FP/FN)
+  - [x] Deterministic composition search: SEQ/MAP discovery, typed glue, output-demand + trial + vacuity gates
+  - [x] API-workflow benchmark (`benchmarks/family-w/`: 8 primitives + 6 transfer incl. 3-composition)
+  - [x] Verify offline Family-W: D 6/6 (2 REUSE + 2 COMPOSE + ADAPT + NOVEL) vs A 6/6 all NOVEL
+  - [x] Run live Family-W comparison (32 calls, $0.005): D 6/6 matches B at 1/3 calls, beats A 4/6
+  - [x] Multi-order runs + learning curves (§5, §7) + latency/TTVR metrics (§6)
+  - [x] Transfer-based promotion rule on evidence ledgers (§9) + failure criteria (§15)
   - [ ] Generalize seeds so artifact count stays flat as reuse tasks grow (close compression warning)
   - [ ] Contract-coverage applicability: single-cap abstains when prompt demands more than its contract
 

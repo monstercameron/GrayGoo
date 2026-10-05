@@ -200,20 +200,217 @@ def pre_clf_parse(text):
 
 
 # ---------------------------------------------------------------------------
-# Composition glue (tiny verified plumbing between reused capabilities)
+# API-workflow primitives (Family W exposure procedures, directive §4)
 # ---------------------------------------------------------------------------
 
-def glue_csv_date_iso(rows_json, date_field="date"):
-    """Normalize the ``date_field`` of each row in a JSON array to ISO."""
-    rows = json.loads(rows_json)
+def fn_paginate(text):
+    """Collect "items" across paged JSON lines into one JSON array."""
     out = []
-    for row in rows:
-        row = dict(row)
-        if date_field in row:
-            row[date_field] = fn_date_iso(str(row[date_field]))
-        out.append(row)
+    for line in text.split("\n"):
+        if line.strip():
+            out.extend(json.loads(line)["items"])
     return json.dumps(out)
 
+
+def pre_paginate(text):
+    """Every non-empty line is {"items": [...]} (paged-text)."""
+    lines = [line for line in text.split("\n") if line.strip()]
+    if not lines:
+        return False
+    try:
+        return all(isinstance(json.loads(line), dict)
+                   and isinstance(json.loads(line).get("items"), list)
+                   for line in lines)
+    except ValueError:
+        return False
+
+
+def fn_retry_schedule(text):
+    """Map a retry spec to its next wait + remaining budget."""
+    spec = json.loads(text)
+    attempts = spec["attempts"]
+    left = max(0, spec["max"] - attempts)
+    wait = spec["base_ms"] * (2 ** attempts) if left > 0 else None
+    return json.dumps({"next_wait_ms": wait, "retries_left": left})
+
+
+def pre_retry_schedule(text):
+    """Input is {"attempts": n>=0, "max": m>=1, "base_ms": b>=0}."""
+    try:
+        spec = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(spec, dict):
+        return False
+    try:
+        attempts = spec["attempts"]
+        maximum = spec["max"]
+        base = spec["base_ms"]
+    except KeyError:
+        return False
+    return (isinstance(attempts, int) and isinstance(maximum, int)
+            and isinstance(base, int) and attempts >= 0
+            and maximum >= 1 and base >= 0)
+
+
+def fn_ratelimit(text):
+    """Fixed-window allow/deny verdicts for ascending hit timestamps."""
+    spec = json.loads(text)
+    limit = spec["limit"]
+    window = spec["window_s"]
+    start = spec["hits"][0] if spec["hits"] else 0
+    counts = {}
+    out = []
+    for hit in spec["hits"]:
+        key = int((hit - start) // window)
+        used = counts.get(key, 0)
+        out.append("allow" if used < limit else "deny")
+        counts[key] = used + 1
+    return json.dumps(out)
+
+
+def pre_ratelimit(text):
+    """Input is {"limit": n>=1, "window_s": w>0, "hits": asc numbers}."""
+    try:
+        spec = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(spec, dict):
+        return False
+    limit = spec.get("limit")
+    window = spec.get("window_s")
+    hits = spec.get("hits")
+    if not (isinstance(limit, int) and limit >= 1):
+        return False
+    if not (isinstance(window, (int, float))
+            and not isinstance(window, bool) and window > 0):
+        return False
+    if not isinstance(hits, list):
+        return False
+    if not all(isinstance(h, (int, float)) and not isinstance(h, bool)
+               for h in hits):
+        return False
+    return all(b >= a for a, b in zip(hits, hits[1:]))
+
+
+def fn_auth(text):
+    """Token freshness verdict: "ok" or "refresh"."""
+    spec = json.loads(text)
+    if spec["now"] + spec["margin_s"] >= spec["expires_at"]:
+        return "refresh"
+    return "ok"
+
+
+def pre_auth(text):
+    """Input is {"expires_at", "now", "margin_s" >= 0} numbers."""
+    try:
+        spec = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(spec, dict):
+        return False
+    try:
+        expires = spec["expires_at"]
+        now = spec["now"]
+        margin = spec["margin_s"]
+    except KeyError:
+        return False
+    nums = all(isinstance(v, (int, float)) and not isinstance(v, bool)
+               for v in (expires, now, margin))
+    return nums and margin >= 0
+
+
+def fn_normalize(text):
+    """Strip string values; lowercase email fields (JSON array)."""
+    rows = json.loads(text)
+    out = []
+    for row in rows:
+        clean = {}
+        for key, value in row.items():
+            if isinstance(value, str):
+                value = value.strip()
+                if key == "email":
+                    value = value.lower()
+            clean[key] = value
+        out.append(clean)
+    return json.dumps(out)
+
+
+def pre_normalize(text):
+    """Input is a JSON array of objects."""
+    try:
+        rows = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(rows, list) and all(
+        isinstance(row, dict) for row in rows)
+
+
+def fn_dedup(text):
+    """Drop exact-duplicate elements, keep first occurrence order."""
+    rows = json.loads(text)
+    seen = set()
+    out = []
+    for row in rows:
+        key = json.dumps(row, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            out.append(row)
+    return json.dumps(out)
+
+
+def pre_dedup(text):
+    """Input is a JSON array."""
+    try:
+        return isinstance(json.loads(text), list)
+    except ValueError:
+        return False
+
+
+def fn_cache(text):
+    """Cache lookup: value JSON on hit, "MISS" otherwise."""
+    spec = json.loads(text)
+    if spec["key"] in spec["entries"]:
+        return json.dumps(spec["entries"][spec["key"]])
+    return "MISS"
+
+
+def pre_cache(text):
+    """Input is {"entries": {...}, "key": str}."""
+    try:
+        spec = json.loads(text)
+    except ValueError:
+        return False
+    return (isinstance(spec, dict)
+            and isinstance(spec.get("entries"), dict)
+            and isinstance(spec.get("key"), str))
+
+
+def fn_validate(text):
+    """Required-field check: "ok" or "missing:a,b" (sorted)."""
+    spec = json.loads(text)
+    absent = sorted(k for k in spec["required"]
+                    if k not in spec["record"])
+    if not absent:
+        return "ok"
+    return "missing:" + ",".join(absent)
+
+
+def pre_validate(text):
+    """Input is {"required": [str], "record": {...}}."""
+    try:
+        spec = json.loads(text)
+    except ValueError:
+        return False
+    return (isinstance(spec, dict)
+            and isinstance(spec.get("required"), list)
+            and all(isinstance(k, str) for k in spec["required"])
+            and isinstance(spec.get("record"), dict))
+
+
+# ---------------------------------------------------------------------------
+# Composition glue (tiny verified plumbing between reused capabilities)
+# ---------------------------------------------------------------------------
 
 def fn_table_csv(text):
     """JSON array of objects -> RFC 4180 CSV text (header + rows)."""
@@ -255,9 +452,12 @@ def glue_flat_to_rows(flat_json):
     return json.dumps(rows)
 
 
-GLUE = {
-    "csv_date_iso": glue_csv_date_iso,
-    "flat_to_rows": glue_flat_to_rows,
+# Typed glue adapters for composition search: name -> (in, out, fn).
+# Search may only bridge a type gap with glue whose in/out types link
+# the two neighboring steps; untyped plumbing is not searchable.
+GLUE_SPECS = {
+    "flat_to_rows": (("flat-json-object",), ("json-array",),
+                     glue_flat_to_rows),
 }
 
 
@@ -278,6 +478,11 @@ class ExecCapability:
         self.precondition = precondition
         self.prompt_keywords = frozenset(prompt_keywords)
         self.source_task = source_task
+        # Reuse evidence (directive §1-2): positive/negative task ids
+        # from trusted scoring, never from model claims. Updated by
+        # the driver after verification, not by the capability itself.
+        self.positive = []
+        self.negative = []
 
     @property
     def id(self):
@@ -306,13 +511,27 @@ class ExecCapability:
         """Run the capability (pure computation, never the model)."""
         return self.fn(check_input)
 
+    def record(self, task_id, helped):
+        """Append trusted reuse evidence (driver calls post-scoring)."""
+        target = self.positive if helped else self.negative
+        if task_id not in target:
+            target.append(task_id)
+
+    def evidence(self):
+        """Evidence envelope for promotion accounting (§9)."""
+        return {"positive": list(self.positive),
+                "negative": list(self.negative),
+                "reuse_count": len(self.positive) + len(self.negative)}
+
 
 def seed_capabilities():
-    """The five verified seed capabilities.
+    """The thirteen verified seed capabilities.
 
     Four mirror Family A exposure procedures (one per category); the
-    fifth (cap-table-csv) is the verified inverse of cap-csv-parse with
-    its own contract checks (see SYNTHETIC_CHECKS below).
+    fifth (cap-table-csv) is the verified inverse of cap-csv-parse
+    with its own contract checks (see SYNTHETIC_CHECKS below); eight
+    more implement the Family W API-workflow primitives (directive
+    §4), each verified against its W-EXP exposure task.
     """
     return [
         ExecCapability(
@@ -345,6 +564,59 @@ def seed_capabilities():
             fn_table_csv, pre_table_csv,
             ("serialize", "json", "array", "csv", "header", "rows"),
             "SYNTHETIC:table-csv"),
+        ExecCapability(
+            "cap-paginate", "collect items across paged JSON lines",
+            "api", ("paged-text",), ("json-array",),
+            fn_paginate, pre_paginate,
+            ("paginate", "pages", "cursor", "items", "collect", "next"),
+            "W-EXP-01"),
+        ExecCapability(
+            "cap-retry-schedule", "map a retry spec to next wait + budget",
+            "api", ("retry-spec",), ("schedule-json",),
+            fn_retry_schedule, pre_retry_schedule,
+            ("retry", "backoff", "attempts", "wait", "schedule",
+             "exponential"),
+            "W-EXP-02"),
+        ExecCapability(
+            "cap-ratelimit", "fixed-window allow/deny verdicts per hit",
+            "api", ("rate-spec",), ("verdict-array",),
+            fn_ratelimit, pre_ratelimit,
+            ("ratelimit", "throttle", "window", "quota", "hits",
+             "allowance"),
+            "W-EXP-03"),
+        ExecCapability(
+            "cap-auth", "token freshness verdict ok/refresh",
+            "api", ("auth-spec",), ("verdict-text",),
+            fn_auth, pre_auth,
+            ("auth", "token", "refresh", "expiry", "margin", "session"),
+            "W-EXP-04"),
+        ExecCapability(
+            "cap-normalize", "strip strings and lowercase emails",
+            "api", ("json-array",), ("json-array",),
+            fn_normalize, pre_normalize,
+            ("normalize", "strip", "whitespace", "lowercase", "email",
+             "trim"),
+            "W-EXP-05"),
+        ExecCapability(
+            "cap-dedup", "drop exact-duplicate array elements",
+            "api", ("json-array",), ("json-array",),
+            fn_dedup, pre_dedup,
+            ("dedup", "duplicate", "rows", "exact", "identical",
+             "whole"),
+            "W-EXP-06"),
+        ExecCapability(
+            "cap-cache", "cache lookup with MISS default",
+            "api", ("cache-spec",), ("verdict-text",),
+            fn_cache, pre_cache,
+            ("cache", "lookup", "entries", "hit", "miss", "stored"),
+            "W-EXP-07"),
+        ExecCapability(
+            "cap-validate", "required-field check ok/missing",
+            "api", ("validate-spec",), ("verdict-text",),
+            fn_validate, pre_validate,
+            ("validate", "schema", "required", "missing", "record",
+             "fields"),
+            "W-EXP-08"),
     ]
 
 
@@ -363,25 +635,139 @@ SYNTHETIC_CHECKS = {
 }
 
 
-def run_csv_date_iso(registry, check_input):
-    """csv-parse -> map date-iso over the date field. Uses 2 capabilities."""
-    rows_json = registry.get("cap-csv-parse").execute(check_input)
-    date_fn = registry.get("cap-date-iso").fn
-    rows = json.loads(rows_json)
+# ---------------------------------------------------------------------------
+# Deterministic composition search (directive §3, order item 4)
+#
+# Plans are DISCOVERED, not registered: search enumerates small plans
+# over the capability library, validates type/effect compatibility,
+# requires per-step prompt evidence plus output-type agreement, and
+# trial-executes survivors. Two plan shapes:
+#
+#   SEQ  step1 -> [glue ->] step2 [-> step3]: direct string threading
+#        where output/input types connect (at most one typed glue
+#        adapter per gap, depth <= 3).
+#   MAP  array-producer -> map element-cap over a prompt-named field.
+#
+# No model call anywhere: enumeration, validation, and ranking are
+# pure computation with deterministic tie-breaks (type-match tier,
+# procedure coverage, fewer steps, higher mean overlap, plan id).
+# ---------------------------------------------------------------------------
+
+# Prompt phrases/words -> data types they evince, read AFTER the word
+# "output": a plan whose final outputs cannot satisfy the demand is
+# rejected before trial. Multi-word cues are specific ("flat JSON
+# object" means ONLY flat-json-object) and suppress the generic
+# json-family single words: without that narrowing, a lossy
+# flatten->csv->parse roundtrip chain passes as "JSON" on a task
+# demanding a flat object (regression pinned in test_execaps).
+_OUTPUT_PHRASES = (
+    ("flat json object", ("flat-json-object",)),
+    ("json array", ("json-array",)),
+    ("json object", ("json-object",)),
+)
+_OUTPUT_KEYWORDS = {
+    "json": ("json-array", "json-object", "flat-json-object"),
+    "array": ("json-array",),
+    "object": ("json-object", "flat-json-object"),
+    "objects": ("json-array",),
+    "csv": ("csv-text",),
+    "iso": ("iso-date-text",),
+    "date": ("date-text", "iso-date-text"),
+    "dates": ("date-text", "iso-date-text"),
+    "clf": ("json-object",),
+}
+_JSON_FAMILY_WORDS = frozenset({"json", "array", "object", "objects"})
+
+_MIN_STEP_OVERLAP = 0.2
+
+
+def _prompt_words(task):
+    return set(re.findall(r"[a-z0-9]+",
+                          str(task.get("prompt", "")).lower()))
+
+
+def infer_output_types(task):
+    """Data types the task prompt demands AFTER the word "output".
+
+    Empty set when the prompt has no output section (caller then
+    relies on trial execution alone, ranked below type-matched plans).
+    """
+    prompt = str(task.get("prompt", "")).lower()
+    _, sep, after = prompt.partition("output")
+    if not sep:
+        return frozenset()
+    flat = re.sub(r"\s+", " ", after)
+    out = set()
+    specific = False
+    for phrase, types in _OUTPUT_PHRASES:
+        if phrase in flat:
+            out.update(types)
+            specific = True
+    words = set(re.findall(r"[a-z0-9]+", after))
+    for word, types in _OUTPUT_KEYWORDS.items():
+        if specific and word in _JSON_FAMILY_WORDS:
+            continue
+        if word in words:
+            out.update(types)
+    return frozenset(out)
+
+
+def _prompt_fields(task):
+    """Field names the prompt nominates for MAP plans.
+
+    Single-quoted single tokens ('date') plus "<name> column"
+    phrasing. Multi-word quotes are format examples, not fields.
+    """
+    prompt = str(task.get("prompt", ""))
+    fields = set(re.findall(r"'([A-Za-z_][A-Za-z0-9_]*)'", prompt))
+    fields.update(m.lower()
+                  for m in re.findall(r"([A-Za-z_]+)\s+column", prompt,
+                                      flags=re.IGNORECASE))
+    return fields
+
+
+def _links_between(out_types, in_types):
+    """Glue options bridging out_types -> in_types (None = direct).
+
+    Yields None when the types connect directly, plus every typed
+    glue adapter whose in/out links the gap. Deterministic order:
+    direct first, then glue by name.
+    """
+    if set(out_types) & set(in_types):
+        yield None
+    for name in sorted(GLUE_SPECS):
+        glue_in, glue_out, _ = GLUE_SPECS[name]
+        if (set(out_types) & set(glue_in)
+                and set(glue_out) & set(in_types)):
+            yield name
+
+
+def run_seq_plan(registry, pieces, check_input):
+    """Execute a SEQ plan: alternating cap ids and glue names."""
+    value = check_input
+    for piece in pieces:
+        if piece in GLUE_SPECS:
+            value = GLUE_SPECS[piece][2](value)
+        else:
+            value = registry.get(piece).execute(value)
+    return value
+
+
+def run_map_plan(registry, producer_id, field, element_id, check_input):
+    """Execute a MAP plan: producer -> map element-cap over field."""
+    rows = json.loads(registry.get(producer_id).execute(check_input))
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("MAP producer must yield a non-empty JSON array")
+    if not any(isinstance(row, dict) and field in row for row in rows):
+        raise ValueError("field %r absent from producer rows" % (field,))
+    element = registry.get(element_id)
     out = []
     for row in rows:
         row = dict(row)
-        if "date" in row:
-            row["date"] = date_fn(str(row["date"]))
+        if field in row:
+            row[field] = element.execute(str(row[field]))
         out.append(row)
     return json.dumps(out)
-
-
-def run_flat_to_csv(registry, check_input):
-    """flatten -> rows glue -> table-csv. Uses 2 capabilities + plumbing."""
-    flat = registry.get("cap-flatten").execute(check_input)
-    rows = glue_flat_to_rows(flat)
-    return registry.get("cap-table-csv").execute(rows)
 
 
 class Composition:
@@ -403,6 +789,8 @@ class Composition:
         self.run = run
         self.category = category
         self.prompt_keywords = frozenset(prompt_keywords)
+        self._positive = []
+        self._negative = []
 
     @property
     def id(self):
@@ -423,38 +811,251 @@ class Composition:
         """Run the plan (pure computation, never the model)."""
         return self.run(registry, check_input)
 
+    def record(self, task_id, helped):
+        """Append trusted reuse evidence (driver calls post-scoring)."""
+        target = self._positive if helped else self._negative
+        if task_id not in target:
+            target.append(task_id)
 
-def seed_compositions():
-    """Two verified compositions, each reusing 2 seed capabilities."""
-    return [
-        Composition(
-            "cmp-csv-date-iso",
-            "parse CSV then normalize its date column to ISO",
-            ["cap-csv-parse", "cap-date-iso"], run_csv_date_iso, "csv",
-            ("parse", "csv", "date", "column", "iso", "json"),
-            ("csv-text",), ("json-array",)),
-        Composition(
-            "cmp-flat-to-csv",
-            "flatten nested JSON object then serialize as key,value CSV",
-            ["cap-flatten", "cap-table-csv"], run_flat_to_csv, "records",
-            ("flatten", "json", "csv", "key", "value", "rows"),
-            ("json-object",), ("csv-text",)),
-    ]
+    def evidence(self):
+        """Evidence envelope for promotion accounting (§9)."""
+        return {"positive": list(self._positive),
+                "negative": list(self._negative),
+                "reuse_count": len(self._positive) + len(self._negative)}
+
+
+def _seq_candidates(caps):
+    """Yield (steps, pieces) SEQ chains, depth 2..3.
+
+    ``steps`` are cap ids in order; ``pieces`` interleave glue names.
+    Every gap links by direct type connection or one typed glue
+    adapter; steps never repeat within a chain.
+    """
+    ordered = sorted(caps, key=lambda c: c.id)
+    pairs = [(a, b) for a in ordered for b in ordered if a is not b]
+    for first, second in pairs:
+        for glue in _links_between(first.descriptor.output_types,
+                                   second.descriptor.input_types):
+            pieces = [first.id]
+            if glue is not None:
+                pieces.append(glue)
+            pieces.append(second.id)
+            yield ([first.id, second.id], pieces)
+    triples = [(a, b, c) for a in ordered for b in ordered
+               for c in ordered if len({a.id, b.id, c.id}) == 3]
+    for first, second, third in triples:
+        for glue_ab in _links_between(
+                first.descriptor.output_types,
+                second.descriptor.input_types):
+            for glue_bc in _links_between(
+                    second.descriptor.output_types,
+                    third.descriptor.input_types):
+                pieces = [first.id]
+                if glue_ab is not None:
+                    pieces.append(glue_ab)
+                pieces.append(second.id)
+                if glue_bc is not None:
+                    pieces.append(glue_bc)
+                pieces.append(third.id)
+                yield ([first.id, second.id, third.id], pieces)
+
+
+def _map_candidates(caps, fields):
+    """Yield (producer, field, element) MAP candidates.
+
+    The producer must emit a JSON array; the element step may be any
+    other capability; the field must be prompt-nominated.
+    """
+    ordered = sorted(caps, key=lambda c: c.id)
+    for producer in ordered:
+        if "json-array" not in producer.descriptor.output_types:
+            continue
+        for element in ordered:
+            if element is producer:
+                continue
+            for field in sorted(fields):
+                yield (producer.id, field, element.id)
+
+
+def search_compositions(registry, task, check_input, min_overlap=0.5,
+                        max_plans=8):
+    """Deterministically discover composition plans for a task+input.
+
+    Enumerates SEQ chains (depth <= 3) and MAP plans, then applies
+    the validation gates in order: effect compatibility (effectful
+    plans need task-allowed effects), per-step prompt evidence (>=
+    0.2 each), output-type agreement with the prompt demand, trial
+    execution on ``check_input``, and non-vacuity (the plan must
+    compute something neither endpoint step computes alone).
+    Survivors rank by (type-match tier, mention-order inversions,
+    -procedure coverage, steps, -mean step overlap, plan id); at most
+    ``max_plans`` return. Mention order comes first among prompt
+    signals: procedural prompts list steps in execution order
+    ("normalize ... and dedup"), so a plan whose steps run against
+    that order loses to one that follows it. Procedure coverage
+    (distinct NON-demand prompt words the steps' signatures explain)
+    outranks brevity next: on a three-procedure prompt the full
+    3-chain must beat a trial-passing 2-subchain. Empty means "no
+    composable plan" -- the caller falls through to
+    adaptation/synthesis. No model call anywhere.
+    """
+    caps = list(registry._caps.values())
+    by_id = {cap.id: cap for cap in caps}
+    words = _prompt_words(task)
+    before, sep, _ = str(task.get("prompt", "")).lower().partition("output")
+    procedure_words = (set(re.findall(r"[a-z0-9]+", before)) if sep
+                       else set(words))
+    # Step evidence uses PROCEDURE words only: demand words ("output",
+    # "json") appear in every JSON task's demand clause and must not
+    # support a procedure match -- otherwise e.g. flatten (whose
+    # signature contains "json"+"output") reaches 2/6 on any JSON
+    # prompt and spurious chains trial-pass on single-procedure
+    # tasks (W-EXP-05 regression).
+    step_overlap = {}
+    for cap in caps:
+        if cap.prompt_keywords:
+            step_overlap[cap.id] = (
+                len(cap.prompt_keywords & procedure_words)
+                / len(cap.prompt_keywords))
+        else:
+            step_overlap[cap.id] = 0.0
+    demanded = infer_output_types(task)
+    allowed = task.get("allowed_effects")
+
+    def trial_ok(plan, uses):
+        """Trial execution plus the non-vacuity gate.
+
+        The plan must run without error AND compute something
+        neither endpoint step computes alone: a chain whose output
+        equals its first step's output (e.g. flattening an
+        already-flat object) is not a composition, it is a
+        single-capability task wearing a costume.
+        """
+        try:
+            out = plan.execute(registry, check_input)
+        except Exception:
+            return False
+        try:
+            if out == by_id[uses[0]].execute(check_input):
+                return False
+        except Exception:
+            pass
+        try:
+            if out == by_id[uses[-1]].execute(check_input):
+                return False
+        except Exception:
+            pass
+        return True
+
+    ordered_words = re.findall(r"[a-z0-9]+",
+                               str(task.get("prompt", "")).lower())
+    first_mention = {}
+    for pos, word in enumerate(ordered_words):
+        first_mention.setdefault(word, pos)
+
+    def viable(uses):
+        if any(step_overlap[u] < _MIN_STEP_OVERLAP for u in uses):
+            return None
+        effects = set()
+        for u in uses:
+            effects.update(by_id[u].descriptor.effects)
+        if effects and (allowed is None
+                        or not effects <= set(allowed)):
+            return None
+        mean = sum(step_overlap[u] for u in uses) / len(uses)
+        covered = set()
+        for u in uses:
+            covered.update(by_id[u].prompt_keywords & procedure_words)
+        positions = [min(first_mention[w]
+                         for w in by_id[u].prompt_keywords & words)
+                     for u in uses]
+        inversions = sum(1 for i in range(len(positions))
+                         for j in range(i + 1, len(positions))
+                         if positions[i] > positions[j])
+        return mean, len(covered), inversions
+
+    ranked = []
+    for steps, pieces in _seq_candidates(caps):
+        score = viable(steps)
+        if score is None or score[0] < min_overlap:
+            continue
+        mean, coverage, inversions = score
+        final = by_id[steps[-1]].descriptor.output_types
+        if demanded and not (set(final) & set(demanded)):
+            continue
+        plan_id = "seq:" + ">".join(pieces)
+        keywords = set()
+        for u in steps:
+            keywords.update(by_id[u].prompt_keywords)
+        plan = Composition(
+            plan_id,
+            " then ".join(by_id[u].descriptor.intent for u in steps),
+            steps,
+            lambda reg, text, p=pieces: run_seq_plan(reg, p, text),
+            task.get("category"),
+            tuple(sorted(keywords)),
+            by_id[steps[0]].descriptor.input_types,
+            tuple(final))
+        if not trial_ok(plan, steps):
+            continue
+        ranked.append((len(steps), -mean, plan_id, plan,
+                       bool(demanded and set(final) & set(demanded)),
+                       coverage, inversions))
+    for producer, field, element in _map_candidates(
+            caps, _prompt_fields(task)):
+        uses = [producer, element]
+        score = viable(uses)
+        if score is None or score[0] < min_overlap:
+            continue
+        mean, coverage, inversions = score
+        final = by_id[producer].descriptor.output_types
+        if demanded and not (set(final) & set(demanded)):
+            continue
+        plan_id = "map:%s[%s]>%s" % (producer, field, element)
+        keywords = (by_id[producer].prompt_keywords
+                    | by_id[element].prompt_keywords)
+        plan = Composition(
+            plan_id,
+            "%s then map %s over field %r"
+            % (by_id[producer].descriptor.intent,
+               by_id[element].descriptor.intent, field),
+            uses,
+            lambda reg, text, p=producer, f=field, e=element: (
+                run_map_plan(reg, p, f, e, text)),
+            task.get("category"),
+            tuple(sorted(keywords)),
+            by_id[producer].descriptor.input_types,
+            tuple(final))
+        if not trial_ok(plan, uses):
+            continue
+        ranked.append((len(uses), -mean, plan_id, plan,
+                       bool(demanded and set(final) & set(demanded)),
+                       coverage, inversions))
+    # Type-match tier, mention-order inversions, procedure coverage,
+    # fewer steps, higher mean overlap, plan id (fully deterministic).
+    ranked.sort(key=lambda row: (not row[4], row[6], -row[5], row[0],
+                                 row[1], row[2]))
+    return [row[3] for row in ranked[:max(0, max_plans)]]
 
 
 class ExecRegistry:
-    """Executable store: retrieval (via retrieve.py) + verified execution."""
+    """Executable store: retrieval (via retrieve.py) + verified execution.
+
+    ``_comps`` is the discovered-plan cache: search synthesizes plans
+    and memoizes winners here (promotion evidence accrues on the
+    cached plan). Nothing is pre-registered: an empty registry
+    discovers the same plans as a warm one.
+    """
 
     def __init__(self, capabilities=None, compositions=None):
         self._caps = {}
         for cap in capabilities or seed_capabilities():
             self._caps[cap.id] = cap
         self._comps = {}
-        for comp in compositions or seed_compositions():
+        for comp in compositions or ():
             self._comps[comp.id] = comp
         self.index = retrieve.CapabilityIndex(
-            [cap.descriptor for cap in self._caps.values()] +
-            [comp.descriptor for comp in self._comps.values()])
+            [cap.descriptor for cap in self._caps.values()])
 
     def get(self, cap_id):
         return self._caps.get(cap_id)
@@ -483,29 +1084,30 @@ class ExecRegistry:
         by_id = {cap.id: cap for cap in fitting}
         return [by_id[cap.id] for cap, _ in scored if cap.id in by_id]
 
-    def find_composition(self, task, check_input, min_overlap=0.6):
-        """First composition whose category+prompt fits and steps run.
+    def find_composition(self, task, check_input, min_overlap=0.5):
+        """Best searched plan for a task+input, memoized in the cache.
 
-        The default bar (0.6) is stricter than single-capability
-        matching (0.5): a composition skips the model for a MULTI-step
-        plan, so the prompt must show evidence of both steps, not just
-        one shared procedure word.
+        Delegates to :func:`search_compositions` (type/effect/prompt/
+        trial gates, deterministic rank) and caches the winner so
+        promotion evidence accrues on one stable plan id. Category
+        match is required: a plan discovered for csv never fires on
+        records. Empty registry discovers the same plans as a warm
+        one -- nothing is pre-registered.
         """
-        words = set(re.findall(
-            r"[a-z0-9]+", str(task.get("prompt", "")).lower()))
-        for comp in self._comps.values():
-            if task.get("category") != comp.category:
-                continue
-            overlap = (len(comp.prompt_keywords & words)
-                       / len(comp.prompt_keywords))
-            if overlap < min_overlap:
-                continue
-            try:
-                comp.execute(self, check_input)
-            except Exception:
-                continue
-            return comp
-        return None
+        # Always re-search: the full gate stack (per-step
+        # evidence, output-type demand, trial) must pass on THIS
+        # input, so a memoized plan can never fire where only a
+        # subset of its steps applies. Winners memoize by plan id
+        # for stable promotion evidence.
+        plans = search_compositions(
+            self, task, check_input, min_overlap=min_overlap,
+            max_plans=1)
+        if not plans:
+            return None
+        if plans[0].category != task.get("category"):
+            return None
+        self._comps.setdefault(plans[0].id, plans[0])
+        return self._comps[plans[0].id]
 
 
 def verify_capability(cap, task):

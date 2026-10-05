@@ -1,0 +1,51 @@
+[
+  {
+    "id": "W-CMP-01",
+    "family": "W",
+    "split": "transfer",
+    "category": "api",
+    "prompt": "Paginate across pages to collect items, then dedup duplicate rows. Output a JSON array.",
+    "checks": [
+      {
+        "input": "{\"items\": [{\"k\": 1}], \"next\": true}\n{\"items\": [{\"k\": 1}, {\"k\": 2}], \"next\": false}",
+        "expected": "[{\"k\": 1}, {\"k\": 2}]",
+        "compare": "json"
+      },
+      {
+        "input": "{\"items\": [7, 7], \"next\": true}\n{\"items\": [7], \"next\": false}",
+        "expected": "[7]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Two-composition: paginate -> dedup.",
+    "composes": [
+      "cap-paginate",
+      "cap-dedup"
+    ]
+  },
+  {
+    "id": "W-CMP-02",
+    "family": "W",
+    "split": "transfer",
+    "category": "api",
+    "prompt": "Paginate across pages to collect items, then normalize each record (strip whitespace, lowercase email values) and dedup duplicate rows. Output a JSON array.",
+    "checks": [
+      {
+        "input": "{\"items\": [{\"email\": \" A@X.IO \", \"n\": \" x \"}], \"next\": true}\n{\"items\": [{\"email\": \"a@x.io\", \"n\": \"x\"}, {\"email\": \"B@Y.IO\", \"n\": \"y\"}], \"next\": false}",
+        "expected": "[{\"email\": \"a@x.io\", \"n\": \"x\"}, {\"email\": \"b@y.io\", \"n\": \"y\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "{\"items\": [{\"t\": \" a \"}], \"next\": false}",
+        "expected": "[{\"t\": \"a\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Three-composition: paginate -> normalize -> dedup.",
+    "composes": [
+      "cap-paginate",
+      "cap-normalize",
+      "cap-dedup"
+    ]
+  }
+]
