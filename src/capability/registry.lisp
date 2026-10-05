@@ -15,32 +15,53 @@
 resolve against *DEFAULT-PATHNAME-DEFAULTS*; rebind to an absolute dir
 (e.g. under the OS temp area) for tests.")
 
-(defun register-capability (id version record &key parent-version)
-  "Register RECORD as VERSION of capability ID. Versions are immutable:
-re-registering an existing (ID . VERSION) signals an error."
+(defvar *registry-lock* (sb-thread:make-mutex :name "evo.registry")
+  "Serializes registry updates (issues.md #54). SBCL mutexes are not
+recursive, so %% helpers below do the work lock-free and public
+wrappers take the lock exactly once; compound helpers call only the
+%% variants inside their own held lock.")
+
+(defmacro with-registry-lock (() &body body)
+  "Execute BODY holding the registry lock."
+  `(sb-thread:with-mutex (*registry-lock*)
+     ,@body))
+
+(defun %register-capability (id version record parent-version)
+  "Lock-free registration core; caller must hold *REGISTRY-LOCK*."
   (let ((key (cons id version)))
     (when (gethash key *registry*)
       (error "Capability ~S version ~S is immutable and already registered."
              id version))
+    (when (and parent-version
+               (not (gethash (cons id parent-version) *registry*)))
+      (error "Parent version ~S of ~S is not registered (orphan)."
+             parent-version id))
     (setf (gethash key *registry*)
           (list :id id :version version :parent-version parent-version
                 :record record))
-  version))
+    version))
 
-(defun register-capability-version (capability)
-  "Register a capability struct by its own id/version/parent-version."
-  (register-capability (evo.capability:capability-id capability)
-                       (evo.capability:capability-version capability)
-                       capability
-                       :parent-version
-                       (evo.capability:capability-parent-version capability)))
+(defun register-capability (id version record &key parent-version)
+  "Register RECORD as VERSION of capability ID. Versions are immutable:
+re-registering an existing (ID . VERSION) signals an error.
+Registration is atomic under *REGISTRY-LOCK* (issues.md #54), and a
+claimed PARENT-VERSION must already be registered with a smaller
+version number (issues.md #53)."
+  (unless (and (integerp version) (> version 0))
+    (error "Capability version must be a positive integer, got ~S."
+           version))
+  (when parent-version
+    (unless (and (integerp parent-version) (> parent-version 0))
+      (error "Parent version must be a positive integer or NIL, got ~S."
+             parent-version))
+    (unless (< parent-version version)
+      (error "Parent version ~S must precede version ~S (acyclic)."
+             parent-version version)))
+  (with-registry-lock ()
+    (%register-capability id version record parent-version)))
 
-(defun find-capability-version (id version)
-  "Return the record plist for ID at VERSION, or NIL when absent."
-  (gethash (cons id version) *registry*))
-
-(defun capability-versions (id)
-  "Return the sorted list of registered versions for capability ID."
+(defun %capability-versions (id)
+  "Lock-free sorted version list; caller must hold *REGISTRY-LOCK*."
   (let (versions)
     (maphash (lambda (key value)
                (declare (ignore value))
@@ -49,6 +70,75 @@ re-registering an existing (ID . VERSION) signals an error."
              *registry*)
     (sort versions #'<)))
 
+(defun next-version (id)
+  "Next free version number for ID: one plus the registered maximum, or 1."
+  (with-registry-lock ()
+    (1+ (reduce #'max (%capability-versions id) :initial-value 0))))
+
+(defun %strip-version-key (plist)
+  (let (out)
+    (loop for (key value) on plist by #'cddr
+          unless (eql key :version)
+            do (setf out (list* key value out)))
+    (nreverse out)))
+
+(defun derive-and-register-version (parent &rest overrides
+                                    &key version &allow-other-keys)
+  "Derive from PARENT and register the child atomically (issues.md #54).
+
+The child version is VERSION when given, else one plus the maximum of
+the parent version and every registered version of the family — so two
+concurrent derivations never collide (the second becomes a forked
+successor, not a failed duplicate). OVERRIDES pass through to
+DERIVE-VERSION. Returns the registered child struct."
+  (declare (ignore version))
+  (with-registry-lock ()
+    (let* ((id (evo.capability:capability-id parent))
+           (clean (%strip-version-key overrides))
+           (child-version
+             (or (getf overrides :version)
+                 (1+ (max (evo.capability:capability-version parent)
+                          (reduce #'max (%capability-versions id)
+                                  :initial-value 0))))))
+      (let ((child (apply #'evo.capability:derive-version parent
+                          :version child-version clean)))
+        (%register-capability-version child)
+        child))))
+
+(defun %register-capability-version (capability)
+  "Lock-free struct registration; caller must hold *REGISTRY-LOCK*."
+  (let ((version (evo.capability:capability-version capability)))
+    (unless (and (integerp version) (> version 0))
+      (error "Capability version must be a positive integer, got ~S."
+             version))
+    (let ((parent (evo.capability:capability-parent-version capability)))
+      (when parent
+        (unless (< parent version)
+          (error "Parent version ~S must precede version ~S (acyclic)."
+                 parent version)))
+      (%register-capability (evo.capability:capability-id capability)
+                            version capability parent))))
+
+(defun register-capability-version (capability)
+  "Register a capability struct by its own id/version/parent-version."
+  (with-registry-lock ()
+    (%register-capability-version capability)))
+
+(defun find-capability-version (id version)
+  "Return the record plist for ID at VERSION, or NIL when absent."
+  (gethash (cons id version) *registry*))
+
+(defun capability-versions (id)
+  "Return the sorted list of registered versions for capability ID."
+  (with-registry-lock ()
+    (let (versions)
+      (maphash (lambda (key value)
+                 (declare (ignore value))
+                 (when (eql (car key) id)
+                   (push (cdr key) versions)))
+               *registry*)
+      (sort versions #'<))))
+
 (defun find-by-stable-id (stable-id)
   "Return the sorted version list for the family named by STABLE-ID.
 Only entries whose record is a capability struct carrying STABLE-ID
@@ -56,16 +146,17 @@ match; raw (non-struct) records are skipped. Returns NIL when the
 stable-id is unknown. Signals an error when STABLE-ID is malformed."
   (unless (evo.capability:stable-id-p stable-id)
     (error "Malformed stable-id: ~S." stable-id))
-  (let (versions)
-    (maphash (lambda (key value)
-               (let ((record (getf value :record)))
-                 (when (and (evo.capability:capability-p record)
-                            (string= (evo.capability:capability-stable-id
-                                      record)
-                                     stable-id))
-                   (push (cdr key) versions))))
-             *registry*)
-    (sort versions #'<)))
+  (with-registry-lock ()
+    (let (versions)
+      (maphash (lambda (key value)
+                 (let ((record (getf value :record)))
+                   (when (and (evo.capability:capability-p record)
+                              (string= (evo.capability:capability-stable-id
+                                        record)
+                                       stable-id))
+                     (push (cdr key) versions))))
+               *registry*)
+      (sort versions #'<))))
 
 (defun stable-id-pathname (stable-id version &optional (dir *registry-data-dir*))
   "Drift-proof pathname for the family named by STABLE-ID at VERSION.
@@ -326,24 +417,30 @@ Returns the sorted list of pathnames written."
 
 (defun load-registry (&optional (dir *registry-data-dir*))
   "Reload every persisted capability file under DIR into the registry.
-Returns the reloaded structs, sorted by (id name, version)."
+Returns the reloaded structs, sorted by (id name, version).
+Reads all files first, then registers in (id, version) order so
+lineage validation (issues.md #53) always sees parents before
+children regardless of glob order."
   (let ((files (directory (merge-pathnames "*.lisp" dir)))
         structs)
-    (dolist (path (sort files #'string< :key #'namestring) structs)
+    (dolist (path files)
       (with-open-file (in path :direction :input :external-format :utf-8)
         (let ((*package* (find-package :cl-user))
               (*read-eval* nil))
-          (let ((capability (plist->capability (read in))))
-            (unless (find-capability-version
-                     (evo.capability:capability-id capability)
-                     (evo.capability:capability-version capability))
-              (register-capability-version capability))
-            (push capability structs)))))
-    (sort structs
-          (lambda (a b)
-            (let ((na (symbol-name (evo.capability:capability-id a)))
-                  (nb (symbol-name (evo.capability:capability-id b))))
-              (or (string< na nb)
-                  (and (string= na nb)
-                       (< (evo.capability:capability-version a)
-                          (evo.capability:capability-version b)))))))))
+          (push (plist->capability (read in)) structs))))
+    (setf structs
+          (sort structs
+                (lambda (a b)
+                  (let ((na (symbol-name
+                             (evo.capability:capability-id a)))
+                        (nb (symbol-name
+                             (evo.capability:capability-id b))))
+                    (or (string< na nb)
+                        (and (string= na nb)
+                             (< (evo.capability:capability-version a)
+                                (evo.capability:capability-version b))))))))
+    (dolist (capability structs structs)
+      (unless (find-capability-version
+               (evo.capability:capability-id capability)
+               (evo.capability:capability-version capability))
+        (register-capability-version capability)))))

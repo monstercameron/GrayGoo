@@ -163,6 +163,12 @@ given explicitly."
   (let ((promotion (or promotion-status state)))
     (unless (lifecycle-state-p promotion)
       (error "Unknown promotion status: ~S." promotion))
+    ;; Issues.md #52: the two lifecycle markers may not contradict —
+    ;; promotion-status never lags behind state in lifecycle order.
+    (when (> (position state *lifecycle-states*)
+             (position promotion *lifecycle-states*))
+      (error "Promotion status ~S must not lag state ~S in lifecycle order."
+             promotion state))
     (unless (risk-level-p risk)
       (error "Unknown risk level: ~S (want one of ~S)."
              risk *capability-risk-levels*))

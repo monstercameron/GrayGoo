@@ -161,8 +161,29 @@ probes and fixed:
   counting, #64/#65 dashboard-only metrics + dead Lisp).
 
 Still REAL, not yet fixed: #47/#48 (Lisp security/effects stubs),
-#52-54 (lineage/version concurrency), #57-60 (worker protocol
-semantics/compile), #66-70 (provenance/metrics/source-of-truth).
+#57-60 (worker protocol semantics/compile), #66-70
+(provenance/metrics/source-of-truth).
+
+## Round 6 (2026-10-05): issues #52-54
+
+- #52 (MEDIUM): state/promotion-status could contradict. Fixed:
+  `make-capability` requires promotion-status at or ahead of state
+  in `*lifecycle-states*` order.
+- #53 (MEDIUM): parent lineage unvalidated. Fixed: registration
+  requires a claimed parent to be registered with a smaller version
+  (acyclic + orphan checks); `load-registry` reads all files first,
+  then registers in (id, version) order so parents always precede
+  children regardless of glob order.
+- #54 (HIGH): version branching under concurrency. Fixed:
+  `*registry-lock*` (non-recursive SBCL mutex; lock-free `%`
+  cores + single-lock wrappers after finding SBCL has no
+  `:kind :recursive`), atomic check-and-set registration,
+  `next-version`, and `derive-and-register-version` (child =
+  max(parent, registered)+1 — concurrent derives fork forward,
+  never collide or lose updates).
+- Probe `capability-model.lisp` extended (10 new checks incl. 4
+  threads x 10 concurrent derivations = versions 1-41 exactly);
+  all 8 probes PASS; ASDF loads (`evo-packages=25`).
 
 ## Round 5 (2026-10-05): issues #49-51
 

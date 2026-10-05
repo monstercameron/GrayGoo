@@ -84,4 +84,6 @@
            #:save-registry
            #:load-registry
            #:find-by-stable-id
-           #:stable-id-pathname))
+           #:stable-id-pathname
+           #:next-version
+           #:derive-and-register-version))

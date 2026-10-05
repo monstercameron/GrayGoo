@@ -1,8 +1,9 @@
 ;;;; tests/lisp/capability-model.lisp — Constructor validation + derivation.
 ;;;;
 ;;;; Issues.md #49 (derive cannot clear list fields), #50 (TTL cannot
-;;;; be removed), #51 (risk values unvalidated). Standalone probe:
-;;;; exits 0/1.
+;;;; be removed), #51 (risk values unvalidated), #52 (lifecycle /
+;;;; promotion contradiction), #53 (unvalidated parent lineage), #54
+;;;; (version collision under concurrency). Standalone probe: exits 0/1.
 
 (defparameter *probe-dir*
   (make-pathname :defaults (or *load-truename* #P"./")
@@ -14,7 +15,8 @@
   (load (merge-pathnames #P"src/capability/packages.lisp" *repo-root*))
   (load (merge-pathnames #P"src/capability/capability.lisp" *repo-root*))
   (load (merge-pathnames #P"src/capability/contract.lisp" *repo-root*))
-  (load (merge-pathnames #P"src/capability/intent.lisp" *repo-root*)))
+  (load (merge-pathnames #P"src/capability/intent.lisp" *repo-root*))
+  (load (merge-pathnames #P"src/capability/registry.lisp" *repo-root*)))
 
 (defvar *failures* 0)
 
@@ -85,8 +87,90 @@
                 (string= "u" (evo.capability:capability-creator kept))
                 (string= "m" (evo.capability:capability-model kept))))))
 
+(defun probe-temp-dir ()
+  (let ((base (or (sb-ext:posix-getenv "TEMP")
+                  (sb-ext:posix-getenv "TMP")
+                  "/tmp")))
+    (merge-pathnames "graygoo-lineage-probe/"
+                     (parse-namestring (concatenate 'string base "/")))))
+
+(defun run-lineage-probe ()
+  ;; #52: promotion-status must not lag state in lifecycle order.
+  (check-error "lagging promotion-status signals"
+    (evo.capability:make-capability 'probe.life :state :stable
+                                    :promotion-status :proposed))
+  (check "leading promotion-status accepted"
+         (evo.capability:capability-p
+          (evo.capability:make-capability 'probe.life :state :proposed
+                                          :promotion-status :stable)))
+  (evo.registry:clear-registry)
+  ;; #53: claimed parents must exist and precede the child.
+  (check-error "orphan parent signals"
+    (evo.registry:register-capability 'probe.orph 2 :rec
+                                      :parent-version 1))
+  (check-error "self-parent signals"
+    (evo.registry:register-capability 'probe.orph 2 :rec
+                                      :parent-version 2))
+  (evo.registry:register-capability 'probe.chain 1 :rec1)
+  (evo.registry:register-capability 'probe.chain 2 :rec2
+                                    :parent-version 1)
+  (check "valid parent chain registers"
+         (equal (evo.registry:capability-versions 'probe.chain) '(1 2)))
+  ;; #54: atomic next-version assignment, no collisions.
+  (check "next-version is max+1"
+         (eql 3 (evo.registry:next-version 'probe.chain)))
+  (check "next-version of unknown family is 1"
+         (eql 1 (evo.registry:next-version 'probe.fresh)))
+  (let* ((parent (evo.capability:make-capability 'probe.race
+                                                 :version 1)))
+    (evo.registry:register-capability-version parent)
+    (let ((threads
+           (loop repeat 4 collect
+                 (sb-thread:make-thread
+                  (lambda ()
+                    (loop repeat 10 do
+                      (evo.registry:derive-and-register-version
+                       parent)))))))
+    (dolist (thread threads) (sb-thread:join-thread thread))
+    (let ((versions (evo.registry:capability-versions 'probe.race)))
+      (check "40 concurrent derivations yield 40 unique versions"
+             (and (= (length versions) 41)
+                  (equal versions
+                         (loop for v from 1 to 41 collect v)))))))
+  (check-error "explicit duplicate version still rejected"
+    (evo.registry:derive-and-register-version
+     (evo.capability:make-capability 'probe.chain :version 9)
+     :version 2))
+  ;; #53: load-registry orders parents before children on its own.
+  (let ((dir (probe-temp-dir)))
+    (evo.registry:ensure-data-dir dir)
+    (unwind-protect
+         (let* ((v1 (evo.capability:make-capability 'probe.persist-chain
+                                                    :version 1))
+                (v2 (evo.capability:derive-version v1))
+                (v3 (evo.capability:derive-version v2)))
+           ;; Save child-first to prove load order independence.
+           (evo.registry:save-capability v3 dir)
+           (evo.registry:save-capability v1 dir)
+           (evo.registry:save-capability v2 dir)
+           (evo.registry:clear-registry)
+           (let ((loaded (evo.registry:load-registry dir)))
+             (check "chain reloads despite reverse save order"
+                    (= (length loaded) 3))
+             (let ((v3 (find 3 loaded
+                             :key #'evo.capability:capability-version)))
+               (check "reloaded chain keeps parent links"
+                      (and v3 (eql 2 (evo.capability:capability-parent-version
+                                      v3)))))))
+      (ignore-errors
+        (dolist (pattern '("*.lisp" "*.tmp"))
+          (dolist (left (directory (merge-pathnames pattern dir)))
+            (delete-file left))))))
+  (evo.registry:clear-registry))
+
 (handler-case
     (progn (run-probe)
+           (run-lineage-probe)
            (if (zerop *failures*)
                (progn (format t "PROBE capability-model: PASS~%")
                       (sb-ext:exit :code 0))
