@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Self-Evolving Lisp Runtime — Thesis &amp; Benchmarks</title>
+<style>
+  :root {
+    --ink: #1c1e1c;
+    --muted: #4a4e4a;
+    --rule: #d8dcd8;
+    --panel: #f2f4f2;
+    --accent: #0e5a60;
+    --accent-soft: #e3efef;
+    --max: 56rem;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: #fff;
+    font-family: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+    font-size: 1.02rem;
+    line-height: 1.62;
+  }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 1.25rem 4rem; }
+  header.site { padding: 2.5rem 0 1rem; border-bottom: 2px solid var(--ink); }
+  header.site h1 {
+    font-family: Georgia, "Iowan Old Style", Palatino, serif;
+    font-size: 2.1rem; line-height: 1.15; margin: 0 0 0.4rem;
+    font-weight: 700;
+  }
+  header.site p.lede { margin: 0.2rem 0 1rem; color: var(--muted); font-size: 1.08rem; max-width: 44rem; }
+  nav.toc { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; padding: 0.8rem 0 0; font-size: 0.95rem; }
+  nav.toc a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+  section { padding: 2rem 0 0.6rem; border-bottom: 1px solid var(--rule); }
+  section:last-of-type { border-bottom: none; }
+  h2 {
+    font-family: Georgia, "Iowan Old Style", Palatino, serif;
+    font-size: 1.55rem; margin: 0 0 0.6rem; font-weight: 700;
+  }
+  h2 .num { color: var(--accent); font-weight: 700; margin-right: 0.5rem; }
+  h3 { font-size: 1.08rem; margin: 1.6rem 0 0.4rem; font-weight: 650; }
+  p { margin: 0.55rem 0; max-width: 46rem; }
+  blockquote {
+    margin: 1rem 0; padding: 0.9rem 1.2rem;
+    background: var(--accent-soft); border-radius: 6px;
+    font-family: Georgia, Palatino, serif; font-size: 1.06rem; line-height: 1.55;
+  }
+  blockquote cite { display: block; margin-top: 0.5rem; font-family: inherit; font-size: 0.85rem; font-style: normal; color: var(--muted); }
+  pre {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 0.9rem 1.1rem; overflow-x: auto; font-size: 0.88rem; line-height: 1.55;
+  }
+  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.9em; }
+  p code, li code, td code { background: var(--panel); padding: 0.1em 0.35em; border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: 0.8rem 0 1.2rem; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 0.5rem 0.7rem; border: 1px solid var(--rule); vertical-align: top; }
+  th { background: var(--panel); font-weight: 650; }
+  ul, ol { margin: 0.5rem 0 1rem; padding-left: 1.4rem; max-width: 46rem; }
+  li { margin: 0.3rem 0; }
+  li::marker { color: var(--accent); }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 2rem; }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+  .check { list-style: none; padding-left: 0; }
+  .check li { padding-left: 1.7rem; position: relative; }
+  .check li::before { content: "☐"; position: absolute; left: 0; color: var(--accent); }
+  dl.domains { margin: 0.8rem 0; }
+  dl.domains dt { font-weight: 650; margin-top: 0.8rem; }
+  dl.domains dd { margin: 0.2rem 0 0; color: var(--muted); }
+  footer { padding-top: 1.5rem; color: var(--muted); font-size: 0.88rem; }
+  a { color: var(--accent); }
+  @media print { nav.toc { display: none; } section { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="site">
+  <h1>Self-Evolving Lisp Runtime</h1>
+  <p class="lede">A persistent Common Lisp system that turns expensive model reasoning into tested,
+  reusable executable capabilities — so future tasks in the same domain need progressively less
+  inference. This page states the research thesis and the benchmarks that would confirm or refute it.</p>
+  <nav class="toc" aria-label="Sections">
+    <a href="#thesis">1 · Thesis</a>
+    <a href="#benchmarks">2 · Benchmarks</a>
+    <a href="#architecture">3 · Architecture snapshot</a>
+    <a href="#roadmap">4 · Roadmap snapshot</a>
+    <a href="#learning">5 · Learning memory</a>
+  </nav>
+</header>
+
+<section id="thesis">
+  <h2><span class="num">1</span>Thesis</h2>
+
+  <h3>Research hypothesis</h3>
+  <blockquote>
+    A persistent Lisp runtime with executable procedural memory, isolated speculative
+    execution, transfer-based promotion, and high-speed LLM inference can improve effective
+    application competence over time while decreasing model inference required per successful task.
+    <cite>— plan.md §2</cite>
+  </blockquote>
+
+  <h3>North-star principle</h3>
+  <p>The optimization target is not how much code the model can generate. It is:</p>
+  <blockquote>
+    How much model reasoning can the system permanently replace with safe, reusable computation?
+    <cite>— plan.md §93</cite>
+  </blockquote>
+  <p>A mature deployment should shift through three stages:</p>
+<pre>early life:    LLM reasoning dominates
+middle life:   LLM synthesis + learned capabilities cooperate
+mature domain: capabilities dominate, LLM handles novelty only</pre>
+
+  <h3>Learning requires transfer</h3>
+  <ul>
+    <li>A function that fixes one task is a <strong>patch</strong>. It becomes a learned
+      capability only after demonstrated reuse on related tasks (plan.md §4.4).</li>
+    <li>A healthy system learns <strong>fewer, broader abstractions</strong> — generalized
+      procedural families — not one function per problem. Rising capability count alone is
+      memorization, not learning (plan.md §2).</li>
+    <li><strong>Primary learning criterion</strong> (plan.md §67): held-out competence increases
+      <em>and</em> model work per task decreases <em>and</em> capability-library growth slows.
+      If capability count rises linearly with task count, the system is memorizing, not abstracting.</li>
+    <li>Model output is never trusted because the model says so. Promotion requires independent
+      empirical evidence: tests, hidden evaluation, transfer (plan.md §85.10).</li>
+  </ul>
+
+  <h3>Desired long-term trends</h3>
+  <div class="two-col">
+    <table>
+      <tr><th>Metric</th><th>Want</th></tr>
+      <tr><td>Capability reuse</td><td>↑</td></tr>
+      <tr><td>Held-out task success</td><td>↑</td></tr>
+      <tr><td>Transfer success</td><td>↑</td></tr>
+      <tr><td>LLM calls / task</td><td>↓</td></tr>
+      <tr><td>Tokens / task</td><td>↓</td></tr>
+    </table>
+    <table>
+      <tr><th>Metric</th><th>Want</th></tr>
+      <tr><td>Time-to-solution</td><td>↓</td></tr>
+      <tr><td>Time-to-verified-mutation</td><td>↓</td></tr>
+      <tr><td>Regression rate</td><td>↓</td></tr>
+      <tr><td>Capability duplication</td><td>↓</td></tr>
+      <tr><td>Capability entropy growth</td><td>sublinear</td></tr>
+    </table>
+  </div>
+
+  <h3>Core loop</h3>
+<pre>intent → capability lookup → live introspection → candidate synthesis
+→ isolated rehearsal → verification → promotion → reuse</pre>
+  <p>All generated changes are evaluated outside the active application trust boundary
+  before they become canonical (plan.md §1, §4.1–4.2).</p>
+</section>
+
+<section id="benchmarks">
+  <h2><span class="num">2</span>Benchmarks</h2>
+  <p>Each family ships with exposure tasks, unseen transfer tasks, adversarial transforms, and
+  long-term replay tasks. Work starts with Family A (parsing / data transformation), 20–50 related
+  tasks, with a no-learning baseline established first.</p>
+
+  <h3>Task families (plan.md §81)</h3>
+  <table>
+    <tr><th>Family</th><th>Task types</th></tr>
+    <tr><td>A — Parsing</td><td>Dates, CSV, nested records, logs</td></tr>
+    <tr><td>B — API workflows</td><td>Pagination, retry, normalization, caching</td></tr>
+    <tr><td>C — Planning</td><td>Composition of known tools, conditional workflows</td></tr>
+    <tr><td>D — State transformation</td><td>Inventory, accounts, simple workflows</td></tr>
+    <tr><td>E — Fault recovery</td><td>Timeouts, bad inputs, partial failures</td></tr>
+  </table>
+
+  <h3>Required splits</h3>
+  <ul>
+    <li><strong>Exposure tasks</strong> — the system may learn from these.</li>
+    <li><strong>Held-out transfer tasks</strong> — unseen tasks from the same family; the primary
+      evidence of learning vs. memorization.</li>
+    <li><strong>Adversarial variants</strong> — boundary, malformed, empty, large, and reordered
+      inputs (plan.md §21F).</li>
+    <li><strong>Equivalent transformations</strong> — renamed identifiers, permuted ordering, rescaled
+      values, injected irrelevant fields; detects evaluator gaming (plan.md §37).</li>
+  </ul>
+
+  <h3>Baseline ladder (plan.md §82)</h3>
+  <table>
+    <tr><th>Baseline</th><th>Configuration</th><th>Isolates</th></tr>
+    <tr><td>A</td><td>Qwen, no persistent learning</td><td>Raw model competence</td></tr>
+    <tr><td>B</td><td>Qwen + textual memory</td><td>Value of prose memory</td></tr>
+    <tr><td>C</td><td>Qwen + conventional coding tools</td><td>Value of standard tooling</td></tr>
+    <tr><td>D</td><td>Qwen + executable capability memory</td><td>Value of reusable code</td></tr>
+    <tr><td>E</td><td>Full system, transfer-tested dual memory</td><td>Value of the whole loop</td></tr>
+  </table>
+  <p>Every self-improvement experiment also runs control groups (plan.md §38): the learned system
+  vs. a memory-disabled baseline vs. the previous stable generation, plus an optional semantic-only
+  variant — separating the contributions of memory, code, model changes, and runtime changes.</p>
+
+  <h3>Key experiments (plan.md §83)</h3>
+  <ol>
+    <li><strong>Does executable memory reduce inference?</strong> — tokens, calls, and latency per task.</li>
+    <li><strong>Does dual semantic + executable memory transfer better</strong> than executable-only memory?</li>
+    <li><strong>Does skill consolidation improve retrieval</strong> and reduce negative transfer?</li>
+    <li><strong>Does rehearsal prevent state corruption</strong> under intentionally malicious candidates?</li>
+    <li><strong>Does high-speed inference improve time-to-verified-mutation,</strong> or does validation dominate?</li>
+    <li><strong>Can policy self-improvement beat the frozen base policy</strong> on held-out families?</li>
+  </ol>
+
+  <h3>MVP demo narrative (plan.md §80)</h3>
+  <p>Domain: data transformation / synthetic API tasks. Task 1 (novel format) fails, synthesizes, and
+  promotes a patch; Task 2 (same family) reuses the skill with fewer tokens; Task 3 (related but
+  different) generalizes into a procedural family. Target: Task 1 takes N model calls, Task 2 takes
+  ~1, Task 20 takes 0.</p>
+
+  <h3>Experiment success checklist</h3>
+  <ul class="check">
+    <li>Held-out success increases or remains stable</li>
+    <li>Average model calls / task decreases</li>
+    <li>Average tokens / task decreases</li>
+    <li>Capability reuse increases</li>
+    <li>Negative transfer stays below threshold</li>
+    <li>Capability growth becomes sublinear</li>
+    <li>Zero canonical-state corruption</li>
+    <li>Rollback works reliably</li>
+  </ul>
+  <p>Transfer-gate defaults (plan.md §30): minimum 3 independent reuses, 0 severe negative-transfer
+  events, held-out success at or above baseline, resource regression within budget. Thresholds are
+  configurable and unvalidated — tuning them is itself an experiment.</p>
+</section>
+
+<section id="architecture">
+  <h2><span class="num">3</span>Architecture snapshot</h2>
+
+  <h3>Trust domains (plan.md §6)</h3>
+  <dl class="domains">
+    <dt>Domain A — Trusted kernel</dt>
+    <dd>Small, externally maintained, non-self-modifiable. Owns dispatch, worker lifecycle,
+    promotion authority, evaluation, credentials, rollback.</dd>
+    <dt>Domain B — Active application</dt>
+    <dd>Currently promoted mutable behavior: capabilities, business logic, learned abstractions,
+    adapters, workflows. This domain may evolve.</dd>
+    <dt>Domain C — Speculative workers</dt>
+    <dd>Disposable SBCL processes. Load a known generation, run candidates against virtualized
+    effects, may crash freely. Nothing here is canonical.</dd>
+    <dt>Domain D — Evaluator</dt>
+    <dd>Runs outside the mutable runtime. Owns hidden tests, property generators, regression sets,
+    and promotion thresholds. No write access from the application.</dd>
+  </dl>
+
+  <h3>Mutation pipeline (plan.md §5)</h3>
+<pre>goal intake → intent normalizer → capability search
+  |- capability exists -&gt; deterministic path (no model call)
+  +- capability missing -&gt; context compiler -&gt; Cerebras / Qwen
+        -&gt; candidate Lisp -&gt; mutation classifier -&gt; rehearsal orchestrator
+        -&gt; parallel workers (regression / fuzzing / differential)
+        -&gt; trusted evaluator -&gt; transfer gate -&gt; promotion authority
+        -&gt; versioned dispatch -&gt; live runtime</pre>
+  <p>Key invariants: no speculative candidate touches canonical state directly; no candidate alters
+  its evaluator or the promotion authority; every promotion is attributable to evidence; every
+  active generation is reconstructible (plan.md §85).</p>
+</section>
+
+<section id="roadmap">
+  <h2><span class="num">4</span>Roadmap snapshot</h2>
+
+  <h3>Phases (plan.md §78)</h3>
+  <table>
+    <tr><th>Phase</th><th>Focus</th><th>Acceptance</th></tr>
+    <tr><td>0</td><td>Runtime spike (SBCL + Cerebras + child eval)</td><td>Model synthesizes a function; child compiles and runs it</td></tr>
+    <tr><td>1</td><td>Capability registry</td><td>Versions coexist; dispatch swaps; rollback works</td></tr>
+    <tr><td>2</td><td>Rehearsal manager</td><td>Bad candidates contained; stale rejected; crashes isolated</td></tr>
+    <tr><td>3</td><td>Trusted evaluator</td><td>Hidden suite uninspectable; promotion needs verdict</td></tr>
+    <tr><td>4</td><td>Effect isolation</td><td>Failed candidates leave canonical state unchanged</td></tr>
+    <tr><td>5</td><td>Procedural memory</td><td>Learned skill solves a later task without resynthesis</td></tr>
+    <tr><td>6</td><td>Transfer promotion</td><td>One-off repairs don't auto-persist; TTL enforced</td></tr>
+    <tr><td>7</td><td>Consolidation</td><td>Redundant capabilities retired without benchmark loss</td></tr>
+    <tr><td>8</td><td>Policy evolution</td><td>Verified policy mutation without touching trust kernel</td></tr>
+    <tr><td>9</td><td>Shadow production</td><td>Real-traffic shadow runs with no output/state impact</td></tr>
+  </table>
+
+  <h3>MVP scope (plan.md §79)</h3>
+  <div class="two-col">
+    <div>
+      <p><strong>In:</strong> pure/local-state capabilities, Cerebras generation, isolated SBCL
+      workers, versioned registry, contracts, unit/property tests, rehearsal, promotion, rollback,
+      procedural-memory reuse, basic transfer measurement.</p>
+    </div>
+    <div>
+      <p><strong>Out:</strong> schema self-migration, real external writes, payment/email effects,
+      macro self-generation, recursive agents, policy self-modification.</p>
+    </div>
+  </div>
+
+  <h3>Minimum convincing experiment</h3>
+<pre>SBCL + Cerebras/Qwen + isolated workers + versioned capabilities
++ benchmark family + patch persistence + transfer testing + no-memory baseline</pre>
+  <p>First end-to-end target (plan.md §92): novel goal → no capability → candidate → worker compile
+  → test fail → minimal counterexample → repair → pass → temporary patch → later related task reuses
+  it → transfer succeeds → patch becomes skill → equivalent tasks run with zero model calls.</p>
+</section>
+
+<section id="learning">
+  <h2><span class="num">5</span>Learning memory</h2>
+  <p>Beside executable capability memory ("what to run"), an advisory learning layer captures
+  developer experience: <em>how to reason</em>. Capability learning reduces how much work the model
+  must perform; lesson learning makes the remaining work more effective (memory.md §36). A heuristic
+  must never become executable authority — lessons steer synthesis, capabilities do work.</p>
+  <blockquote>
+    Does each month of mutation history make the next mutation require fewer attempts, less
+    context, and less inference while preserving or improving correctness?
+    <cite>— memory.md §36, north-star for the learning layer</cite>
+  </blockquote>
+
+  <h3>Lesson classes (memory.md §1)</h3>
+  <table>
+    <tr><th>Class</th><th>Example</th></tr>
+    <tr><td>Failure</td><td>Cursor-pagination replacements must test repeated-cursor termination</td></tr>
+    <tr><td>Repair</td><td>CSV newline bugs live in field escaping, not row serialization</td></tr>
+    <tr><td>Design</td><td>Prefer composition of existing capabilities over new monoliths</td></tr>
+    <tr><td>Runtime-specific</td><td>SBCL inlining vs. routing mutable calls through dispatch cells</td></tr>
+    <tr><td>Model-behavior</td><td>Qwen over-refactors past green — constrain scope and green-stop</td></tr>
+  </table>
+  <p>Both positive and negative lessons are stored, and facts are kept separate from heuristics:
+  facts can be trusted once verified, heuristics need ongoing empirical evidence (memory.md
+  §§8, 20).</p>
+
+  <h3>Mining loop (memory.md §§4–6)</h3>
+  <p>Lessons are derived, not dictated — "Qwen failed → Qwen explained → explanation becomes
+  memory" would accumulate confident nonsense:</p>
+<pre>event ledger → cluster failures/repairs → recurring pattern
+→ Qwen proposes concise lesson → replay with lesson injected (A/B)
+→ compare against control → promote / reject</pre>
+
+  <h3>Retrieval and lifecycle (memory.md §§12–19)</h3>
+  <ul>
+    <li>Context compiler injects <strong>0–5 lessons</strong> per synthesis call, scored by
+      relevance × confidence × measured benefit × freshness, across layers L0 (universal) to
+      L4 (task-specific).</li>
+    <li>Lifecycle: observation → candidate → replay-validated → active → generalized →
+      principle; counterexamples refine or deprecate, and confidence decays on runtime/model
+      upgrades until revalidated.</li>
+    <li>Stable lessons compile into task-family <strong>playbooks</strong>, which can themselves
+      become executable Lisp workflows: experience → lesson → playbook → computation.</li>
+  </ul>
+
+  <h3>Key experiment (memory.md §34)</h3>
+  <table>
+    <tr><th>Condition</th><th>Memory</th></tr>
+    <tr><td>A</td><td>No lesson memory</td></tr>
+    <tr><td>B</td><td>Raw previous transcripts</td></tr>
+    <tr><td>C</td><td>Retrieved distilled lessons</td></tr>
+    <tr><td>D</td><td>Lessons + executable capability memory</td></tr>
+  </table>
+  <p>Metrics: first-pass success, repair loops, tokens, LLM calls, time-to-verified-mutation,
+  held-out success. Expectation: <strong>D &gt; C &gt; A</strong>, with raw transcripts possibly
+  worse than distilled lessons. Headline metric: <em>development acceleration</em> = baseline
+  time-to-verified-mutation ÷ lesson-assisted time-to-verified-mutation (memory.md §33).</p>
+</section>
+
+<footer>
+  <p>Sources: <code>plan.md</code>, <code>memory.md</code>, <code>todos.md</code>, <code>documents/thesis.md</code>,
+  <code>documents/benchmark-plan.md</code>, <code>documents/metrics-and-success-criteria.md</code>,
+  <code>documents/roadmap.md</code>, <code>documents/learning-memory.md</code>. Single static file — no build step, no external requests;
+  renders from <code>file://</code> or GitHub Pages <code>/docs</code> publishing as-is.</p>
+</footer>
+
+</div>
+</body>
+</html>

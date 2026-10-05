@@ -166,6 +166,57 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] Require evidence to renew skills
   - [ ] Measure whether forgetting improves retrieval quality
 
+- [ ] **Capture mutation trajectories (learning L1)**
+  - [ ] Store complete trajectories (goal → candidates → failures → repairs → success)
+  - [ ] Normalize failure classes (syntax, compile, contract, wrong-output, edge-case, state-corruption, effect-violation, performance, timeout, memory, stale-generation, over-refactor, negative-transfer, test-overfit, tool-misuse, context-missing)
+  - [ ] Store repair outcomes per trajectory
+  - [ ] Track successful vs failed development strategies
+
+- [ ] **Seed manual lessons (learning L2)**
+  - [ ] Define lesson schema (id, class, statement, applicability, evidence, counterexamples, confidence, impact, generation, TTL)
+  - [ ] Separate lesson classes: failure, repair, design, runtime-specific, model-behavior
+  - [ ] Separate facts from heuristics
+  - [ ] Manually seed 10–20 lessons
+  - [ ] Retrieve 0–5 lessons per synthesis call via context compiler
+  - [ ] Measure effect on first-pass success and tokens
+
+- [ ] **Mine lessons automatically (learning L3)**
+  - [ ] Cluster recurring failures from event ledger
+  - [ ] Cluster successful repairs
+  - [ ] Ask Qwen for concise candidate lesson per pattern
+  - [ ] Attach source evidence to every candidate
+  - [ ] Deduplicate candidate lessons
+
+- [ ] **Validate lessons by replay (learning L4)**
+  - [ ] Replay historical tasks: original context vs context + lesson
+  - [ ] Measure first-pass success, repair count, tokens, wall time, regressions
+  - [ ] Reject harmful or neutral lessons
+  - [ ] Promote useful lessons to registry
+  - [ ] Decay confidence on runtime/model upgrades; revalidate or downgrade
+  - [ ] Track counterexamples per lesson; refine overgeneralized lessons
+
+- [ ] **Consolidate lessons into principles and playbooks (learning L5)**
+  - [ ] Merge overlapping lessons
+  - [ ] Generalize survivors into principles; retire narrow duplicates
+  - [ ] Compile high-confidence lessons into task-family playbooks
+  - [ ] Promote stable playbooks to executable Lisp workflows
+
+- [ ] **Close the adaptive-development loop (learning L6)**
+  - [ ] Learn context composition (which elements correlate with success)
+  - [ ] Learn test ordering (fastest/highest-yield first)
+  - [ ] Learn repair routing (deterministic fix vs model repair vs escalate)
+  - [ ] Learn risk classification from predicted-vs-actual outcomes
+  - [ ] Learn capability applicability boundaries from retrieval outcomes
+  - [ ] Trigger lesson postmortem on every production rollback
+
+- [ ] **Run the lesson key experiment**
+  - [ ] Condition A: no lesson memory
+  - [ ] Condition B: raw previous transcripts
+  - [ ] Condition C: retrieved distilled lessons
+  - [ ] Condition D: lessons + executable capability memory
+  - [ ] Compare first-pass success, repair loops, tokens, calls, time-to-verified-mutation, held-out success
+  - [ ] Confirm D > C > A and distilled beats raw transcripts
+
 - [ ] **Add effect isolation**
   - [ ] Introduce effect declarations
   - [ ] Virtualize filesystem writes
