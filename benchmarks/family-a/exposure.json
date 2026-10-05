@@ -1,0 +1,362 @@
+[
+  {
+    "id": "A-EXP-01",
+    "family": "A",
+    "split": "exposure",
+    "category": "dates",
+    "prompt": "Convert each date on its own input line to ISO format YYYY-MM-DD, one converted date per output line, in the same order. Supported input formats: 'D Mon YYYY' (full or abbreviated English month name, e.g. 5 Oct 2026), 'Mon D, YYYY', 'YYYY/MM/DD', 'DD.MM.YYYY'. Output only the converted dates, nothing else.",
+    "checks": [
+      {
+        "input": "5 Oct 2026\nOctober 5, 2026\n2026/10/05\n05.10.2026",
+        "expected": "2026-10-05\n2026-10-05\n2026-10-05\n2026-10-05",
+        "compare": "exact"
+      },
+      {
+        "input": "1 Jan 2000\nDecember 31, 1999",
+        "expected": "2000-01-01\n1999-12-31",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Core date-normalization exposure task. Months are English; years are 4-digit; all inputs are valid."
+  },
+  {
+    "id": "A-EXP-02",
+    "family": "A",
+    "split": "exposure",
+    "category": "dates",
+    "prompt": "Each input line is a local datetime with a numeric UTC offset: 'YYYY-MM-DD HH:MM +HHMM' (24-hour clock). Convert each line to UTC ISO-8601 'YYYY-MM-DDTHH:MM:SSZ', one per output line, same order. Output only the converted datetimes.",
+    "checks": [
+      {
+        "input": "2026-10-05 14:30 +0200",
+        "expected": "2026-10-05T12:30:00Z",
+        "compare": "exact"
+      },
+      {
+        "input": "2026-01-01 00:30 -0500\n2026-12-31 23:00 +0000",
+        "expected": "2026-01-01T05:30:00Z\n2026-12-31T23:00:00Z",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Timezone-offset arithmetic; day rollover is exercised in check 2."
+  },
+  {
+    "id": "A-EXP-03",
+    "family": "A",
+    "split": "exposure",
+    "category": "dates",
+    "prompt": "The input is a single date 'D Mon YYYY' (full or abbreviated English month). Output one JSON object {\"year\":YYYY,\"month\":M,\"day\":D} with month as 1-12. Output only the JSON object.",
+    "checks": [
+      {
+        "input": "5 Oct 2026",
+        "expected": "{\"year\": 2026, \"month\": 10, \"day\": 5}",
+        "compare": "json"
+      },
+      {
+        "input": "29 Feb 2024",
+        "expected": "{\"year\": 2024, \"month\": 2, \"day\": 29}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Date component extraction; leap-day input in check 2."
+  },
+  {
+    "id": "A-EXP-04",
+    "family": "A",
+    "split": "exposure",
+    "category": "dates",
+    "prompt": "Line 1 is a reference date YYYY-MM-DD. Each following line is a relative expression: 'today', 'yesterday', 'tomorrow', 'N days ago', or 'in N days'. Output one ISO date per expression, same order. Output only the dates.",
+    "checks": [
+      {
+        "input": "2026-10-05\ntoday\nyesterday\ntomorrow\n3 days ago\nin 2 days",
+        "expected": "2026-10-05\n2026-10-04\n2026-10-06\n2026-10-02\n2026-10-07",
+        "compare": "exact"
+      },
+      {
+        "input": "2024-03-01\n1 days ago\nin 1 days",
+        "expected": "2024-02-29\n2024-03-02",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Relative-date resolution against an explicit reference date (no dependence on wall-clock today). Check 2 crosses a leap-day boundary."
+  },
+  {
+    "id": "A-EXP-05",
+    "family": "A",
+    "split": "exposure",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). Output a JSON array of objects mapping header names to field values (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "name,city,note\n\"Doe, Jane\",Berlin,\"likes cats, dogs\"\nSmith,Paris,hello",
+        "expected": "[{\"name\": \"Doe, Jane\", \"city\": \"Berlin\", \"note\": \"likes cats, dogs\"}, {\"name\": \"Smith\", \"city\": \"Paris\", \"note\": \"hello\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "a,b\n\"x,y\",\"p,q\"",
+        "expected": "[{\"a\": \"x,y\", \"b\": \"p,q\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Quoted fields containing commas. Base task for equivalent transform A-EQV-01."
+  },
+  {
+    "id": "A-EXP-06",
+    "family": "A",
+    "split": "exposure",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). Quoted fields may contain embedded newlines, which are part of the field value. Output a JSON array of objects mapping header names to field values (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "id,comment\n1,\"line one\nline two\"\n2,plain",
+        "expected": "[{\"id\": \"1\", \"comment\": \"line one\\nline two\"}, {\"id\": \"2\", \"comment\": \"plain\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "k,v\n\"a\nb\nc\",z",
+        "expected": "[{\"k\": \"a\\nb\\nc\", \"v\": \"z\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Embedded newlines inside quoted CSV fields; naive line-splitting fails."
+  },
+  {
+    "id": "A-EXP-07",
+    "family": "A",
+    "split": "exposure",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting with \"\" as an escaped quote, first row is the header). Output a JSON array of objects mapping header names to field values (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "id,quote\n1,\"she said \"\"hi\"\"\"",
+        "expected": "[{\"id\": \"1\", \"quote\": \"she said \\\"hi\\\"\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "a\n\"\"\"quoted\"\"\"",
+        "expected": "[{\"a\": \"\\\"quoted\\\"\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Doubled-quote escaping inside quoted CSV fields."
+  },
+  {
+    "id": "A-EXP-08",
+    "family": "A",
+    "split": "exposure",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). Empty fields become JSON null (not empty strings); non-empty fields stay strings. Output a JSON array of objects, row order preserved. Output only the JSON.",
+    "checks": [
+      {
+        "input": "a,b,c\n1,,3\n,2,",
+        "expected": "[{\"a\": \"1\", \"b\": null, \"c\": \"3\"}, {\"a\": null, \"b\": \"2\", \"c\": null}]",
+        "compare": "json"
+      },
+      {
+        "input": "x,y\n,",
+        "expected": "[{\"x\": null, \"y\": null}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Missing/empty CSV fields map to null."
+  },
+  {
+    "id": "A-EXP-09",
+    "family": "A",
+    "split": "exposure",
+    "category": "records",
+    "prompt": "The input is one JSON object. Flatten it: nested objects become dot-separated keys; array elements become key[i]; empty objects/arrays are preserved as values; scalars are unchanged. Output the flat JSON object. Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"a\": {\"b\": 1, \"c\": [10, 20]}, \"d\": \"x\"}",
+        "expected": "{\"a.b\": 1, \"a.c[0]\": 10, \"a.c[1]\": 20, \"d\": \"x\"}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"x\": [{\"y\": true}, null], \"z\": []}",
+        "expected": "{\"x[0].y\": true, \"x[1]\": null, \"z\": []}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Nested-record flattening. Base task for equivalent transform A-EQV-02; inverse is A-EXP-12."
+  },
+  {
+    "id": "A-EXP-10",
+    "family": "A",
+    "split": "exposure",
+    "category": "records",
+    "prompt": "Each input line is 'name: phone' with a US phone number in any common format: (AAA) BBB-CCCC, AAA-BBB-CCCC, AAA.BBB.CCCC, AAA BBB CCCC, +1 AAA BBB CCCC, or bare digits. Output 'name:+1AAABBBCCCC' per line, same order. Output only the converted lines.",
+    "checks": [
+      {
+        "input": "ana: (415) 555-2671\nbob: 415-555-2671",
+        "expected": "ana:+14155552671\nbob:+14155552671",
+        "compare": "exact"
+      },
+      {
+        "input": "cy: +1 415 555 2671\ndi: 415.555.2671\ned: 2125550199",
+        "expected": "cy:+14155552671\ndi:+14155552671\ned:+12125550199",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Phone normalization; mirrors the plan.md section 80 MVP demo narrative (weird phone formats)."
+  },
+  {
+    "id": "A-EXP-11",
+    "family": "A",
+    "split": "exposure",
+    "category": "records",
+    "prompt": "Line 1 is a field spec: comma-separated items, each 'key' (keep as-is) or 'old:new' (rename). Line 2 is a JSON object. Output a JSON object with the specified keys; missing keys become null; ignore unspecified keys. Output only the JSON.",
+    "checks": [
+      {
+        "input": "name,age:years\n{\"name\": \"kim\", \"age\": 30, \"city\": \"Oslo\"}",
+        "expected": "{\"name\": \"kim\", \"years\": 30}",
+        "compare": "json"
+      },
+      {
+        "input": "a:x,m\n{\"a\": 1}",
+        "expected": "{\"x\": 1, \"m\": null}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Field projection plus rename with null for absent keys."
+  },
+  {
+    "id": "A-EXP-12",
+    "family": "A",
+    "split": "exposure",
+    "category": "records",
+    "prompt": "The input is one flat JSON object with dot-separated keys and [i] array indices. Rebuild the nested structure (indices are dense from 0). Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"a.b\": 1, \"a.c[0]\": 10, \"a.c[1]\": 20, \"d\": \"x\"}",
+        "expected": "{\"a\": {\"b\": 1, \"c\": [10, 20]}, \"d\": \"x\"}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"x[0].y\": true, \"x[1]\": null}",
+        "expected": "{\"x\": [{\"y\": true}, null]}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Inverse of A-EXP-09 (unflatten)."
+  },
+  {
+    "id": "A-EXP-13",
+    "family": "A",
+    "split": "exposure",
+    "category": "logs",
+    "prompt": "Parse one Common Log Format line: host ident user [time] \"METHOD path PROTO\" status bytes. Output JSON {\"host\":...,\"user\":...,\"time\":...,\"method\":...,\"path\":...,\"status\":N,\"bytes\":N} with time = bracket contents, user null when '-', bytes 0 when '-'. Output only the JSON.",
+    "checks": [
+      {
+        "input": "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /a.gif HTTP/1.0\" 200 2326",
+        "expected": "{\"host\": \"127.0.0.1\", \"user\": \"frank\", \"time\": \"10/Oct/2000:13:55:36 -0700\", \"method\": \"GET\", \"path\": \"/a.gif\", \"status\": 200, \"bytes\": 2326}",
+        "compare": "json"
+      },
+      {
+        "input": "10.0.0.2 - - [05/Oct/2026:12:00:00 +0000] \"POST /api/x HTTP/1.1\" 404 -",
+        "expected": "{\"host\": \"10.0.0.2\", \"user\": null, \"time\": \"05/Oct/2026:12:00:00 +0000\", \"method\": \"POST\", \"path\": \"/api/x\", \"status\": 404, \"bytes\": 0}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Apache/NCSA Common Log Format parsing with '-' placeholders."
+  },
+  {
+    "id": "A-EXP-14",
+    "family": "A",
+    "split": "exposure",
+    "category": "logs",
+    "prompt": "Parse one log line of space-separated key=value pairs; values may be double-quoted (quotes may contain spaces; no escapes inside quotes). Output a JSON object of all pairs (all values strings). Output only the JSON.",
+    "checks": [
+      {
+        "input": "ts=2026-10-05T12:00:00Z level=info msg=\"user login\" user=bob",
+        "expected": "{\"ts\": \"2026-10-05T12:00:00Z\", \"level\": \"info\", \"msg\": \"user login\", \"user\": \"bob\"}",
+        "compare": "json"
+      },
+      {
+        "input": "a=1 b=\"x y z\" c=",
+        "expected": "{\"a\": \"1\", \"b\": \"x y z\", \"c\": \"\"}",
+        "compare": "json"
+      }
+    ],
+    "notes": "key=value log parsing. Base task for equivalent transform A-EQV-03."
+  },
+  {
+    "id": "A-EXP-15",
+    "family": "A",
+    "split": "exposure",
+    "category": "logs",
+    "prompt": "Input lines are key=value log lines, each containing a 'level' key. Output a JSON object mapping each level to its count. Output only the JSON.",
+    "checks": [
+      {
+        "input": "level=info msg=a\nlevel=error msg=b\nlevel=info msg=c",
+        "expected": "{\"info\": 2, \"error\": 1}",
+        "compare": "json"
+      },
+      {
+        "input": "level=debug x=1",
+        "expected": "{\"debug\": 1}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Log-level aggregation. Adversarial empty-input variant is A-ADV-03."
+  },
+  {
+    "id": "A-EXP-16",
+    "family": "A",
+    "split": "exposure",
+    "category": "dates",
+    "prompt": "Each input line is a date YYYY-MM-DD (Gregorian calendar). Output the full English weekday name, lowercase, one per line, same order. Output only the names.",
+    "checks": [
+      {
+        "input": "2026-10-05\n2000-01-01\n2024-02-29",
+        "expected": "monday\nsaturday\nthursday",
+        "compare": "exact"
+      },
+      {
+        "input": "1970-01-01\n1999-12-31",
+        "expected": "thursday\nfriday",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Calendar weekday computation; includes leap day and epoch date."
+  },
+  {
+    "id": "A-EXP-17",
+    "family": "A",
+    "split": "exposure",
+    "category": "logs",
+    "prompt": "Input lines are 'TS LEVEL message...' where TS contains no spaces. Output a JSON array, in input order, of {ts, msg} for lines whose LEVEL is exactly ERROR. Output only the JSON.",
+    "checks": [
+      {
+        "input": "2026-10-05T12:00:00Z INFO boot ok\n2026-10-05T12:01:00Z ERROR disk full\n2026-10-05T12:02:00Z INFO retry\n2026-10-05T12:03:00Z ERROR disk still full",
+        "expected": "[{\"ts\": \"2026-10-05T12:01:00Z\", \"msg\": \"disk full\"}, {\"ts\": \"2026-10-05T12:03:00Z\", \"msg\": \"disk still full\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "2026-10-05T12:00:00Z INFO all good",
+        "expected": "[]",
+        "compare": "json"
+      }
+    ],
+    "notes": "ERROR-line filtering with empty-result case."
+  },
+  {
+    "id": "A-EXP-18",
+    "family": "A",
+    "split": "exposure",
+    "category": "records",
+    "prompt": "Each input line is a money amount: optional '$' prefix or 'USD' prefix/suffix, optional thousands commas, optional leading minus sign, with either integer dollars or exactly two decimals. Output integer cents, one per line, same order. Output only the numbers.",
+    "checks": [
+      {
+        "input": "$1,234.56\n1234.56 USD\nUSD 7\n-$2.50",
+        "expected": "123456\n123456\n700\n-250",
+        "compare": "exact"
+      },
+      {
+        "input": "$0.99\n100 USD\n$1,000",
+        "expected": "99\n10000\n100000",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Money-string normalization to integer cents."
+  }
+]

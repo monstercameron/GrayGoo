@@ -1,0 +1,162 @@
+[
+  {
+    "id": "A-TRN-01",
+    "family": "A",
+    "split": "transfer",
+    "category": "dates",
+    "prompt": "Each input line is an RFC-2822 date: 'Wkd, DD Mon YYYY HH:MM:SS +HHMM' (weekday name is decoration and must be ignored). Convert each line to UTC ISO-8601 'YYYY-MM-DDTHH:MM:SSZ', one per output line, same order. Output only the converted datetimes.",
+    "checks": [
+      {
+        "input": "Mon, 05 Oct 2026 12:30:00 +0200",
+        "expected": "2026-10-05T10:30:00Z",
+        "compare": "exact"
+      },
+      {
+        "input": "Thu, 01 Jan 1970 00:00:00 +0000\nFri, 29 Dec 2000 12:00:00 -0500",
+        "expected": "1970-01-01T00:00:00Z\n2000-12-29T17:00:00Z",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Held-out: email-style dates; combines weekday-ignoring with offset arithmetic from A-EXP-02."
+  },
+  {
+    "id": "A-TRN-02",
+    "family": "A",
+    "split": "transfer",
+    "category": "dates",
+    "prompt": "Each input line is an ISO week date 'YYYY-Www-d' (week 01-53, weekday 1=Monday..7=Sunday). Convert each line to the calendar date YYYY-MM-DD, one per output line, same order. Output only the dates.",
+    "checks": [
+      {
+        "input": "2026-W41-1\n2026-W41-7",
+        "expected": "2026-10-05\n2026-10-11",
+        "compare": "exact"
+      },
+      {
+        "input": "2020-W53-4",
+        "expected": "2020-12-31",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Held-out: ISO week arithmetic including a 53-week year (2020)."
+  },
+  {
+    "id": "A-TRN-03",
+    "family": "A",
+    "split": "transfer",
+    "category": "csv",
+    "prompt": "Parse the input as semicolon-delimited data (delimiter ';', double-quote quoting, first row is the header; commas inside fields are literal). Output a JSON array of objects mapping header names to field values (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "name;city;note\n\"Doe; Jane\";Berlin;hi, there\nSmith;Paris;ok",
+        "expected": "[{\"name\": \"Doe; Jane\", \"city\": \"Berlin\", \"note\": \"hi, there\"}, {\"name\": \"Smith\", \"city\": \"Paris\", \"note\": \"ok\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "a;b\n1;2",
+        "expected": "[{\"a\": \"1\", \"b\": \"2\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: non-comma delimiter; commas must NOT split fields."
+  },
+  {
+    "id": "A-TRN-04",
+    "family": "A",
+    "split": "transfer",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting), except: lines starting with '#' are comments and blank lines are ignored; the first remaining line is the header. Output a JSON array of objects (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "# comment line\na,b\n\n1,2\n# another\n3,4",
+        "expected": "[{\"a\": \"1\", \"b\": \"2\"}, {\"a\": \"3\", \"b\": \"4\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "# only a comment\nx\n9",
+        "expected": "[{\"x\": \"9\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: comment/blank-line skipping layered on CSV parsing."
+  },
+  {
+    "id": "A-TRN-05",
+    "family": "A",
+    "split": "transfer",
+    "category": "records",
+    "prompt": "The input is two lines, each a JSON object (base, then patch). Deep-merge them: the patch wins on conflicts; nested objects merge recursively; arrays and all other values are replaced wholesale. Output the merged object. Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"a\": {\"x\": 1, \"y\": 2}, \"b\": 1}\n{\"a\": {\"y\": 9, \"z\": 3}, \"c\": 2}",
+        "expected": "{\"a\": {\"x\": 1, \"y\": 9, \"z\": 3}, \"b\": 1, \"c\": 2}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"a\": [1, 2], \"b\": {\"k\": 1}}\n{\"a\": [3]}",
+        "expected": "{\"a\": [3], \"b\": {\"k\": 1}}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: recursive merge with array-replace semantics."
+  },
+  {
+    "id": "A-TRN-06",
+    "family": "A",
+    "split": "transfer",
+    "category": "records",
+    "prompt": "The input is one JSON address object with keys street, city, zip or postal, country or cc. Output {\"street\":...,\"city\":...,\"postal\":...,\"country\":...} where street/city are trimmed, postal is uppercased with all spaces removed, and country is the uppercased 2-letter code. Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"street\": \"  12 Main St \", \"city\": \"oslo\", \"zip\": \"n-0154 \", \"country\": \"no\"}",
+        "expected": "{\"street\": \"12 Main St\", \"city\": \"oslo\", \"postal\": \"N-0154\", \"country\": \"NO\"}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"street\": \"A\", \"city\": \"B\", \"postal\": \"k1a 0b1\", \"cc\": \"ca\"}",
+        "expected": "{\"street\": \"A\", \"city\": \"B\", \"postal\": \"K1A0B1\", \"country\": \"CA\"}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: address normalization with key aliases and postal cleanup."
+  },
+  {
+    "id": "A-TRN-07",
+    "family": "A",
+    "split": "transfer",
+    "category": "logs",
+    "prompt": "Parse one BSD syslog line: '<PRI>Mon DD HH:MM:SS host tag[pid]: msg' (day may be space-padded). Output JSON {\"pri\":N,\"time\":\"Mon D HH:MM:SS\",\"host\":...,\"tag\":...,\"pid\":N,\"msg\":...} with time day single-spaced. Output only the JSON.",
+    "checks": [
+      {
+        "input": "<34>Oct  5 12:30:01 web1 nginx[42]: connection refused",
+        "expected": "{\"pri\": 34, \"time\": \"Oct 5 12:30:01\", \"host\": \"web1\", \"tag\": \"nginx\", \"pid\": 42, \"msg\": \"connection refused\"}",
+        "compare": "json"
+      },
+      {
+        "input": "<13>Jan  1 00:00:00 h cron[7]: started",
+        "expected": "{\"pri\": 13, \"time\": \"Jan 1 00:00:00\", \"host\": \"h\", \"tag\": \"cron\", \"pid\": 7, \"msg\": \"started\"}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: syslog format with space-padded day and pri/tag/pid extraction."
+  },
+  {
+    "id": "A-TRN-08",
+    "family": "A",
+    "split": "transfer",
+    "category": "logs",
+    "prompt": "Input lines are 'TS user event' where event is login, action, or logout and TS has no spaces. Group into sessions: each login opens a session for that user (in input order), later events attach to that user's open session, logout closes it. Output a JSON array in login order of {user, login, logout, actions} where logout is null when never closed and actions counts 'action' events. Output only the JSON.",
+    "checks": [
+      {
+        "input": "2026-10-05T10:00:00Z alice login\n2026-10-05T10:01:00Z alice action\n2026-10-05T10:02:00Z bob login\n2026-10-05T10:03:00Z alice logout",
+        "expected": "[{\"user\": \"alice\", \"login\": \"2026-10-05T10:00:00Z\", \"logout\": \"2026-10-05T10:03:00Z\", \"actions\": 1}, {\"user\": \"bob\", \"login\": \"2026-10-05T10:02:00Z\", \"logout\": null, \"actions\": 0}]",
+        "compare": "json"
+      },
+      {
+        "input": "2026-10-05T10:00:00Z u login\n2026-10-05T10:01:00Z u action\n2026-10-05T10:02:00Z u action\n2026-10-05T10:03:00Z u logout",
+        "expected": "[{\"user\": \"u\", \"login\": \"2026-10-05T10:00:00Z\", \"logout\": \"2026-10-05T10:03:00Z\", \"actions\": 2}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: multi-line stateful sessionization; interleaved users in check 1."
+  }
+]

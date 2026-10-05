@@ -1,0 +1,112 @@
+[
+  {
+    "id": "A-ADV-01",
+    "family": "A",
+    "split": "adversarial",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header) and output a JSON array of objects (all values strings). If any row is malformed (unbalanced quotes or a field count differing from the header), output exactly ERROR instead. Output only the result.",
+    "checks": [
+      {
+        "input": "a,b\n1,\"oops\n2,ok",
+        "expected": "ERROR",
+        "compare": "exact"
+      },
+      {
+        "input": "a,b\n1,2",
+        "expected": "[{\"a\": \"1\", \"b\": \"2\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Adversarial: unbalanced quote. Check 2 is well-formed so always-ERROR also fails."
+  },
+  {
+    "id": "A-ADV-02",
+    "family": "A",
+    "split": "adversarial",
+    "category": "dates",
+    "prompt": "Convert each input-line date to ISO YYYY-MM-DD, one per output line, same order. Supported formats: 'D Mon YYYY' (English month), 'Mon D, YYYY', 'YYYY/MM/DD', 'DD.MM.YYYY', 'YYYY-MM-DD'. If a line is unparseable or an impossible calendar date, output ERROR for that line and continue. Output only the results.",
+    "checks": [
+      {
+        "input": "5 Oct 2026\n30 Feb 2026\n29 Feb 2024\n2026-13-01",
+        "expected": "2026-10-05\nERROR\n2024-02-29\nERROR",
+        "compare": "exact"
+      },
+      {
+        "input": "31 Apr 2026\nnot a date",
+        "expected": "ERROR\nERROR",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Adversarial: impossible dates (Feb 30, Apr 31, month 13) and garbage; per-line ERROR."
+  },
+  {
+    "id": "A-ADV-03",
+    "family": "A",
+    "split": "adversarial",
+    "category": "logs",
+    "prompt": "Input lines are key=value log lines, each containing a 'level' key. Output a JSON object mapping each level to its count. If the input is empty or whitespace-only, output exactly EMPTY. Output only the result.",
+    "checks": [
+      {
+        "input": "",
+        "expected": "EMPTY",
+        "compare": "exact"
+      },
+      {
+        "input": "   \n  ",
+        "expected": "EMPTY",
+        "compare": "exact"
+      },
+      {
+        "input": "level=info msg=a",
+        "expected": "{\"info\": 1}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Adversarial: empty and whitespace-only inputs; mirrors A-EXP-15 otherwise."
+  },
+  {
+    "id": "A-ADV-04",
+    "family": "A",
+    "split": "adversarial",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header) and output a JSON array of objects (all values strings). If any data row has a different field count than the header, output exactly ERROR instead. Output only the result.",
+    "checks": [
+      {
+        "input": "a,b,c\n1,2,3\n4,5",
+        "expected": "ERROR",
+        "compare": "exact"
+      },
+      {
+        "input": "a,b,c\n1,2,3\n4,5,6,7",
+        "expected": "ERROR",
+        "compare": "exact"
+      },
+      {
+        "input": "a,b\n1,2\n3,4",
+        "expected": "[{\"a\": \"1\", \"b\": \"2\"}, {\"a\": \"3\", \"b\": \"4\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Adversarial: ragged rows (short and long). Check 3 is well-formed so always-ERROR also fails."
+  },
+  {
+    "id": "A-ADV-05",
+    "family": "A",
+    "split": "adversarial",
+    "category": "records",
+    "prompt": "The input must be exactly one JSON object; anything else (trailing text, multiple values, invalid JSON) means the input is malformed. If well-formed, flatten it (nested objects to dot-separated keys, arrays to key[i]) and output the flat object. If malformed, output exactly ERROR. Output only the result.",
+    "checks": [
+      {
+        "input": "{\"a\": 1} extra",
+        "expected": "ERROR",
+        "compare": "exact"
+      },
+      {
+        "input": "{\"a\": {\"b\": 2}}",
+        "expected": "{\"a.b\": 2}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Adversarial: trailing garbage after JSON; mirrors A-EXP-09 otherwise."
+  }
+]

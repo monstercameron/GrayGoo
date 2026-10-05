@@ -1,0 +1,90 @@
+[
+  {
+    "id": "A-EQV-01",
+    "family": "A",
+    "split": "equivalent-transform",
+    "category": "csv",
+    "derived_from": "A-EXP-05",
+    "transforms_applied": ["rename identifiers", "permute column ordering", "inject irrelevant field"],
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). Ignore the 'row_id' column. Output a JSON array of objects with keys full_name, town, remark taken from the columns of the same names (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "row_id,town,full_name,remark\n7,Berlin,\"Doe, Jane\",\"likes cats, dogs\"\n8,Paris,Smith,hello",
+        "expected": "[{\"full_name\": \"Doe, Jane\", \"town\": \"Berlin\", \"remark\": \"likes cats, dogs\"}, {\"full_name\": \"Smith\", \"town\": \"Paris\", \"remark\": \"hello\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "remark,row_id,full_name,town\n\"a,b\",1,X,Y",
+        "expected": "[{\"full_name\": \"X\", \"town\": \"Y\", \"remark\": \"a,b\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Equivalent of A-EXP-05: renamed headers, permuted order, injected row_id column to ignore."
+  },
+  {
+    "id": "A-EQV-02",
+    "family": "A",
+    "split": "equivalent-transform",
+    "category": "records",
+    "derived_from": "A-EXP-09",
+    "transforms_applied": ["rename identifiers", "permute key ordering", "rescale values", "inject irrelevant fields"],
+    "prompt": "The input is one JSON object. Flatten it: nested objects become dot-separated keys; array elements become key[i]; scalars are unchanged. Output the flat JSON object. Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"zed\": \"x\", \"alpha\": {\"gamma\": [1000, 2000], \"beta\": 1}, \"debug\": {\"tmp\": 0}}",
+        "expected": "{\"zed\": \"x\", \"alpha.gamma[0]\": 1000, \"alpha.gamma[1]\": 2000, \"alpha.beta\": 1, \"debug.tmp\": 0}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"q\": [null, {\"w\": false}]}",
+        "expected": "{\"q[0]\": null, \"q[1].w\": false}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Equivalent of A-EXP-09: renamed keys, reordered keys, rescaled numbers, injected debug subtree."
+  },
+  {
+    "id": "A-EQV-03",
+    "family": "A",
+    "split": "equivalent-transform",
+    "category": "logs",
+    "derived_from": "A-EXP-14",
+    "transforms_applied": ["rename identifiers", "reorder independent pairs", "inject irrelevant fields"],
+    "prompt": "Parse one log line of space-separated key=value pairs; values may be double-quoted (quotes may contain spaces; no escapes inside quotes). Output a JSON object of all pairs (all values strings). Output only the JSON.",
+    "checks": [
+      {
+        "input": "request_id=abc severity=error account=bob text=\"disk full\" timestamp=2026-10-05T12:00:00Z",
+        "expected": "{\"request_id\": \"abc\", \"severity\": \"error\", \"account\": \"bob\", \"text\": \"disk full\", \"timestamp\": \"2026-10-05T12:00:00Z\"}",
+        "compare": "json"
+      },
+      {
+        "input": "zeta=\"1 2\" alpha=beta",
+        "expected": "{\"zeta\": \"1 2\", \"alpha\": \"beta\"}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Equivalent of A-EXP-14: renamed keys, reordered pairs, injected noise pair (request_id)."
+  },
+  {
+    "id": "A-EQV-04",
+    "family": "A",
+    "split": "equivalent-transform",
+    "category": "dates",
+    "derived_from": "A-EXP-01",
+    "transforms_applied": ["change formatting", "inject irrelevant fields"],
+    "prompt": "Each input line has the form 'Record <id>: <date> (<note>)' where id and note are irrelevant. Convert the embedded date to ISO YYYY-MM-DD, one per output line, same order. Supported date forms: 'D Mon YYYY' (English month), 'YYYY/MM/DD'. Output only the converted dates.",
+    "checks": [
+      {
+        "input": "Record 42: 5 Oct 2026 (verified)\nRecord 43: 2026/10/06 (pending)",
+        "expected": "2026-10-05\n2026-10-06",
+        "compare": "exact"
+      },
+      {
+        "input": "Record 7: 1 Jan 2000 (archived)",
+        "expected": "2000-01-01",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Equivalent of A-EXP-01: same dates embedded in record wrappers with irrelevant id/note."
+  }
+]
