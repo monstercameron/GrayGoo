@@ -177,6 +177,31 @@ def generate_fresh_cases(cases, *, seed=0, per_case=2):
     return fresh
 
 
+def fresh_case_inputs(seed=0, per_case=2, cases=None):
+    """Inputs-only view of the seeded fresh cases (no answers disclosed).
+
+    Returns ``[{"key", "case_id", "index", "input"}]`` for exactly the
+    fresh cases :func:`evaluate` would append for the same ``fresh``
+    spec, so the caller can execute the candidate on them and submit
+    the outputs. ``expected`` values, case kinds, and params are NEVER
+    included: this discloses fresh inputs, not the hidden corpus.
+    Deterministic in ``(seed, per_case)`` for a fixed corpus.
+    """
+    if cases is None:
+        cases = load_hidden_cases()
+    fresh = generate_fresh_cases(cases, seed=seed, per_case=per_case)
+    inputs = []
+    for case in fresh:
+        for index, check in enumerate(case["checks"]):
+            inputs.append({
+                "key": "%s:%d" % (case["id"], index),
+                "case_id": case["id"],
+                "index": index,
+                "input": check["input"],
+            })
+    return inputs
+
+
 # --------------------------------------------------------------------------
 # Scoring
 # --------------------------------------------------------------------------
@@ -321,6 +346,16 @@ def handle_request_json(raw):
         except ValueError:
             pass
         return _protocol.error_response(request_id, exc), 2
+    if request.get("action", "evaluate") == "fresh_inputs":
+        try:
+            seed = request["fresh"].get("seed", 0)
+            per_case = request["fresh"].get("per_case", 2)
+            inputs = fresh_case_inputs(seed=seed, per_case=per_case)
+        except ValueError as exc:
+            return _protocol.error_response(
+                request["request_id"], ProtocolError(str(exc))), 2
+        return _protocol.fresh_inputs_response(
+            request, inputs, seed, per_case), 0
     try:
         result = evaluate(request["candidate_id"], request["outputs"],
                           thresholds=request["thresholds"],

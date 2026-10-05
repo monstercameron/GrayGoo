@@ -55,7 +55,7 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Add metamorphic/equivalent-input tests
   - [x] Add adversarial edge cases
   - [x] Make evaluator verdict mandatory for promotion
-  - [ ] Execute candidates on fresh inputs in the promotion path (service-side fresh eval exists; promotion must run candidates on fresh cases and submit outputs)
+  - [x] Execute candidates on fresh inputs in the promotion path (service-side fresh eval exists; promotion must run candidates on fresh cases and submit outputs)
 
 - [x] **Implement green-stop**
   - [x] Define task success contracts

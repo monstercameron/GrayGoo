@@ -217,8 +217,27 @@ def _transfer_outcomes_of(evidence):
     return None
 
 
+def _checked_fresh(fresh):
+    """Normalize a fresh-eval spec; raise ValueError when malformed."""
+    if not isinstance(fresh, dict):
+        raise ValueError("fresh must be a dict like "
+                         '{"seed": int, "per_case": int}')
+    unknown = set(fresh) - {"seed", "per_case"}
+    if unknown:
+        raise ValueError("unknown fresh key(s): %s"
+                         % ", ".join(sorted(unknown)))
+    seed = fresh.get("seed", 0)
+    per_case = fresh.get("per_case", 2)
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("fresh.seed must be a non-negative int")
+    if (isinstance(per_case, bool) or not isinstance(per_case, int)
+            or per_case < 1):
+        raise ValueError("fresh.per_case must be a positive int")
+    return {"seed": seed, "per_case": per_case}
+
+
 def _call_evaluator(candidate_id, outputs, thresholds=None, timeout=60,
-                    service_path=None):
+                    service_path=None, fresh=None):
     """Ask the hidden evaluator for a verdict over its subprocess protocol.
 
     Returns the decoded envelope dict. Raises RuntimeError (or
@@ -226,7 +245,7 @@ def _call_evaluator(candidate_id, outputs, thresholds=None, timeout=60,
     callers MUST treat that as "do not promote".
     """
     request = _protocol.make_request(candidate_id, outputs,
-                                     thresholds=thresholds)
+                                     thresholds=thresholds, fresh=fresh)
     if service_path is None:
         return _evaluator_service.evaluate_in_subprocess(
             request, timeout=timeout)
@@ -241,6 +260,45 @@ def _call_evaluator(candidate_id, outputs, thresholds=None, timeout=60,
         raise RuntimeError(
             "evaluator subprocess returned no JSON (exit=%d, stderr=%r)"
             % (proc.returncode, proc.stderr[-500:]))
+
+
+def fetch_fresh_inputs(fresh, *, service_path=None, timeout=60):
+    """Fetch fresh-case inputs from the hidden evaluator (inputs only).
+
+    ``fresh`` is ``{"seed": int, "per_case": int}``. Returns
+    ``{"inputs": [{"key", "case_id", "index", "input"}], "seed",
+    "per_case", "generated"}``. The caller executes the candidate on
+    these inputs and submits the outputs with
+    :func:`evaluate_promotion` carrying the SAME ``fresh`` spec, so the
+    service scores the identical seeded cases. Expected outputs are
+    never disclosed. Raises ValueError on a malformed spec and
+    RuntimeError when the service is unreachable or misbehaves.
+    """
+    spec = _checked_fresh(fresh)
+    request = _protocol.make_fresh_inputs_request(
+        "fresh-inputs", seed=spec["seed"], per_case=spec["per_case"])
+    if service_path is None:
+        envelope = _evaluator_service.evaluate_in_subprocess(
+            request, timeout=timeout)
+    else:
+        proc = subprocess.run(
+            [sys.executable, service_path],
+            input=json.dumps(request),
+            capture_output=True, text=True, timeout=timeout,
+        )
+        try:
+            envelope = json.loads(proc.stdout)
+        except ValueError:
+            raise RuntimeError(
+                "evaluator subprocess returned no JSON (exit=%d, "
+                "stderr=%r)" % (proc.returncode, proc.stderr[-500:]))
+    if not isinstance(envelope, dict) or not envelope.get("ok"):
+        raise RuntimeError("evaluator refused fresh_inputs request: %r"
+                           % (envelope,))
+    return {"inputs": envelope.get("inputs", []),
+            "seed": spec["seed"], "per_case": spec["per_case"],
+            "generated": envelope.get("fresh", {}).get(
+                "generated", len(envelope.get("inputs", [])))}
 
 
 def _append_ledger(ledger, event_type, candidate_id, capability_id, version,
@@ -263,7 +321,7 @@ def _append_ledger(ledger, event_type, candidate_id, capability_id, version,
 
 def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
                        versions_dir=None, service_path=None,
-                       evaluator_timeout=60):
+                       evaluator_timeout=60, fresh=None):
     """Decide whether *candidate_id* may be promoted.
 
     *evidence* carries the promotion inputs (plan.md section 28)::
@@ -278,6 +336,14 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
             "thresholds": {...},        # optional explicit eval thresholds
             "transfer": {"outcomes": [...]} | [...],  # optional reuse rows
         }
+
+    ``fresh`` (or ``evidence["fresh"]``) is an optional
+    ``{"seed": int, "per_case": int}`` spec: the hidden evaluator
+    appends the seeded fresh cases to the scored set, so the candidate
+    must ALSO have been executed on those fresh inputs (see
+    :func:`fetch_fresh_inputs`) with the outputs submitted in
+    ``evidence["outputs"]``. Missing fresh outputs fail like any other
+    missing output. A malformed spec rejects (fail closed).
 
     Returns ``{"decision": "promote"|"reject", "reasons": [...],
     "version": int|None, "epoch": int|None}``. Rejections always carry
@@ -358,11 +424,20 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
         return reject("missing evaluator outputs: no hidden verdict possible",
                       capability_id)
     thresholds = evidence.get("thresholds")
+    if fresh is None:
+        fresh = evidence.get("fresh")
+    fresh_spec = None
+    if fresh is not None:
+        try:
+            fresh_spec = _checked_fresh(fresh)
+        except ValueError as exc:
+            return reject("malformed fresh spec: %s" % exc, capability_id)
     try:
         envelope = _call_evaluator(candidate_id, outputs,
                                    thresholds=thresholds,
                                    timeout=evaluator_timeout,
-                                   service_path=service_path)
+                                   service_path=service_path,
+                                   fresh=fresh_spec)
     except Exception as exc:  # unreachable / crashed / timed out: no verdict
         return reject("evaluator unreachable or failed: %s" % exc,
                       capability_id)
@@ -387,6 +462,15 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
             % (envelope.get("verdict"),
                summary.get("passed_checks", "?"),
                summary.get("total_checks", "?")), capability_id)
+
+    fresh_record = None
+    verdict_evidence = envelope.get("evidence")
+    if isinstance(verdict_evidence, dict):
+        info = verdict_evidence.get("fresh")
+        if isinstance(info, dict) and info.get("generated"):
+            fresh_record = {"seed": info.get("seed"),
+                            "per_case": info.get("per_case"),
+                            "generated": info.get("generated")}
 
     # -- version assignment + immutability -----------------------------------
     proposed = evidence.get("version")
@@ -432,6 +516,7 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
         "risk_level": risk_level,
         "gates_passed": sorted(passed),
         "evaluator_verdict": "pass",
+        "fresh": fresh_record,
         "transfer_metrics": transfer_metrics,
         "promoted_at": time.time(),
     }

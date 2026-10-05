@@ -4,7 +4,7 @@ The hidden-test evaluator (plan.md section 36, Domain D) runs as a SEPARATE
 process. The trusted kernel speaks to it over stdio with one JSON document
 per evaluation: the request on stdin, the verdict envelope on stdout.
 
-Request schema (all keys required except ``thresholds``)::
+Request schema (all keys required except ``thresholds``/``fresh``)::
 
     {
       "protocol_version": "1.0",
@@ -13,7 +13,13 @@ Request schema (all keys required except ``thresholds``)::
       "outputs": {"<case_id>:<check_index>": "<candidate output text>"},
       "thresholds": {"min_case_pass_rate": 1.0, "min_check_pass_rate": 1.0},
       "fresh": {"seed": 0, "per_case": 2}   # optional: append seeded fresh cases
+      "action": "evaluate" | "fresh_inputs"  # optional, default "evaluate"
     }
+
+``"action": "fresh_inputs"`` asks for the fresh case INPUTS (no expected
+outputs, no verdict) so the caller can execute the candidate on them and
+submit the outputs with a later ``evaluate`` request carrying the same
+``fresh`` spec. ``outputs`` is not required for ``fresh_inputs``.
 
 Success response::
 
@@ -48,9 +54,11 @@ PROTOCOL_VERSION = "1.0"
 
 _REQUEST_KEYS = frozenset(
     {"protocol_version", "request_id", "candidate_id", "outputs",
-     "thresholds", "fresh"}
+     "thresholds", "fresh", "action"}
 )
 _REQUIRED_KEYS = frozenset({"request_id", "candidate_id", "outputs"})
+_REQUIRED_FRESH_INPUTS_KEYS = frozenset({"request_id", "candidate_id"})
+_ACTIONS = ("evaluate", "fresh_inputs")
 _THRESHOLD_KEYS = frozenset({"min_case_pass_rate", "min_check_pass_rate"})
 
 
@@ -78,6 +86,19 @@ def make_request(candidate_id, outputs, request_id=None, thresholds=None,
     return request
 
 
+def make_fresh_inputs_request(candidate_id, seed=0, per_case=2,
+                              request_id=None):
+    """Build a ``fresh_inputs`` request dict (client-side helper)."""
+    request = {
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": request_id if request_id is not None else uuid.uuid4().hex,
+        "candidate_id": candidate_id,
+        "action": "fresh_inputs",
+        "fresh": {"seed": seed, "per_case": per_case},
+    }
+    return request
+
+
 def validate_request(obj):
     """Validate a decoded JSON request; return the normalized dict.
 
@@ -94,7 +115,15 @@ def validate_request(obj):
         raise ProtocolError(
             "unknown request key(s): %s" % ", ".join(sorted(unknown))
         )
-    missing = _REQUIRED_KEYS - set(obj)
+    action = obj.get("action", "evaluate")
+    if action not in _ACTIONS:
+        raise ProtocolError(
+            "unknown action: %r (want one of %s)"
+            % (action, ", ".join(_ACTIONS))
+        )
+    required = (_REQUIRED_KEYS if action == "evaluate"
+                else _REQUIRED_FRESH_INPUTS_KEYS)
+    missing = required - set(obj)
     if missing:
         raise ProtocolError(
             "missing required key(s): %s" % ", ".join(sorted(missing))
@@ -112,7 +141,7 @@ def validate_request(obj):
     candidate_id = obj["candidate_id"]
     if not isinstance(candidate_id, str) or not candidate_id:
         raise ProtocolError("candidate_id must be a non-empty string")
-    outputs = obj["outputs"]
+    outputs = obj.get("outputs", {})
     if not isinstance(outputs, dict):
         raise ProtocolError("outputs must be an object mapping case keys to text")
     for key in outputs:
@@ -151,6 +180,7 @@ def validate_request(obj):
         "protocol_version": PROTOCOL_VERSION,
         "request_id": request_id,
         "candidate_id": candidate_id,
+        "action": action,
         "outputs": dict(outputs),
         "thresholds": dict(thresholds),
         "fresh": dict(fresh),
@@ -166,6 +196,20 @@ def success_response(request, result):
         "ok": True,
         "verdict": result["verdict"],
         "evidence": result["evidence"],
+    }
+
+
+def fresh_inputs_response(request, inputs, seed, per_case):
+    """Wrap a fresh-inputs listing into a success envelope (no verdict)."""
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": request["request_id"],
+        "candidate_id": request["candidate_id"],
+        "ok": True,
+        "action": "fresh_inputs",
+        "fresh": {"seed": seed, "per_case": per_case,
+                  "generated": len(inputs)},
+        "inputs": inputs,
     }
 
 
