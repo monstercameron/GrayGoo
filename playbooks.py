@@ -8,13 +8,24 @@ lessons into principles and playbooks" items.
 Stdlib + lessons + mine only.
 """
 
+import copy
 import hashlib
+import json
+import os
 
 import lessons
 import mine
 
 #: Default overlap score at/above which two active lessons merge.
 DEFAULT_MERGE_THRESHOLD = 0.3
+
+#: Directory (relative or absolute) owning persisted executable-workflow
+#: records. ``promote_workflow`` creates it on demand.
+DEFAULT_WORKFLOWS_DIR = "workflows"
+
+#: Status of a freshly promoted workflow: persisted and reviewable, but
+#: not yet wired into live orchestration.
+WORKFLOW_STATUS_STAGED = "staged"
 
 #: Minimum confidence for a lesson to enter a compiled playbook.
 MIN_PLAYBOOK_CONFIDENCE = 0.7
@@ -314,3 +325,187 @@ def playbook_to_workflow_spec(playbook):
             else:
                 lines.append("    " + cell)
     return "\n".join(lines)
+
+
+# -- workflow promotion (memory.md section 22, todos.md L5) ----------
+
+
+def _promotion_blockers(playbook):
+    """Structural reasons *playbook* cannot promote (empty means gated OK).
+
+    An internal helper shared by :func:`is_promotable` (bool gate) and
+    :func:`promote_workflow` (raises with these reasons). Checks shape
+    only -- per-lesson confidence/evidence checks need the lesson store
+    and live in :func:`promote_workflow`.
+    """
+    if not isinstance(playbook, dict):
+        return ["playbook must be a dict, got %s"
+                % type(playbook).__name__]
+    title = playbook.get("title")
+    if not title or not isinstance(title, str):
+        return ["playbook 'title' must be a non-empty string"]
+    steps = playbook.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return ["playbook '%s' has no steps to promote" % title]
+    for position, step in enumerate(steps):
+        if not isinstance(step, dict):
+            return ["step %d must be a dict" % (position + 1)]
+        order = step.get("order")
+        if (isinstance(order, bool) or not isinstance(order, int)
+                or order < 1):
+            return ["step %d 'order' must be a positive int"
+                    % (position + 1)]
+        for key in ("lesson_id", "instruction"):
+            if not step.get(key) or not isinstance(step[key], str):
+                return ["step %d %r must be a non-empty string"
+                        % (position + 1, key)]
+    try:
+        playbook_to_workflow_spec(playbook)
+    except (TypeError, ValueError) as exc:
+        return ["unserializable playbook: %s" % exc]
+    return []
+
+
+def is_promotable(playbook):
+    """Structural promotion gate for a compiled playbook.
+
+    Returns True only when *playbook* is a well-formed
+    :func:`compile_playbook` record with at least one well-formed
+    step and a serializable workflow spec. Empty playbooks (e.g. an
+    unknown family compiling to zero steps) are not promotable.
+    Never raises: anything malformed yields False. Per-lesson
+    confidence/evidence validation needs the lesson store and is
+    :func:`promote_workflow`'s job, not this gate's.
+    """
+    try:
+        return not _promotion_blockers(playbook)
+    except Exception:
+        return False
+
+
+def _find_lesson(ledger, lesson_id):
+    """Look up one lesson dict by id, or None when unresolvable.
+
+    Accepts a :class:`lessons.LessonStore` (or any object with a
+    ``get`` method), a ``{lesson_id: lesson}`` mapping, or an
+    iterable of lesson dicts. Never raises.
+    """
+    if ledger is None:
+        return None
+    getter = getattr(ledger, "get", None)
+    if callable(getter):
+        try:
+            lesson = getter(lesson_id)
+        except Exception:
+            return None
+        return lesson if isinstance(lesson, dict) else None
+    if isinstance(ledger, dict):
+        lesson = ledger.get(lesson_id)
+        return lesson if isinstance(lesson, dict) else None
+    try:
+        iterator = iter(ledger)
+    except TypeError:
+        return None
+    try:
+        for item in iterator:
+            if isinstance(item, dict) and item.get("id") == lesson_id:
+                return item
+    except Exception:
+        return None
+    return None
+
+
+def _workflow_slug(playbook):
+    title = playbook.get("title", "")
+    if ":" in title:
+        family = title.split(":", 1)[1].strip() or "general"
+    else:
+        family = title.strip() or "general"
+    return _lisp_keyword(family)[1:]
+
+
+def _next_workflow_version(directory, slug):
+    """Smallest unused ``vN`` version for *slug* in *directory*."""
+    prefix = slug + "-v"
+    best = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 1
+    for name in names:
+        if name.startswith(prefix) and name.endswith(".json"):
+            middle = name[len(prefix):-len(".json")]
+            if middle.isdigit():
+                best = max(best, int(middle))
+    return best + 1
+
+
+def promote_workflow(playbook, *, ledger,
+                     directory=DEFAULT_WORKFLOWS_DIR):
+    """Promote a compiled playbook to a staged executable workflow.
+
+    *playbook* is a :func:`compile_playbook` record; *ledger* is the
+    lesson store used to validate every step (a
+    :class:`lessons.LessonStore`, an id->lesson mapping, or an
+    iterable of lesson dicts). Each step's lesson must exist, carry
+    confidence >= :data:`MIN_PLAYBOOK_CONFIDENCE`, and carry
+    non-empty supporting evidence; violations raise :exc:`ValueError`
+    (a non-dict playbook raises :exc:`TypeError`, mirroring
+    :func:`playbook_to_workflow_spec`).
+
+    On success, emits a versioned record ``{"workflow_id",
+    "playbook", "spec", "status": "staged"}`` where ``workflow_id``
+    is ``"<family-slug>-v<N>"`` (N bumps past existing records) and
+    ``spec`` is the :func:`playbook_to_workflow_spec` s-expression.
+    The record is persisted as JSON under *directory* (created on
+    demand, default ``"workflows/"``); *directory* exists so tests
+    can redirect into a tempfile instead of the repo. Returns the
+    record.
+    """
+    if not isinstance(playbook, dict):
+        raise TypeError("playbook must be a dict, got %s"
+                        % type(playbook).__name__)
+    blockers = _promotion_blockers(playbook)
+    if blockers:
+        raise ValueError("; ".join(blockers))
+    for step in playbook["steps"]:
+        lesson = _find_lesson(ledger, step["lesson_id"])
+        if lesson is None:
+            raise ValueError(
+                "step %d references unknown lesson %r"
+                % (step["order"], step["lesson_id"]))
+        confidence = lesson.get("confidence", 0.0)
+        if (isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or confidence < MIN_PLAYBOOK_CONFIDENCE):
+            raise ValueError(
+                "step %d lesson %r is below promotion confidence "
+                "(%.4g < %.4g)"
+                % (step["order"], step["lesson_id"],
+                   confidence if isinstance(confidence, (int, float))
+                   and not isinstance(confidence, bool) else 0.0,
+                   MIN_PLAYBOOK_CONFIDENCE))
+        if not lesson.get("evidence"):
+            raise ValueError("step %d lesson %r has no supporting "
+                             "evidence" % (step["order"],
+                                           step["lesson_id"]))
+    spec = playbook_to_workflow_spec(playbook)
+    slug = _workflow_slug(playbook)
+    os.makedirs(directory, exist_ok=True)
+    version = _next_workflow_version(directory, slug)
+    workflow_id = "%s-v%d" % (slug, version)
+    path = os.path.join(directory, workflow_id + ".json")
+    while os.path.exists(path):
+        version += 1
+        workflow_id = "%s-v%d" % (slug, version)
+        path = os.path.join(directory, workflow_id + ".json")
+    record = {"workflow_id": workflow_id,
+              "playbook": copy.deepcopy(playbook),
+              "spec": spec,
+              "status": WORKFLOW_STATUS_STAGED}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, sort_keys=True,
+                  default=str)
+    os.replace(tmp, path)
+    return record

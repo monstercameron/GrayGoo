@@ -281,5 +281,148 @@ class WorkflowSpecTest(unittest.TestCase):
                             "instruction": "y"}]})
 
 
+class IsPromotableTest(unittest.TestCase):
+    def _playbook(self):
+        store = lessons.LessonStore(lessons=[
+            lessons.make_lesson(
+                "repro-first", "repair",
+                "Reproduce with the smallest failing input first.",
+                when="parser failures", when_not="scale-only faults",
+                evidence=[{"task_id": "task-1", "note": "hit"}],
+                confidence=0.8, status="active", tags=["parser"]),
+            lessons.make_lesson(
+                "green-stop", "model-behavior",
+                "Once green, stop: touch nothing unrelated.",
+                when="post-green tasks", when_not="explicit cleanup",
+                evidence=[{"task_id": "task-2", "note": "hit"}],
+                confidence=0.9, status="active", tags=["parser"]),
+        ])
+        return store, playbooks.compile_playbook(store, "parser")
+
+    def test_compiled_playbook_is_promotable(self):
+        _, playbook = self._playbook()
+        self.assertTrue(playbooks.is_promotable(playbook))
+
+    def test_empty_and_malformed_playbooks_rejected(self):
+        self.assertFalse(playbooks.is_promotable(
+            {"title": "PLAYBOOK: parser", "steps": []}))
+        self.assertFalse(playbooks.is_promotable(
+            {"title": "", "steps": [{"order": 1, "lesson_id": "x",
+                                     "instruction": "y"}]}))
+        self.assertFalse(playbooks.is_promotable(
+            {"title": "PLAYBOOK: parser",
+             "steps": [{"order": 0, "lesson_id": "x",
+                        "instruction": "y"}]}))
+        self.assertFalse(playbooks.is_promotable(
+            {"title": "PLAYBOOK: parser",
+             "steps": [{"order": 1, "lesson_id": "",
+                        "instruction": "y"}]}))
+        self.assertFalse(playbooks.is_promotable(
+            {"title": "PLAYBOOK: parser", "steps": "not-a-list"}))
+        self.assertFalse(playbooks.is_promotable({"steps": []}))
+
+    def test_gate_never_raises(self):
+        for bad in (None, "playbook", 42, [], True):
+            self.assertFalse(playbooks.is_promotable(bad), msg=repr(bad))
+
+
+class PromoteWorkflowTest(unittest.TestCase):
+    def _store(self):
+        return lessons.LessonStore(lessons=[
+            lessons.make_lesson(
+                "repro-first", "repair",
+                "Reproduce with the smallest failing input first.",
+                when="parser failures", when_not="scale-only faults",
+                evidence=[{"task_id": "task-1", "note": "hit"}],
+                confidence=0.8, status="active", tags=["parser"]),
+            lessons.make_lesson(
+                "green-stop", "model-behavior",
+                "Once green, stop: touch nothing unrelated.",
+                when="post-green tasks", when_not="explicit cleanup",
+                evidence=[{"task_id": "task-2", "note": "hit"}],
+                confidence=0.9, status="active", tags=["parser"]),
+        ])
+
+    def test_promote_persists_versioned_staged_record(self):
+        import json
+
+        store = self._store()
+        playbook = playbooks.compile_playbook(store, "parser")
+        with tempfile.TemporaryDirectory() as tmp:
+            record = playbooks.promote_workflow(playbook, ledger=store,
+                                                directory=tmp)
+            self.assertEqual(set(record),
+                             {"workflow_id", "playbook", "spec",
+                              "status"})
+            self.assertEqual(record["status"], "staged")
+            self.assertEqual(record["workflow_id"], "parser-v1")
+            self.assertEqual(record["playbook"], playbook)
+            self.assertIn("(run-repair-playbook", record["spec"])
+            self.assertIn("repro-first", record["spec"])
+            self.assertIn("green-stop", record["spec"])
+            path = os.path.join(tmp, "parser-v1.json")
+            self.assertTrue(os.path.isfile(path))
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), record)
+            # Second promotion versions up without clobbering v1.
+            again = playbooks.promote_workflow(playbook, ledger=store,
+                                               directory=tmp)
+            self.assertEqual(again["workflow_id"], "parser-v2")
+            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(os.path.isfile(
+                os.path.join(tmp, "parser-v2.json")))
+
+    def test_promote_accepts_mapping_and_list_ledgers(self):
+        store = self._store()
+        playbook = playbooks.compile_playbook(store, "parser")
+        by_id = {lesson["id"]: lesson for lesson in store}
+        with tempfile.TemporaryDirectory() as tmp:
+            record = playbooks.promote_workflow(
+                playbook, ledger=by_id, directory=tmp)
+            self.assertEqual(record["workflow_id"], "parser-v1")
+        with tempfile.TemporaryDirectory() as tmp:
+            record = playbooks.promote_workflow(
+                playbook, ledger=list(store), directory=tmp)
+            self.assertEqual(record["workflow_id"], "parser-v1")
+
+    def test_low_confidence_evidence_and_unknown_rejected(self):
+        store = lessons.LessonStore(lessons=[
+            lessons.make_lesson(
+                "weak-hint", "design", "A weak hint.",
+                when="parser work", when_not="other work",
+                evidence=[{"task_id": "task-9", "note": "hit"}],
+                confidence=0.4, status="active", tags=["parser"]),
+            lessons.make_lesson(
+                "no-evidence", "repair", "An unevidenced step.",
+                when="parser work", when_not="other work",
+                evidence=[], confidence=0.95, status="active",
+                tags=["parser"]),
+        ])
+        weak = {"title": "PLAYBOOK: parser",
+                "steps": [{"order": 1, "lesson_id": "weak-hint",
+                           "instruction": "A weak hint."}]}
+        bare = {"title": "PLAYBOOK: parser",
+                "steps": [{"order": 1, "lesson_id": "no-evidence",
+                           "instruction": "An unevidenced step."}]}
+        ghost = {"title": "PLAYBOOK: parser",
+                 "steps": [{"order": 1, "lesson_id": "no-such-lesson",
+                            "instruction": "Ghost step."}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in (weak, bare, ghost):
+                with self.assertRaises(ValueError, msg=bad):
+                    playbooks.promote_workflow(bad, ledger=store,
+                                               directory=tmp)
+            self.assertEqual(os.listdir(tmp), [])
+        # Structural failures raise too; non-dict raises TypeError.
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                playbooks.promote_workflow(
+                    {"title": "PLAYBOOK: parser", "steps": []},
+                    ledger=store, directory=tmp)
+            with self.assertRaises(TypeError):
+                playbooks.promote_workflow("not-a-playbook",
+                                           ledger=store, directory=tmp)
+
+
 if __name__ == "__main__":
     unittest.main()

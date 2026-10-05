@@ -21,6 +21,9 @@ Documented defaults (returned exactly on empty input):
   ``"escalate"`` for unknown classes.
 * escalation policy: :data:`DEFAULT_ESCALATION_POLICY`
   (``max_repairs == 1``; oscillation always escalates).
+* risk model: all-zero ``predicted_count``/``actual_incidents`` notes.
+* applicability: zero tallies per declared boundary tag.
+* postmortem: ``[]`` for non-rollback or unreadable records.
 
 Stdlib plus :mod:`trajectories` only -- never sibling lane modules.
 """
@@ -43,6 +46,9 @@ __all__ = [
     "test_check_scores",
     "route_repair",
     "learn_escalation_policy",
+    "learn_risk_model",
+    "learn_applicability",
+    "postmortem_trigger",
 ]
 
 #: Context elements whose presence is correlated with task success
@@ -894,3 +900,492 @@ def learn_escalation_policy(repair_histories):
         if rate >= MIN_MARGINAL_GAIN:
             best = depth
     return {"max_repairs": best, "escalate_on_oscillation": True}
+
+
+# -- risk calibration (memory.md section 27, todos.md L6) ------------
+# NOTE: risk levels mirror ``risk.LEVELS``; re-declared here because
+# this module must not import sibling lanes (see DEFAULT_TEST_ORDER).
+
+#: Mutation-risk levels R0 (pure) through R6 (trust-root, forbidden).
+RISK_LEVELS = ("R0", "R1", "R2", "R3", "R4", "R5", "R6")
+
+#: Payload keys carrying a predicted risk level.
+_RISK_LEVEL_KEYS = ("risk", "risk_level", "predicted", "predicted_risk",
+                    "predicted_level", "classification", "risk_class",
+                    "level")
+
+#: Payload keys whose truthy value marks an actual production incident.
+_RISK_INCIDENT_KEYS = ("incident", "actual_incident",
+                       "production_incident", "production_regression",
+                       "contamination", "state_contamination",
+                       "regressed", "regression", "rollback",
+                       "rolled_back")
+
+#: Ledger event types that mark an actual production incident for the
+#: linked task/candidate/capability id.
+_RISK_INCIDENT_EVENTS = frozenset({
+    "candidate rolled back",
+    "rollback",
+    "production rollback",
+    "capability rolled back",
+    "production incident",
+    "incident",
+    "capability failed",
+})
+
+#: Ledger event types carrying a predicted risk level. ``None`` payload
+#: scans accept any event whose payload names a level; this set only
+#: widens the get_events_by_type fallback probe list.
+_RISK_PREDICTION_EVENTS = (
+    "risk classified",
+    "risk classification",
+    "mutation classified",
+    "candidate classified",
+    "promotion decision",
+    "candidate promoted",
+    "candidate rejected",
+)
+
+
+def _normalize_risk_level(value):
+    """Canonical R0-R6 level for *value*, or None when not a level."""
+    if not isinstance(value, str):
+        return None
+    level = value.strip().upper().replace(" ", "")
+    if level in RISK_LEVELS:
+        return level
+    return None
+
+
+def _risk_prediction_of(payload):
+    """Predicted risk level of a payload dict, or None."""
+    if not isinstance(payload, dict):
+        return None
+    for key in _RISK_LEVEL_KEYS:
+        if key in payload:
+            level = _normalize_risk_level(payload[key])
+            if level is not None:
+                return level
+    nested = payload.get("verdict")
+    if isinstance(nested, dict):
+        for key in _RISK_LEVEL_KEYS:
+            if key in nested:
+                level = _normalize_risk_level(nested[key])
+                if level is not None:
+                    return level
+    return None
+
+
+def _risk_incident_of(payload):
+    """True when a payload dict explicitly reports a production incident."""
+    if not isinstance(payload, dict):
+        return False
+    return any(bool(payload.get(key)) for key in _RISK_INCIDENT_KEYS)
+
+
+def _scan_typed_payloads(ledger):
+    """``(event_type, ids, payload)`` for every ledger event.
+
+    ``ids`` is the tuple of non-null linkage ids
+    (task_id, candidate_id, capability_id). Never raises: unreadable
+    stores yield [].
+    """
+    found = []
+    conn = getattr(ledger, "conn", None)
+    if conn is not None and hasattr(conn, "execute"):
+        try:
+            rows = conn.execute(
+                "SELECT event_type, task_id, candidate_id, "
+                "capability_id, payload FROM events ORDER BY event_id"
+            ).fetchall()
+        except Exception:
+            return []
+        for event_type, task_id, candidate_id, capability_id, text in rows:
+            try:
+                payload = json.loads(text or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                ids = tuple(item for item in
+                            (task_id, candidate_id, capability_id)
+                            if item is not None)
+                found.append((event_type, ids, payload))
+        return found
+    seen = set()
+    for event_type in (_RISK_INCIDENT_EVENTS | {"trajectory recorded"}
+                       | set(_RISK_PREDICTION_EVENTS)):
+        try:
+            rows = ledger.get_events_by_type(event_type)
+        except Exception:
+            continue
+        for event in rows:
+            if not isinstance(event, dict):
+                continue
+            marker = event.get("event_id", id(event))
+            if marker in seen:
+                continue
+            seen.add(marker)
+            try:
+                payload = json.loads(event.get("payload", "{}"))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                ids = tuple(item for item in
+                            (event.get("task_id"),
+                             event.get("candidate_id"),
+                             event.get("capability_id"))
+                            if item is not None)
+                found.append((event.get("event_type"), ids, payload))
+    return found
+
+
+def _as_risk_pairs(source):
+    """Ledger/history -> ``[(predicted_level, incident), ...]``.
+
+    Ledger predictions join incidents on a shared task/candidate/
+    capability id; in-memory records are self-contained (a predicted
+    level plus an incident flag in one dict). Records without a
+    recognizable predicted level are skipped. Never raises.
+    """
+    if source is None:
+        return []
+    if _is_ledger(source):
+        try:
+            scanned = _scan_typed_payloads(source)
+        except Exception:
+            return []
+        predicted = {}
+        incidents = set()
+        for event_type, ids, payload in scanned:
+            if not ids:
+                continue
+            key = ids[0]
+            if key not in predicted:
+                level = _risk_prediction_of(payload)
+                if level is not None:
+                    predicted[key] = (level, set(ids))
+            incident = _risk_incident_of(payload)
+            if not incident and isinstance(event_type, str):
+                incident = (event_type.strip().lower()
+                            in _RISK_INCIDENT_EVENTS)
+            if incident:
+                incidents.update(ids)
+        return [(level, bool(ids & incidents))
+                for level, ids in predicted.values()]
+    if isinstance(source, dict):
+        source = [source]
+    if not isinstance(source, (list, tuple)):
+        return []
+    pairs = []
+    for record in source:
+        if not isinstance(record, dict):
+            continue
+        level = _risk_prediction_of(record)
+        if level is None:
+            continue
+        pairs.append((level, _risk_incident_of(record)))
+    return pairs
+
+
+def learn_risk_model(ledger):
+    """Calibrate predicted mutation risk against actual incidents.
+
+    *ledger* is an event ledger (predictions joined to production
+    incidents on a shared task/candidate/capability id), an
+    in-memory list of ``{"risk": "R1", "incident": bool}``-style
+    records, or None. Returns one calibration note per level,
+    ``{"level", "predicted_count", "actual_incidents"}`` in R0-R6
+    order: ``predicted_count`` tallies candidates classified at that
+    level and ``actual_incidents`` tallies how many of them escaped
+    to a production incident (memory.md section 27 -- e.g. repeated
+    R1 incidents argue for reclassifying the family R2). Empty or
+    unreadable input yields all-zero notes, never an exception.
+    """
+    try:
+        pairs = _as_risk_pairs(ledger)
+    except Exception:
+        pairs = []
+    predicted = {level: 0 for level in RISK_LEVELS}
+    incidents = {level: 0 for level in RISK_LEVELS}
+    for level, incident in pairs:
+        predicted[level] += 1
+        if incident:
+            incidents[level] += 1
+    return [{"level": level, "predicted_count": predicted[level],
+             "actual_incidents": incidents[level]}
+            for level in RISK_LEVELS]
+
+
+# -- applicability boundaries (memory.md section 28, todos.md L6) ----
+
+
+def _as_family_records(skills_store):
+    """Skill store (or family records) -> list of family dicts.
+
+    Accepts a store with ``list_families``, a single family record,
+    or a list of family records. Never raises.
+    """
+    if skills_store is None:
+        return []
+    lister = getattr(skills_store, "list_families", None)
+    if callable(lister):
+        try:
+            families = lister()
+        except Exception:
+            return []
+        return [item for item in families if isinstance(item, dict)]
+    if isinstance(skills_store, dict):
+        return [skills_store]
+    if isinstance(skills_store, (list, tuple)):
+        return [item for item in skills_store if isinstance(item, dict)]
+    return []
+
+
+def _tags_of_outcome(outcome):
+    """Task tags carried by one reuse-outcome record."""
+    tags = set()
+    for key in ("tags", "task_tags"):
+        value = outcome.get(key)
+        if isinstance(value, str) and value.strip():
+            tags.add(value.strip())
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    tags.add(item.strip())
+    task = outcome.get("task")
+    if isinstance(task, dict):
+        for key in ("tags", "task_tags"):
+            value = task.get(key)
+            if isinstance(value, str) and value.strip():
+                tags.add(value.strip())
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        tags.add(item.strip())
+    elif isinstance(task, (list, tuple, set, frozenset)):
+        for item in task:
+            if isinstance(item, str) and item.strip():
+                tags.add(item.strip())
+    return tags
+
+
+def _worked_of_outcome(outcome):
+    """Worked/failed signal of one outcome record, or None if unknown."""
+    for key in ("worked", "success", "succeeded"):
+        if key in outcome and outcome[key] is not None:
+            return bool(outcome[key])
+    return _outcome_of(outcome)
+
+
+def learn_applicability(skills_store, outcomes):
+    """Tally when/when_not evidence per skill family (pure function).
+
+    *skills_store* is a skill store (anything with
+    ``list_families``), a single family record, or a list of family
+    records; *outcomes* is an iterable of reuse-outcome dicts with a
+    ``family_id``, task tags (``tags``/``task_tags``/``task``), and
+    a worked signal (``worked``/``success``). Returns
+    ``{family_id: {"when": {tag: {"success", "failure"}},
+    "when_not": {...}}}`` counting, for each declared boundary tag,
+    how often retrieval on tasks carrying that tag worked or failed
+    (memory.md section 28). Declared tags with no observations keep
+    explicit zero tallies; outcomes for unknown families, without
+    tags, or without an outcome signal are skipped.
+
+    Pure: reads the passed-in records only, mutates nothing, and
+    never writes to the store.
+    """
+    families = _as_family_records(skills_store)
+    tallies = {}
+    declared = {}
+    for family in families:
+        family_id = family.get("family_id")
+        if not family_id or not isinstance(family_id, str):
+            continue
+        app = family.get("applicability") or {}
+        when = [tag for tag in (app.get("when") or [])
+                if isinstance(tag, str)]
+        when_not = [tag for tag in (app.get("when_not") or [])
+                    if isinstance(tag, str)]
+        declared[family_id] = (set(when), set(when_not))
+        tallies[family_id] = {
+            "when": {tag: {"success": 0, "failure": 0} for tag in when},
+            "when_not": {tag: {"success": 0, "failure": 0}
+                         for tag in when_not},
+        }
+    if isinstance(outcomes, dict):
+        outcomes = [outcomes]
+    if not isinstance(outcomes, (list, tuple)):
+        return tallies
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        family_id = outcome.get("family_id")
+        if family_id not in tallies:
+            continue
+        worked = _worked_of_outcome(outcome)
+        if worked is None:
+            continue
+        when, when_not = declared[family_id]
+        for tag in _tags_of_outcome(outcome):
+            if tag in when:
+                bucket = tallies[family_id]["when"][tag]
+            elif tag in when_not:
+                bucket = tallies[family_id]["when_not"][tag]
+            else:
+                continue
+            bucket["success" if worked else "failure"] += 1
+    return tallies
+
+
+# -- rollback postmortem (memory.md section 30, todos.md L6) ---------
+
+
+#: Event types recognized as production rollbacks (see
+#: ``instrument.log_rollback``: "candidate rolled back").
+_ROLLBACK_EVENT_TYPES = frozenset({
+    "candidate rolled back",
+    "rollback",
+    "production rollback",
+    "capability rolled back",
+})
+
+#: Payload keys that mark an untyped dict as a rollback record.
+_ROLLBACK_SIGNAL_KEYS = ("reason", "from_version", "to_version",
+                         "from-version", "to-version",
+                         "failure_class", "failure-class",
+                         "regressed_version")
+
+
+def _rollback_payload(event):
+    """Payload dict of a ledger event row or bare record.
+
+    Ledger rows carry the payload as a JSON string under ``payload``;
+    bare records already are the payload. Never raises.
+    """
+    if not isinstance(event, dict):
+        return {}
+    payload = event.get("payload", event)
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _is_rollback_record(event):
+    """True when *event* is recognizable as a rollback record."""
+    if not isinstance(event, dict):
+        return False
+    if "event_type" in event:
+        event_type = event.get("event_type")
+        return (isinstance(event_type, str)
+                and event_type.strip().lower() in _ROLLBACK_EVENT_TYPES)
+    payload = _rollback_payload(event)
+    return any(key in payload for key in _ROLLBACK_SIGNAL_KEYS)
+
+
+def postmortem_trigger(rollback_event):
+    """Extract lesson-candidate dicts from a rollback record.
+
+    *rollback_event* is one ledger event row (as produced by
+    ``instrument.log_rollback``: type ``"candidate rolled back"``
+    with payload ``from_version``/``to_version``/``reason``) or a
+    bare payload-style dict. Returns a list of lesson-candidate
+    dicts in the :func:`mine.propose_lesson_candidate
+    <mine.propose_lesson_candidate>` shape (``statement``,
+    ``lesson_class``, ``failure_class``, ``family``, evidenced
+    ``evidence``/``applies_when``, single-incident ``confidence``
+    0.55, ``status`` ``"candidate"``, plus rollback ``source``
+    provenance) -- one candidate per rollback, ready for replay
+    validation per memory.md section 30. Non-rollback events,
+    untyped dicts without rollback signals, and non-dicts yield []
+    instead of raising.
+    """
+    if not _is_rollback_record(rollback_event):
+        return []
+    payload = _rollback_payload(rollback_event)
+    capability = rollback_event.get("capability_id",
+                                    payload.get("capability_id"))
+    if not isinstance(capability, str) or not capability:
+        capability = payload.get("capability") or "unknown capability"
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = "no reason recorded"
+    else:
+        reason = reason.strip()
+    from_version = payload.get("from_version",
+                               payload.get("from-version"))
+    to_version = payload.get("to_version", payload.get("to-version"))
+    versions = ""
+    if from_version is not None or to_version is not None:
+        versions = " (v%s -> v%s)" % (from_version, to_version)
+    failure_class = None
+    for key in ("failure_class", "failure-class", "class"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            try:
+                failure_class = trajectories.normalize_failure_class(
+                    value.strip())
+            except (ValueError, TypeError):
+                failure_class = value.strip()
+            break
+    if failure_class is None:
+        failure = payload.get("failure")
+        if isinstance(failure, dict):
+            raw = failure.get("class")
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    failure_class = trajectories.normalize_failure_class(
+                        raw.strip())
+                except (ValueError, TypeError):
+                    failure_class = raw.strip()
+        elif isinstance(failure, str) and failure.strip():
+            try:
+                failure_class = trajectories.normalize_failure_class(
+                    failure.strip())
+            except (ValueError, TypeError):
+                failure_class = failure.strip()
+    family = payload.get("family")
+    if not isinstance(family, str) or not family:
+        family = None
+    if failure_class:
+        statement = (
+            "Production rollback of capability '%s'%s after %s "
+            "failure (%s): add a rehearsal check covering this "
+            "failure mode before promotion."
+            % (capability, versions, failure_class, reason))
+    else:
+        statement = (
+            "Production rollback of capability '%s'%s (%s): add a "
+            "rehearsal check covering this failure mode before "
+            "promotion." % (capability, versions, reason))
+    when = "tasks touching capability '%s'" % capability
+    if failure_class:
+        when += " with failure class '%s'" % failure_class
+    event_ids = []
+    if rollback_event.get("event_id") is not None:
+        event_ids.append(rollback_event["event_id"])
+    task_ids = []
+    task_id = rollback_event.get("task_id", payload.get("task_id"))
+    if task_id is not None:
+        task_ids.append(task_id)
+    return [{
+        "statement": statement,
+        "lesson_class": "failure",
+        "failure_class": failure_class,
+        "family": family,
+        "evidence": {"event_ids": event_ids, "task_ids": task_ids,
+                     "count": 1},
+        "applies_when": {
+            "when": when,
+            "when_not": "tasks outside capability '%s'" % capability,
+        },
+        "confidence": 0.55,
+        "status": "candidate",
+        "source": "rollback",
+    }]

@@ -24,6 +24,7 @@ Stdlib + ``evaluator`` + ``events`` (+ ``risk``/``transfer`` for gate
 definitions) only. No network, no model calls.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -65,8 +66,17 @@ def _safe_name(capability_id):
 
 
 def _capability_path(versions_dir, capability_id):
-    return os.path.join(
-        versions_dir, _safe_name(capability_id) + ".json")
+    text = str(capability_id)
+    stem = _safe_name(text)
+    if stem != text:
+        # QA-05: ids that do not round-trip through _safe_name would
+        # collide ("a/b" vs "a_b" shared one file and merged
+        # histories). Qualify such stems with a hash of the full id so
+        # distinct ids always map to distinct files. Clean ids keep
+        # their plain "<id>.json" name.
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        stem = "%s__%s" % (stem, digest)
+    return os.path.join(versions_dir, stem + ".json")
 
 
 def _epochs_path(versions_dir):
@@ -108,6 +118,71 @@ def _load_epoch(versions_dir):
         return 0
     epoch = doc.get("epoch", 0)
     return epoch if isinstance(epoch, int) and epoch >= 0 else 0
+
+
+def _read_json_checked(path):
+    """Read JSON, distinguishing "missing" from "corrupt".
+
+    Returns ``(present, value, error)``: ``present`` is False only when
+    the file does not exist; otherwise ``error`` names the problem
+    (unreadable bytes, invalid JSON) and ``value`` is None.
+    """
+    if not os.path.exists(path):
+        return False, None, None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return True, json.load(handle), None
+    except (OSError, ValueError) as exc:
+        return True, None, "unreadable %r: %s" % (
+            os.path.basename(path), exc)
+
+
+def _load_capability_doc_checked(versions_dir, capability_id):
+    """Checked capability-doc load: ``(doc, error)``.
+
+    ``(None, None)`` means never promoted (no file). Any other error
+    means the file exists but is unreadable or invalid -- callers must
+    fail closed, never silently restart versioning (QA-09).
+    """
+    path = _capability_path(versions_dir, capability_id)
+    present, raw, error = _read_json_checked(path)
+    if not present:
+        return None, None
+    if error is not None:
+        return None, error
+    if not isinstance(raw, dict) or not isinstance(raw.get("versions"), dict):
+        return None, "corrupt %r: expected a dict with a dict 'versions'" % (
+            os.path.basename(path),)
+    try:
+        int(raw.get("current_version", 0))
+    except (TypeError, ValueError):
+        return None, "corrupt %r: 'current_version' is not an integer" % (
+            os.path.basename(path),)
+    return raw, None
+
+
+def _load_epoch_checked(versions_dir):
+    """Checked epoch load: ``(epoch, error)``.
+
+    ``(0, None)`` means nothing promoted yet (no file). Any other error
+    means the file exists but is unreadable or invalid -- callers must
+    fail closed, never silently restart at 1 (QA-09).
+    """
+    path = _epochs_path(versions_dir)
+    present, raw, error = _read_json_checked(path)
+    if not present:
+        return 0, None
+    if error is not None:
+        return 0, error
+    if not isinstance(raw, dict):
+        return 0, "corrupt %r: expected a dict" % (
+            os.path.basename(path),)
+    epoch = raw.get("epoch", 0)
+    if (not isinstance(epoch, int) or isinstance(epoch, bool)
+            or epoch < 0):
+        return 0, "corrupt %r: 'epoch' is not a non-negative integer" % (
+            os.path.basename(path),)
+    return epoch, None
 
 
 def _gates_passed_of(evidence):
@@ -213,9 +288,12 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
 
     def reject(reason, capability_id=None, version=None):
         reasons.append(reason)
-        _append_ledger(ledger, EVENT_REJECTED, candidate_id,
-                       capability_id, version, generation,
-                       {"reasons": list(reasons)})
+        try:
+            _append_ledger(ledger, EVENT_REJECTED, candidate_id,
+                           capability_id, version, generation,
+                           {"reasons": list(reasons)})
+        except Exception as exc:  # QA-06: ledger outage must not escape;
+            reasons.append("ledger append failed: %s" % (exc,))  # fail closed, audibly
         return {"decision": DECISION_REJECT, "reasons": list(reasons),
                 "version": None, "epoch": None}
 
@@ -312,14 +390,20 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
 
     # -- version assignment + immutability -----------------------------------
     proposed = evidence.get("version")
-    doc = _load_capability_doc(vdir, capability_id)
+    doc, state_error = _load_capability_doc_checked(vdir, capability_id)
+    if state_error is not None:
+        return reject(
+            "corrupt capability state: %s; refusing to promote without "
+            "an audited reset" % (state_error,), capability_id)
+    epoch_base, epoch_error = _load_epoch_checked(vdir)
+    if epoch_error is not None:
+        return reject(
+            "corrupt epoch state: %s; refusing to promote without an "
+            "audited reset" % (epoch_error,), capability_id)
     current_version = 0
     recorded = {}
     if doc is not None:
-        try:
-            current_version = int(doc.get("current_version", 0))
-        except (TypeError, ValueError):
-            current_version = 0
+        current_version = int(doc.get("current_version", 0))
         recorded = doc.get("versions", {})
     if proposed is None:
         version = current_version + 1
@@ -337,7 +421,7 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
                       % (version, current_version), capability_id, version)
 
     # -- commit: version record + monotonic epoch -----------------------------
-    epoch = _load_epoch(vdir) + 1
+    epoch = epoch_base + 1
     record = {
         "capability_id": capability_id,
         "version": version,
@@ -360,11 +444,16 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
     _write_json_atomic(_capability_path(vdir, capability_id), new_doc)
     _write_json_atomic(_epochs_path(vdir), {"epoch": epoch})
 
-    _append_ledger(ledger, EVENT_PROMOTED, candidate_id, capability_id,
-                   version, generation,
-                   {"version": version, "epoch": epoch,
-                    "risk_level": risk_level, "evaluator_verdict": "pass"})
-    return {"decision": DECISION_PROMOTE, "reasons": ["all gates passed"],
+    promote_reasons = ["all gates passed"]
+    try:
+        _append_ledger(ledger, EVENT_PROMOTED, candidate_id, capability_id,
+                       version, generation,
+                       {"version": version, "epoch": epoch,
+                        "risk_level": risk_level, "evaluator_verdict": "pass"})
+    except Exception as exc:  # QA-06: never let a ledger outage escape;
+        promote_reasons.append(  # the committed version record stands, audibly
+            "ledger append failed: %s" % (exc,))
+    return {"decision": DECISION_PROMOTE, "reasons": promote_reasons,
             "version": version, "epoch": epoch}
 
 

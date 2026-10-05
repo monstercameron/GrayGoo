@@ -333,5 +333,217 @@ class ImportHygieneTest(unittest.TestCase):
         self.assertLessEqual(imported, {"json", "events", "trajectories"})
 
 
+class RiskModelTest(unittest.TestCase):
+    def _by_level(self, notes):
+        self.assertEqual([note["level"] for note in notes],
+                         ["R0", "R1", "R2", "R3", "R4", "R5", "R6"])
+        for note in notes:
+            self.assertEqual(set(note),
+                             {"level", "predicted_count",
+                              "actual_incidents"})
+        return {note["level"]: note for note in notes}
+
+    def test_predicted_vs_actual_tallied_per_level(self):
+        records = ([{"risk": "R1", "incident": True}] * 3
+                   + [{"risk": "R1", "incident": False}] * 7
+                   + [{"predicted": "R2"}] * 4
+                   + [{"risk": "r4", "incident": True}])
+        by_level = self._by_level(adaptive.learn_risk_model(records))
+        self.assertEqual(by_level["R1"]["predicted_count"], 10)
+        self.assertEqual(by_level["R1"]["actual_incidents"], 3)
+        self.assertEqual(by_level["R2"]["predicted_count"], 4)
+        self.assertEqual(by_level["R2"]["actual_incidents"], 0)
+        self.assertEqual(by_level["R4"]["predicted_count"], 1)
+        self.assertEqual(by_level["R4"]["actual_incidents"], 1)
+
+    def test_ledger_predictions_join_rollbacks(self):
+        import instrument
+
+        ledger = _open_ledger(self)
+        for index in range(3):
+            ledger.append_event(
+                "risk classified", task_id="risk-%d" % index,
+                candidate_id="cand-%d" % index,
+                payload={"risk": "R1"})
+        ledger.append_event("risk classified", task_id="risk-clean",
+                            candidate_id="cand-clean",
+                            payload={"risk": "R2"})
+        instrument.log_rollback(ledger, "cap-cache", 8, 7,
+                                "state contamination")
+        # Rollback rows carry only capability linkage; link one
+        # prediction to the rolled-back capability.
+        ledger.append_event("risk classified", capability_id="cap-cache",
+                            payload={"risk": "R1"})
+        by_level = self._by_level(adaptive.learn_risk_model(ledger))
+        self.assertEqual(by_level["R1"]["predicted_count"], 4)
+        self.assertEqual(by_level["R1"]["actual_incidents"], 1)
+        self.assertEqual(by_level["R2"]["predicted_count"], 1)
+        self.assertEqual(by_level["R2"]["actual_incidents"], 0)
+
+    def test_empty_and_malformed_inputs_yield_zeros(self):
+        for source in (None, [], _open_ledger(self)):
+            for note in adaptive.learn_risk_model(source):
+                self.assertEqual(note["predicted_count"], 0)
+                self.assertEqual(note["actual_incidents"], 0)
+        junk = ["junk", 42, None, {"no_risk": True},
+                {"risk": "R9"}, {"risk": 42},
+                {"risk": "R3", "incident": False}]
+        by_level = self._by_level(adaptive.learn_risk_model(junk))
+        self.assertEqual(by_level["R3"]["predicted_count"], 1)
+        self.assertEqual(by_level["R3"]["actual_incidents"], 0)
+        self.assertEqual(sum(note["predicted_count"]
+                             for note in by_level.values()), 1)
+
+
+class ApplicabilityTest(unittest.TestCase):
+    def _families(self):
+        import skills
+
+        return [
+            skills.make_family(
+                "csv-family", "Parse CSV rows.",
+                when=["csv", "parsing"], when_not=["streaming"]),
+            skills.make_family(
+                "pager-family", "Walk cursor pagination.",
+                when=["rest"], when_not=["graphql"]),
+        ]
+
+    def test_when_and_when_not_tallies(self):
+        families = self._families()
+        outcomes = [
+            {"family_id": "csv-family", "tags": ["csv", "parsing"],
+             "worked": True},
+            {"family_id": "csv-family", "tags": ["csv"],
+             "worked": True},
+            {"family_id": "csv-family", "tags": ["csv", "streaming"],
+             "worked": False},
+            {"family_id": "csv-family", "tags": ["streaming"],
+             "worked": False},
+            {"family_id": "pager-family",
+             "task": {"tags": ["rest"]}, "success": True},
+        ]
+        tallies = adaptive.learn_applicability(families, outcomes)
+        self.assertEqual(set(tallies), {"csv-family", "pager-family"})
+        csv = tallies["csv-family"]
+        self.assertEqual(set(csv), {"when", "when_not"})
+        self.assertEqual(csv["when"]["csv"],
+                         {"success": 2, "failure": 1})
+        self.assertEqual(csv["when"]["parsing"],
+                         {"success": 1, "failure": 0})
+        self.assertEqual(csv["when_not"]["streaming"],
+                         {"success": 0, "failure": 2})
+        self.assertEqual(tallies["pager-family"]["when"]["rest"],
+                         {"success": 1, "failure": 0})
+        # Unobserved declared tags keep explicit zero tallies.
+        self.assertEqual(tallies["pager-family"]["when_not"]["graphql"],
+                         {"success": 0, "failure": 0})
+
+    def test_unknown_families_and_signalless_outcomes_skipped(self):
+        families = self._families()
+        outcomes = [
+            {"family_id": "ghost-family", "tags": ["csv"],
+             "worked": True},
+            {"family_id": "csv-family", "tags": ["csv"]},
+            {"family_id": "csv-family", "worked": True},
+            "junk",
+            {"family_id": "csv-family", "tags": ["novel-tag"],
+             "worked": True},
+        ]
+        tallies = adaptive.learn_applicability(families, outcomes)
+        self.assertNotIn("ghost-family", tallies)
+        for bucket in ("when", "when_not"):
+            for counts in tallies["csv-family"][bucket].values():
+                self.assertEqual(counts, {"success": 0, "failure": 0})
+        self.assertEqual(adaptive.learn_applicability(None, outcomes),
+                         {})
+        self.assertEqual(adaptive.learn_applicability(families, None),
+                         adaptive.learn_applicability(families, []))
+
+    def test_pure_function_never_writes_to_store(self):
+        import copy
+        import skills
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = skills.SkillStore(os.path.join(tmp, "skills"))
+            for family in self._families():
+                store.save_family(family=family)
+            before = [store.get_family("csv-family"),
+                      store.get_family("pager-family")]
+            snapshot = copy.deepcopy(before)
+            outcomes_path = os.path.join(tmp, "skills",
+                                         "outcomes.jsonl")
+            outcomes = [{"family_id": "csv-family", "tags": ["csv"],
+                         "worked": True}]
+            tallies = adaptive.learn_applicability(store, outcomes)
+            self.assertEqual(tallies["csv-family"]["when"]["csv"],
+                             {"success": 1, "failure": 0})
+            # No store writes: family records byte-identical, no log.
+            self.assertEqual([store.get_family("csv-family"),
+                              store.get_family("pager-family")],
+                             snapshot)
+            self.assertFalse(os.path.exists(outcomes_path))
+            # Inputs unmutated.
+            self.assertEqual(outcomes,
+                             [{"family_id": "csv-family",
+                               "tags": ["csv"], "worked": True}])
+
+
+class PostmortemTest(unittest.TestCase):
+    def test_rollback_yields_lesson_candidate(self):
+        import instrument
+
+        ledger = _open_ledger(self)
+        row = instrument.log_rollback(ledger, "cap-cache", 8, 7,
+                                      "state contamination via cache")
+        candidates = adaptive.postmortem_trigger(row)
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate["status"], "candidate")
+        self.assertEqual(candidate["lesson_class"], "failure")
+        self.assertEqual(candidate["source"], "rollback")
+        self.assertEqual(candidate["confidence"], 0.55)
+        self.assertIn("cap-cache", candidate["statement"])
+        self.assertIn("state contamination via cache",
+                      candidate["statement"])
+        self.assertEqual(candidate["evidence"]["event_ids"],
+                         [row["event_id"]])
+        self.assertEqual(candidate["evidence"]["count"], 1)
+        self.assertIn("cap-cache", candidate["applies_when"]["when"])
+        # Shape matches mine.propose_lesson_candidate consumers.
+        import mine
+
+        mine.deduplicate(candidates + [dict(candidate)])
+
+    def test_failure_class_and_bare_payload_accepted(self):
+        event = {"event_type": "candidate rolled back",
+                 "event_id": 41, "task_id": "task-7",
+                 "capability_id": "cap-parse",
+                 "payload": {"from_version": 3, "to_version": 2,
+                             "reason": "cyclic cursor loop",
+                             "failure_class": "timeout"}}
+        (candidate,) = adaptive.postmortem_trigger(event)
+        self.assertEqual(candidate["failure_class"], "timeout")
+        self.assertIn("timeout", candidate["statement"])
+        self.assertEqual(candidate["evidence"]["task_ids"], ["task-7"])
+        bare = {"capability_id": "cap-x", "from_version": 2,
+                "to_version": 1, "reason": "regression"}
+        (candidate,) = adaptive.postmortem_trigger(bare)
+        self.assertIn("cap-x", candidate["statement"])
+
+    def test_non_rollback_and_garbage_yield_no_candidates(self):
+        import instrument
+
+        ledger = _open_ledger(self)
+        task_row = instrument.log_task_outcome(ledger, "task-1", False,
+                                               "failed green-stop")
+        self.assertEqual(adaptive.postmortem_trigger(task_row), [])
+        self.assertEqual(adaptive.postmortem_trigger(
+            {"event_type": "task completed",
+             "payload": {"success": False}}), [])
+        for bad in (None, "rollback", 42, [], {}, {"payload": {}}):
+            self.assertEqual(adaptive.postmortem_trigger(bad), [],
+                             msg=repr(bad))
+
+
 if __name__ == "__main__":
     unittest.main()
