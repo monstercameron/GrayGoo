@@ -161,8 +161,25 @@ probes and fixed:
   counting, #64/#65 dashboard-only metrics + dead Lisp).
 
 Still REAL, not yet fixed: #47/#48 (Lisp security/effects stubs),
-#49-54 (capability-model validation), #57-60 (worker protocol
+#52-54 (lineage/version concurrency), #57-60 (worker protocol
 semantics/compile), #66-70 (provenance/metrics/source-of-truth).
+
+## Round 5 (2026-10-05): issues #49-51
+
+- #49 (MEDIUM): `derive-version` could not clear list fields
+  (`(or ...)` kept parent on NIL). Fixed: supplied-p flags for
+  inputs/outputs/effects/dependencies (+ source/creator/model);
+  explicit NIL clears, omitted keys inherit.
+- #50 (MEDIUM): TTL could not be removed (NIL inherited). Fixed:
+  `ttl-given-p`; explicit `:ttl nil` clears.
+- #51 (MEDIUM): risk values unvalidated. Fixed:
+  `*capability-risk-levels*` + `risk-level-p` (mirrors rehearsal's
+  set; kept local to avoid depending on the stub package),
+  enforced in `make-capability` (covers derive).
+- New SBCL probe `capability-model.lisp` (13 checks); all 8 Lisp
+  probes PASS; ASDF system loads (`GRAYGOO-LOAD-OK evo-packages=25`).
+  (Triage's `*risk-levels*` pointer named the rehearsal var; the
+  capability package cannot use it without a new dependency.)
 
 ACCEPTED, documented, not yet fixed:
 

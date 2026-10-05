@@ -79,6 +79,16 @@ No external dependencies; randomness comes from
   "Return true when STATE is a known lifecycle state."
   (and (member state *lifecycle-states*) t))
 
+(defvar *capability-risk-levels*
+  '(:r0 :r1 :r2 :r3 :r4 :r5 :r6)
+  "Valid RISK values (issues.md #51; mirrors
+EVO.REHEARSAL:*RISK-LEVELS*, plan.md §7). Kept local so this package
+stays decoupled from the rehearsal stub.")
+
+(defun risk-level-p (level)
+  "Return true when LEVEL is a known capability risk level."
+  (and (member level *capability-risk-levels*) t))
+
 (defstruct (capability
             (:constructor %make-capability)
             (:predicate capability-p))
@@ -129,7 +139,8 @@ source (a string or a readable form) for persistence (plan.md §43)."
 
 ID must be a CAPABILITY-ID, VERSION a positive integer, and STATE /
 PROMOTION-STATUS known lifecycle states (PROMOTION-STATUS defaults to
-STATE). TTL is NIL or a non-negative integer number of seconds.
+STATE). RISK must be one of *CAPABILITY-RISK-LEVELS* (issues.md #51).
+TTL is NIL or a non-negative integer number of seconds.
 STABLE-ID defaults to a fresh UUID string (see MAKE-STABLE-ID) and
 DISPLAY-NAME defaults to the symbol name of ID; both are validated when
 given explicitly."
@@ -152,6 +163,9 @@ given explicitly."
   (let ((promotion (or promotion-status state)))
     (unless (lifecycle-state-p promotion)
       (error "Unknown promotion status: ~S." promotion))
+    (unless (risk-level-p risk)
+      (error "Unknown risk level: ~S (want one of ~S)."
+             risk *capability-risk-levels*))
     (when (and ttl (not (and (integerp ttl) (>= ttl 0))))
       (error "TTL must be NIL or a non-negative integer, got ~S." ttl))
     (%make-capability :id id :version version :parent-version parent-version
@@ -163,11 +177,17 @@ given explicitly."
                       :creator creator :model model
                       :stable-id stable :display-name display))))
 
-(defun derive-version (capability &key version state promotion-status risk ttl
+(defun derive-version (capability &key version state promotion-status risk
+                                    (ttl nil ttl-given-p)
                                     (intent nil intent-given-p)
                                     (contract nil contract-given-p)
-                                    inputs outputs effects
-                                    dependencies source creator model
+                                    (inputs nil inputs-given-p)
+                                    (outputs nil outputs-given-p)
+                                    (effects nil effects-given-p)
+                                    (dependencies nil dependencies-given-p)
+                                    (source nil source-given-p)
+                                    (creator nil creator-given-p)
+                                    (model nil model-given-p)
                                     stable-id display-name)
   "Create the child version of CAPABILITY without mutating it.
 
@@ -176,9 +196,12 @@ defaults to one plus the parent version and its PARENT-VERSION is the
 parent version, forming the lineage chain (todos: parent-version
 lineage). An explicit :STATE also moves :PROMOTION-STATUS unless an
 explicit :PROMOTION-STATUS is given. Pass :INTENT NIL / :CONTRACT NIL
-explicitly to clear those slots. The STABLE-ID is inherited from the
-parent (one family, one identity) unless explicitly overridden; the
-DISPLAY-NAME is inherited likewise."
+explicitly to clear those slots; likewise an explicit NIL clears
+:TTL (issues.md #50), :INPUTS/:OUTPUTS/:EFFECTS/:DEPENDENCIES
+(issues.md #49), and :SOURCE/:CREATOR/:MODEL. Omitted keys inherit.
+The STABLE-ID is inherited from the parent (one family, one
+identity) unless explicitly overridden; the DISPLAY-NAME is
+inherited likewise."
   (unless (capability-p capability)
     (error "Not a capability: ~S." capability))
   (let* ((child-version (or version (1+ (capability-version capability))))
@@ -191,19 +214,26 @@ DISPLAY-NAME is inherited likewise."
                      :state new-state
                      :promotion-status new-promotion
                      :risk (or risk (capability-risk capability))
-                     :ttl (if (null ttl) (capability-ttl capability) ttl)
+                     :ttl (if ttl-given-p ttl
+                              (capability-ttl capability))
                      :intent (if intent-given-p intent
                                  (capability-intent capability))
                      :contract (if contract-given-p contract
                                    (capability-contract capability))
-                     :inputs (or inputs (capability-inputs capability))
-                     :outputs (or outputs (capability-outputs capability))
-                     :effects (or effects (capability-effects capability))
-                     :dependencies (or dependencies
+                     :inputs (if inputs-given-p inputs
+                                 (capability-inputs capability))
+                     :outputs (if outputs-given-p outputs
+                                  (capability-outputs capability))
+                     :effects (if effects-given-p effects
+                                 (capability-effects capability))
+                     :dependencies (if dependencies-given-p dependencies
                                        (capability-dependencies capability))
-                     :source (or source (capability-source capability))
-                     :creator (or creator (capability-creator capability))
-                     :model (or model (capability-model capability))
+                     :source (if source-given-p source
+                                 (capability-source capability))
+                     :creator (if creator-given-p creator
+                                  (capability-creator capability))
+                     :model (if model-given-p model
+                                (capability-model capability))
                      :stable-id (or stable-id
                                     (capability-stable-id capability))
                      :display-name (or display-name

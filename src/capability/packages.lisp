@@ -32,6 +32,8 @@
            #:capability-expired-p
            #:*lifecycle-states*
            #:lifecycle-state-p
+           #:*capability-risk-levels*
+           #:risk-level-p
            #:stable-id
            #:stable-id-p
            #:make-stable-id
