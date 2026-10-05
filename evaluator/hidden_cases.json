@@ -1,0 +1,90 @@
+[
+  {
+    "id": "HID-A-01",
+    "family": "A",
+    "split": "hidden",
+    "category": "dates",
+    "kind": "dates",
+    "params": {},
+    "prompt": "Each input line has the form 'Record <id>: <date> (<note>)' where id and note are irrelevant. Convert the embedded date to ISO YYYY-MM-DD, one per output line, same order. Supported date forms: 'D Mon YYYY' (English month), 'YYYY/MM/DD', 'Mon D, YYYY'. Output only the converted dates.",
+    "checks": [
+      {
+        "input": "Record 101: 17 Mar 2025 (intake review)",
+        "expected": "2025-03-17",
+        "compare": "exact"
+      },
+      {
+        "input": "Record 102: 2023/11/30 (year-end close)\nRecord 103: Dec 25, 2023 (holiday freeze)",
+        "expected": "2023-11-30\n2023-12-25",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Hidden dates seed: mixed supported forms; never exposed in benchmarks/."
+  },
+  {
+    "id": "HID-A-02",
+    "family": "A",
+    "split": "hidden",
+    "category": "csv",
+    "kind": "csv_select",
+    "params": {"columns": {"name": "name", "city": "city", "note": "note"}},
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). Ignore the 'internal_flag' column. Output a JSON array of objects with keys name, city, note taken from the columns of the same names (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "name,city,note,internal_flag\n\"Nguyen, Ana\",Lima,\"loves \"\"puzzles\"\", chess\",FLAG-1\nBo,Oslo,plain,FLAG-2",
+        "expected": "[{\"city\": \"Lima\", \"name\": \"Nguyen, Ana\", \"note\": \"loves \\\"puzzles\\\", chess\"}, {\"city\": \"Oslo\", \"name\": \"Bo\", \"note\": \"plain\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "internal_flag,note,city,name\nX,\"line1\nline2\",Kyoto,\"Tanaka, Yui\"",
+        "expected": "[{\"city\": \"Kyoto\", \"name\": \"Tanaka, Yui\", \"note\": \"line1\\nline2\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Hidden CSV seed: quoted commas, doubled quotes, embedded newline, permuted columns, ignored column."
+  },
+  {
+    "id": "HID-A-03",
+    "family": "A",
+    "split": "hidden",
+    "category": "records",
+    "kind": "flatten",
+    "params": {},
+    "prompt": "The input is one JSON object. Flatten it: nested objects become dot-separated keys; array elements become key[i]; scalars are unchanged. Output the flat JSON object. Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"customer\": {\"id\": 90210, \"tags\": [\"vip\", \"europe\"]}, \"meta\": {\"retries\": 0}}",
+        "expected": "{\"customer.id\": 90210, \"customer.tags[0]\": \"vip\", \"customer.tags[1]\": \"europe\", \"meta.retries\": 0}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"matrix\": [[1, 2], [3]], \"label\": \"héllo ✓\", \"ratio\": 0.5, \"ok\": true, \"missing\": null}",
+        "expected": "{\"label\": \"héllo ✓\", \"matrix[0][0]\": 1, \"matrix[0][1]\": 2, \"matrix[1][0]\": 3, \"missing\": null, \"ok\": true, \"ratio\": 0.5}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Hidden records seed: nested arrays, unicode, bool/null/float scalars."
+  },
+  {
+    "id": "HID-A-04",
+    "family": "A",
+    "split": "hidden",
+    "category": "logs",
+    "kind": "kv_parse",
+    "params": {"ignore": ["trace"]},
+    "prompt": "Parse one log line of space-separated key=value pairs; values may be double-quoted (quotes may contain spaces; no escapes inside quotes). Ignore the 'trace' pair. Output a JSON object of the remaining pairs (all values strings). Output only the JSON.",
+    "checks": [
+      {
+        "input": "trace=zz-9 level=warn service=auth msg=\"login failed\" user=carol",
+        "expected": "{\"level\": \"warn\", \"msg\": \"login failed\", \"service\": \"auth\", \"user\": \"carol\"}",
+        "compare": "json"
+      },
+      {
+        "input": "service=cache trace=aa-1 hits=128 note=\"all warm\" ratio=0.99",
+        "expected": "{\"hits\": \"128\", \"note\": \"all warm\", \"ratio\": \"0.99\", \"service\": \"cache\"}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Hidden logs seed: quoted values, numeric-looking strings, ignored trace pair."
+  }
+]
