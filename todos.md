@@ -1,130 +1,130 @@
 Here’s the experiment as an execution-oriented TODO list, ordered to get to a real result as fast as possible.
 
-- [ ] **Bootstrap the runtime**
-  - [ ] Create Common Lisp repo + ASDF systems
-  - [ ] Standardize on SBCL
-  - [ ] Add SLY/Swank development setup
-  - [ ] Define packages for kernel, capabilities, workers, evaluation, memory, promotion, metrics
+- [x] **Bootstrap the runtime**
+  - [x] Create Common Lisp repo + ASDF systems
+  - [x] Standardize on SBCL
+  - [x] Add SLY/Swank development setup
+  - [x] Define packages for kernel, capabilities, workers, evaluation, memory, promotion, metrics
 
-- [ ] **Implement Cerebras/Qwen integration**
-  - [ ] Add Cerebras client
-  - [ ] Configure Qwen 3.8 27B
-  - [ ] Track latency, input/output tokens, cost, request IDs
-  - [ ] Add structured S-expression output mode
-  - [ ] Reject malformed model output before execution
+- [x] **Implement Cerebras/Qwen integration**
+  - [x] Add Cerebras client
+  - [x] Configure Qwen 3.8 27B
+  - [x] Track latency, input/output tokens, cost, request IDs
+  - [x] Add structured S-expression output mode
+  - [x] Reject malformed model output before execution
 
-- [ ] **Build the capability model**
-  - [ ] Define `capability-id`
-  - [ ] Define immutable capability versions
-  - [ ] Add intent, contracts, inputs, outputs, effects, dependencies
-  - [ ] Add parent-version lineage
-  - [ ] Add TTL and promotion status
-  - [ ] Store source + metadata persistently
+- [x] **Build the capability model**
+  - [x] Define `capability-id`
+  - [x] Define immutable capability versions
+  - [x] Add intent, contracts, inputs, outputs, effects, dependencies
+  - [x] Add parent-version lineage
+  - [x] Add TTL and promotion status
+  - [x] Store source + metadata persistently
 
-- [ ] **Implement safe dispatch**
-  - [ ] Add explicit `invoke-capability`
-  - [ ] Implement versioned dispatch cells
-  - [ ] Implement request epochs
-  - [ ] Keep old versions alive while active epochs drain
-  - [ ] Implement instant rollback
+- [x] **Implement safe dispatch**
+  - [x] Add explicit `invoke-capability`
+  - [x] Implement versioned dispatch cells
+  - [x] Implement request epochs
+  - [x] Keep old versions alive while active epochs drain
+  - [x] Implement instant rollback
 
-- [ ] **Create the rehearsal system**
-  - [ ] Launch isolated SBCL worker processes
-  - [ ] Add worker generation fingerprints
-  - [ ] Prewarm a worker pool
-  - [ ] Add wall-clock timeout
-  - [ ] Add CPU/memory limits
-  - [ ] Capture stdout, conditions, backtraces, return values
-  - [ ] Kill and recycle broken workers
+- [x] **Create the rehearsal system**
+  - [x] Launch isolated SBCL worker processes
+  - [x] Add worker generation fingerprints
+  - [x] Prewarm a worker pool
+  - [x] Add wall-clock timeout
+  - [x] Add CPU/memory limits
+  - [x] Capture stdout, conditions, backtraces, return values
+  - [x] Kill and recycle broken workers
 
-- [ ] **Build the mutation pipeline**
-  - [ ] Parse candidate Lisp
-  - [ ] Classify mutation risk R0–R6
-  - [ ] Compile inside rehearsal worker
-  - [ ] Run direct tests
-  - [ ] Run regression tests
-  - [ ] Run property tests
-  - [ ] Run old-vs-new differential tests
-  - [ ] Run performance checks
-  - [ ] Produce one compact verdict
+- [x] **Build the mutation pipeline**
+  - [x] Parse candidate Lisp
+  - [x] Classify mutation risk R0–R6
+  - [x] Compile inside rehearsal worker
+  - [x] Run direct tests
+  - [x] Run regression tests
+  - [x] Run property tests
+  - [x] Run old-vs-new differential tests
+  - [x] Run performance checks
+  - [x] Produce one compact verdict
 
 - [ ] **Create the external evaluator**
-  - [ ] Run evaluator in a separate process
-  - [ ] Keep hidden tests inaccessible to the agent
-  - [ ] Add fresh randomized cases
-  - [ ] Add metamorphic/equivalent-input tests
-  - [ ] Add adversarial edge cases
+  - [x] Run evaluator in a separate process
+  - [x] Keep hidden tests inaccessible to the agent
+  - [x] Add fresh randomized cases
+  - [x] Add metamorphic/equivalent-input tests
+  - [x] Add adversarial edge cases
   - [ ] Make evaluator verdict mandatory for promotion
 
-- [ ] **Implement green-stop**
-  - [ ] Define task success contracts
-  - [ ] Stop model interaction immediately when contract is satisfied
-  - [ ] Prevent optional refactors after success
-  - [ ] Track unnecessary post-success model actions as failures
+- [x] **Implement green-stop**
+  - [x] Define task success contracts
+  - [x] Stop model interaction immediately when contract is satisfied
+  - [x] Prevent optional refactors after success
+  - [x] Track unnecessary post-success model actions as failures
 
-- [ ] **Add repair mode**
-  - [ ] Return minimal failing counterexample to Qwen
-  - [ ] Allow one repair attempt by default
-  - [ ] Rehearse repair from scratch
-  - [ ] Escalate only after bounded repair failure
-  - [ ] Detect repair oscillation
+- [x] **Add repair mode**
+  - [x] Return minimal failing counterexample to Qwen
+  - [x] Allow one repair attempt by default
+  - [x] Rehearse repair from scratch
+  - [x] Escalate only after bounded repair failure
+  - [x] Detect repair oscillation
 
-- [ ] **Build event logging**
-  - [ ] Log every model call
-  - [ ] Log every candidate
-  - [ ] Log compile/test results
-  - [ ] Log promotion/rejection
-  - [ ] Log capability invocation/failure
-  - [ ] Log rollback
-  - [ ] Log task outcomes
-  - [ ] Make the event ledger append-only
+- [x] **Build event logging**
+  - [x] Log every model call
+  - [x] Log every candidate
+  - [x] Log compile/test results
+  - [x] Log promotion/rejection
+  - [x] Log capability invocation/failure
+  - [x] Log rollback
+  - [x] Log task outcomes
+  - [x] Make the event ledger append-only
 
-- [ ] **Build the context compiler**
-  - [ ] Generate minimal task context
-  - [ ] Include only relevant capabilities
-  - [ ] Include applicable contracts
-  - [ ] Include recent relevant failures
-  - [ ] Include allowed effects
-  - [ ] Enforce a context token budget
-  - [ ] Avoid raw full-history prompting
+- [x] **Build the context compiler**
+  - [x] Generate minimal task context
+  - [x] Include only relevant capabilities
+  - [x] Include applicable contracts
+  - [x] Include recent relevant failures
+  - [x] Include allowed effects
+  - [x] Enforce a context token budget
+  - [x] Avoid raw full-history prompting
 
 - [ ] **Implement capability retrieval**
   - [ ] Search by semantic intent
-  - [ ] Search by input/output type
-  - [ ] Search by effect requirements
-  - [ ] Rank by successful historical reuse
-  - [ ] Retrieve 3–8 relevant capabilities max
-  - [ ] Attempt composition before synthesis
+  - [x] Search by input/output type
+  - [x] Search by effect requirements
+  - [x] Rank by successful historical reuse
+  - [x] Retrieve 3–8 relevant capabilities max
+  - [x] Attempt composition before synthesis
 
 - [ ] **Create the first benchmark family**
-  - [ ] Start with parsing/data transformation
-  - [ ] Build 20–50 related tasks
-  - [ ] Hold back unseen transfer tasks
-  - [ ] Add adversarial variants
-  - [ ] Add equivalent transformations
+  - [x] Start with parsing/data transformation
+  - [x] Build 20–50 related tasks
+  - [x] Hold back unseen transfer tasks
+  - [x] Add adversarial variants
+  - [x] Add equivalent transformations
   - [ ] Establish baseline success with no learning
 
-- [ ] **Run baseline A: no persistent memory**
-  - [ ] Qwen solves every task from scratch
-  - [ ] Measure calls/task
-  - [ ] Measure tokens/task
-  - [ ] Measure latency/task
-  - [ ] Measure success rate
-  - [ ] Measure cost/task
+- [x] **Run baseline A: no persistent memory**
+  - [x] Qwen solves every task from scratch
+  - [x] Measure calls/task
+  - [x] Measure tokens/task
+  - [x] Measure latency/task
+  - [x] Measure success rate
+  - [x] Measure cost/task
 
-- [ ] **Implement executable patch memory**
-  - [ ] Persist successful candidate as patch
-  - [ ] Give patches short TTLs
-  - [ ] Retrieve patches on later related tasks
-  - [ ] Record whether reuse helped or hurt
+- [x] **Implement executable patch memory**
+  - [x] Persist successful candidate as patch
+  - [x] Give patches short TTLs
+  - [x] Retrieve patches on later related tasks
+  - [x] Record whether reuse helped or hurt
 
-- [ ] **Implement transfer-based promotion**
-  - [ ] Require reuse on independent tasks
-  - [ ] Track success delta
-  - [ ] Track token savings
-  - [ ] Track latency savings
-  - [ ] Track negative transfer
-  - [ ] Promote patch → skill only after transfer evidence
+- [x] **Implement transfer-based promotion**
+  - [x] Require reuse on independent tasks
+  - [x] Track success delta
+  - [x] Track token savings
+  - [x] Track latency savings
+  - [x] Track negative transfer
+  - [x] Promote patch → skill only after transfer evidence
 
 - [ ] **Add semantic procedural memory**
   - [ ] Store intent
