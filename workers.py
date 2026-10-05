@@ -45,6 +45,7 @@ SB-IMPL / SB-ALIEN); OS enforcement is still future work.
 
 from __future__ import annotations
 
+import fingerprint
 import hashlib
 import json
 import os
@@ -132,14 +133,14 @@ def _asd_hash():
 
 
 def generation_fingerprint(epoch_id=""):
-    """Immutable generation fingerprint stamped into every worker run.
+    """Strong generation fingerprint stamped into every worker run.
 
-    Format: ``sbcl=<version>|asd=<hash>|epoch=<epoch-id>`` (plan.md
-    section 19). The epoch id is caller-supplied; ``"-"`` when empty.
+    Delegates to :mod:`fingerprint` (source tree + asd + dependencies +
+    capability manifest + schema generation + protocol version; issues.md
+    #4). Same call signature as the original weak digest; the epoch id
+    is caller-supplied (``"-"`` when empty).
     """
-    epoch = epoch_id if epoch_id else "-"
-    version = _sbcl_version(resolve_sbcl())
-    return "sbcl=%s|asd=%s|epoch=%s" % (version, _asd_hash(), epoch)
+    return fingerprint.compute_string(epoch_id=epoch_id)
 
 
 def _lisp_escape(text):

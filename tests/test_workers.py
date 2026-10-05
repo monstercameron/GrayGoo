@@ -53,8 +53,9 @@ class RunLispTest(unittest.TestCase):
         result = workers.run_lisp("(+ 1 2)", epoch_id="test-epoch-7")
         self.assertTrue(result["ok"], result)
         fingerprint = workers.generation_fingerprint("test-epoch-7")
+        self.assertTrue(fingerprint.startswith("ggfp1:"),
+                        fingerprint)
         self.assertIn("test-epoch-7", fingerprint)
-        self.assertIn("SBCL", fingerprint)
         self.assertIn("asd=", fingerprint)
 
 
