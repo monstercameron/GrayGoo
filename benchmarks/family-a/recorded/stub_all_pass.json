@@ -167,7 +167,7 @@
   ],
   "A-TRN-15": [
     "[{\"host\": \"127.0.0.1\", \"user\": \"amy\", \"method\": \"GET\", \"path\": \"/a\", \"status\": 200, \"bytes\": 123}]",
-    "[{\"host\": \"10.0.0.2\", \"user\": \"-\", \"method\": \"POST\", \"path\": \"/b?c=d\", \"status\": 404, \"bytes\": 0}]"
+    "[{\"host\": \"10.0.0.2\", \"user\": null, \"method\": \"POST\", \"path\": \"/b?c=d\", \"status\": 404, \"bytes\": 0}]"
   ],
   "A-TRN-16": [
     "{\"a\": \"1\", \"b\": \"2\"}",

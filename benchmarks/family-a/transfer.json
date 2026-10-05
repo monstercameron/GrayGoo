@@ -284,7 +284,7 @@
     "family": "A",
     "split": "transfer",
     "category": "logs",
-    "prompt": "Each input line is an Apache combined log line. Output a JSON array with one object per line: {\"host\", \"user\", \"method\", \"path\", \"status\" (number), \"bytes\" (number, 0 when the field is '-')}. Ignore ident, timestamp, referrer, and user-agent. Output only the JSON.",
+    "prompt": "Each input line is an Apache combined log line. Output a JSON array with one object per line: {\"host\", \"user\", \"method\", \"path\", \"status\" (number), \"bytes\" (number, 0 when the field is '-')}. A '-' user means absent: emit null. Ignore ident, timestamp, referrer, and user-agent. Output only the JSON.",
     "checks": [
       {
         "input": "127.0.0.1 - amy [10/Oct/2026:13:55:36 +0000] \"GET /a HTTP/1.1\" 200 123",
@@ -293,7 +293,7 @@
       },
       {
         "input": "10.0.0.2 - - [10/Oct/2026:13:56:01 +0000] \"POST /b?c=d HTTP/1.1\" 404 -",
-        "expected": "[{\"host\": \"10.0.0.2\", \"user\": \"-\", \"method\": \"POST\", \"path\": \"/b?c=d\", \"status\": 404, \"bytes\": 0}]",
+        "expected": "[{\"host\": \"10.0.0.2\", \"user\": null, \"method\": \"POST\", \"path\": \"/b?c=d\", \"status\": 404, \"bytes\": 0}]",
         "compare": "json"
       }
     ],

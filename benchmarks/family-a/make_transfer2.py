@@ -110,8 +110,9 @@ def ref_apache_to_json(text):
     for line in text.splitlines():
         match = _APACHE_RE.match(line)
         host, user, _, method, path, status, size = match.groups()
-        out.append({"host": host, "user": user, "method": method,
-                    "path": path, "status": int(status),
+        out.append({"host": host, "user": None if user == "-" else user,
+                    "method": method, "path": path,
+                    "status": int(status),
                     "bytes": 0 if size == "-" else int(size)})
     return json.dumps(out)
 
@@ -232,6 +233,7 @@ TASKS = [
                    "a JSON array with one object per line: {\"host\", "
                    "\"user\", \"method\", \"path\", \"status\" (number), "
                    "\"bytes\" (number, 0 when the field is '-')}. "
+                   "A '-' user means absent: emit null. "
                    "Ignore ident, timestamp, referrer, and user-agent. "
                    "Output only the JSON."),
         "notes": ("Held-out: combined format with quoted request plus "
