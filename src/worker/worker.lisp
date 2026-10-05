@@ -65,3 +65,105 @@ capped); on failure PAYLOAD is the condition report string."
                       (%capture-backtrace)))))
       (serious-condition (condition)
         (values nil (princ-to-string condition) (%capture-backtrace))))))
+
+;;;; Worker sandbox (adversarial hardening; plan.md §19, §60).
+;;;;
+;;;; INSTALL-WORKER-SANDBOX establishes Lisp-level containment inside a
+;;;; rehearsal worker AFTER the driver loads this file and BEFORE candidate
+;;;; code runs (the Python driver invokes it from the sandbox prelude; see
+;;;; sandbox.py). It denies file/process/foreign-module operations by
+;;;; replacing their function cells with denials, gates REQUIRE against a
+;;;; module denylist, disables UNLOCK-PACKAGE, and re-locks the
+;;;; implementation packages. Verified on SBCL 2.6.9 (Windows): CL/SB-EXT
+;;;; ship locked, so unlock/redefine/relock works; symbols that do not
+;;;; exist there (e.g. SB-EXT:LAUNCH-PROGRAM) are skipped via FIND-SYMBOL
+;;;; so this file never names an absent symbol at read time.
+;;;;
+;;;; This is a speed bump, NOT a security boundary: SB-UNIX/SB-IMPL
+;;;; internals and SB-ALIEN routines on already-loaded libraries stay
+;;;; reachable in-image, and the OS still runs the worker as the user with
+;;;; full rights. Real isolation needs OS enforcement (separate worker
+;;;; user, deny ACLs, job objects). See sandbox.py and
+;;;; documents/adversarial-report.md.
+
+(defvar *worker-sandbox-installed* nil
+  "Non-nil once INSTALL-WORKER-SANDBOX has run in this image.")
+
+(defvar *worker-sandbox-denied-modules*
+  '("SB-BSD-SOCKETS" "SB-POSIX" "ASDF")
+  "Module names REQUIRE must refuse once the sandbox is installed.")
+
+(defvar *worker-sandbox-denied-module-substrings*
+  '("SOCKET" "POSIX")
+  "Substring fallback for the REQUIRE denylist (names are upcased first).")
+
+(defvar *worker-sandbox-denied-ops*
+  '((:cl "OPEN") (:cl "PROBE-FILE") (:cl "LOAD") (:cl "COMPILE-FILE")
+    (:cl "DELETE-FILE") (:cl "RENAME-FILE") (:cl "ENSURE-DIRECTORIES-EXIST")
+    (:cl "TRUENAME") (:cl "DIRECTORY") (:cl "FILE-WRITE-DATE")
+    (:cl "USER-HOMEDIR-PATHNAME")
+    (:sb-ext "RUN-PROGRAM") (:sb-ext "LAUNCH-PROGRAM")
+    (:sb-ext "SAVE-LISP-AND-DIE")
+    (:sb-ext "PROCESS-OUTPUT") (:sb-ext "PROCESS-INPUT")
+    (:sb-ext "PROCESS-CLOSE") (:sb-ext "PROCESS-WAIT") (:sb-ext "PROCESS-KILL")
+    (:sb-alien "LOAD-SHARED-OBJECT"))
+  "(PACKAGE SHORT-NAME) pairs whose function cells the sandbox denies.
+Resolved at install time via FIND-SYMBOL; absent symbols are skipped so
+the table stays portable across SBCL versions.")
+
+(defun %sandbox-denied-module-p (module)
+  "True when REQUIRE must refuse MODULE (name or string)."
+  (let ((name (string-upcase (string module))))
+    (or (member name *worker-sandbox-denied-modules* :test #'string=)
+        (some (lambda (sub) (search sub name))
+              *worker-sandbox-denied-module-substrings*))))
+
+(defun %sandbox-deny (label)
+  "Signal the standard sandbox denial for LABEL (a string)."
+  (error "rehearsal sandbox denied: ~A is forbidden in this worker" label))
+
+(defun %sandbox-clobber (package name)
+  "Replace PACKAGE:NAME's function cell with a denial. T when done.
+Missing packages, missing symbols, and unbound symbols are skipped."
+  (let* ((pkg (find-package package))
+         (sym (and pkg (find-symbol name pkg))))
+    (when (and sym (fboundp sym))
+      (setf (symbol-function sym)
+            (let ((label (format nil "~A:~A" (package-name pkg) name)))
+              (lambda (&rest args)
+                (declare (ignore args))
+                (%sandbox-deny label))))
+      t)))
+
+(defun install-worker-sandbox ()
+  "Install Lisp-level containment in this worker image (idempotent).
+Unlocks CL/SB-EXT/SB-ALIEN, denies *WORKER-SANDBOX-DENIED-OPS*, wraps
+REQUIRE with the module denylist, disables UNLOCK-PACKAGE, and relocks.
+Returns :INSTALLED on first run, :ALREADY-INSTALLED afterwards."
+  (when *worker-sandbox-installed*
+    (return-from install-worker-sandbox :already-installed))
+  (dolist (pkg '(:cl :sb-ext :sb-alien))
+    (when (find-package pkg)
+      (sb-ext:unlock-package pkg)))
+  ;; Wrap REQUIRE first so later denials cannot strand the module loader.
+  (let ((require-sym (find-symbol "REQUIRE" :cl)))
+    (when (and require-sym (fboundp require-sym))
+      (let ((original (symbol-function require-sym)))
+        (setf (symbol-function require-sym)
+              (lambda (module &rest args)
+                (if (%sandbox-denied-module-p module)
+                    (%sandbox-deny
+                     (format nil "MODULE ~A" (string module)))
+                    (apply original module args)))))))
+  (let ((denied 0))
+    (dolist (op *worker-sandbox-denied-ops*)
+      (when (%sandbox-clobber (first op) (second op))
+        (incf denied)))
+    ;; Disabling UNLOCK-PACKAGE keeps the relock below from being trivially
+    ;; undone by candidate code (originals are unreachable anyway).
+    (%sandbox-clobber :sb-ext "UNLOCK-PACKAGE")
+    (dolist (pkg '(:cl :sb-ext :sb-alien))
+      (when (find-package pkg)
+        (sb-ext:lock-package pkg)))
+    (setf *worker-sandbox-installed* t)
+    (values :installed denied)))

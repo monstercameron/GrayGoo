@@ -48,6 +48,24 @@ ProtocolError = _protocol.ProtocolError
 CASES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "hidden_cases.json")
 
+#: Env var overriding the hidden-corpus path (production separation: the
+#: corpus lives off the rehearsal host / under a different user; see
+#: evaluator/README.md "Production separation"). Unset/empty means the
+#: in-checkout default above (dev and offline use only).
+CORPUS_ENV_VAR = "GRAYGOO_EVAL_CORPUS"
+
+
+def resolve_corpus_path(path=None):
+    """Resolve the hidden-corpus path: explicit ARG, else env, else default.
+
+    :param path: explicit corpus path (highest precedence; falsy defers).
+    :returns: ``path`` when given, else ``$GRAYGOO_EVAL_CORPUS`` when set
+        and non-empty, else :data:`CASES_PATH`.
+    """
+    if path:
+        return path
+    return os.environ.get(CORPUS_ENV_VAR) or CASES_PATH
+
 # The hidden gate is strict by default: every hidden case and every hidden
 # check must pass. plan.md section 30 allows looser transfer thresholds,
 # but those govern promotion *scope* deliberation, not this gate — any
@@ -65,8 +83,12 @@ COMPARE_MODES = ("exact", "json")
 # --------------------------------------------------------------------------
 
 def load_hidden_cases(path=None):
-    """Load and validate the hidden corpus. Raises ValueError if corrupt."""
-    with open(path or CASES_PATH, "r", encoding="utf-8") as handle:
+    """Load and validate the hidden corpus. Raises ValueError if corrupt.
+
+    The path resolves via :func:`resolve_corpus_path` (explicit argument,
+    else ``$GRAYGOO_EVAL_CORPUS``, else the in-checkout default).
+    """
+    with open(resolve_corpus_path(path), "r", encoding="utf-8") as handle:
         cases = json.load(handle)
     if not isinstance(cases, list) or not cases:
         raise ValueError("hidden corpus must be a non-empty JSON array")

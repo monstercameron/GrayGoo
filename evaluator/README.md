@@ -75,3 +75,26 @@ output (`check_case`), proving semantics were preserved.
 ```powershell
 python -m unittest discover -s evaluator -v
 ```
+
+## Production separation
+
+The in-checkout `hidden_cases.json` is a development seed: any process
+running as the developer (including rehearsal workers) can read it at the
+OS level, so it is NOT hidden from a hostile candidate on this host (see
+`documents/adversarial-report.md`, evaluator-inspection).
+
+In production the evaluator runs on a SEPARATE host (or at minimum a
+separate OS user) from rehearsal, and the corpus lives there -- outside
+any directory the worker identity can read, with deny ACLs for that
+identity. Point the service at it with:
+
+```powershell
+$env:GRAYGOO_EVAL_CORPUS = "D:\eval-private\hidden_cases.json"
+python -m evaluator.service   # subprocess entry point reads the env var
+```
+
+`service.resolve_corpus_path` precedence is: explicit `path` argument,
+then `$GRAYGOO_EVAL_CORPUS`, then the in-checkout default. The subprocess
+entry point inherits the caller's environment, so export the variable
+wherever the evaluator process is spawned. Rehearsal verdicts still cross
+only the request/verdict protocol -- never the corpus bytes.

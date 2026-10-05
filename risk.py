@@ -42,6 +42,11 @@ Levels and signals (plan.md sections 4.3, 7, 22)
 * R6 trusted kernel/evaluator (FORBIDDEN): kernel, evaluator, promotion,
   permission, credential, ledger, and related trust-root targets or
   references. Never rehearsed; requires an external release (plan.md 4.3).
+  Additionally (adversarial hardening): a target under an
+  ``evo.dispatch``/``evo.kernel``-style package, or a definition that
+  redefines a dispatch entrypoint symbol (``invoke-capability``) via
+  ``defun``/``defmethod``/``setf`` of ``symbol-function``/
+  ``fdefinition``/``macro-function``, is R6 (promotion-forbidden).
 
 Gates (cumulative per the "Additional requirements" layering in plan.md 7)
 --------------------------------------------------------------------------
@@ -292,6 +297,17 @@ _MASKED_COMPOUNDS = (("user-interface", "ui"),
                      ("graphical-interface", "gui"),
                      ("prompt-user", "prompt"))
 
+# --- Protected dispatch/kernel symbols (promotion-forbidden R6). ---
+# Adversarial finding (documents/adversarial-report.md, kernel-mutation):
+# a candidate targeting evo.dispatch:invoke-capability classified R2
+# because only the R2 "invoke-capability" signal fired. Any mutation whose
+# target lives under an evo.dispatch/evo.kernel-style package, or whose
+# definition redefines a dispatch entrypoint symbol, is a trust-root
+# mutation. Additive: appends R6 hits without changing existing signals.
+_R6_REDEFINITION_HEADS = frozenset({"defun", "defmethod"})
+_R6_SETF_FUNCTION_PLACES = frozenset(
+    {"symbol-function", "fdefinition", "macro-function"})
+
 
 def _normalize(name):
     """Lowercase a symbol/keyword body with separators unified to '-'."""
@@ -299,6 +315,133 @@ def _normalize(name):
     for char in "_/:.+*":
         text = text.replace(char, "-")
     return text
+
+
+def _is_protected_dispatch_symbol(atom):
+    """True when ATOM names a protected dispatch/kernel/entrypoint symbol.
+
+    Protected means package-qualified under an evo.dispatch/evo.kernel-style
+    package (the package part carries an ``evo`` token plus a ``dispatch``
+    or ``kernel`` token, separator-insensitive), or naming the dispatch
+    entrypoint (``invoke-capability``) qualified or not. Keywords are never
+    protected (data, not code). Case-insensitive, like the Lisp reader.
+    """
+    if not isinstance(atom, str) or isinstance(atom, s_expr.SString):
+        return False
+    if not atom or atom.startswith(":"):
+        return False
+    lowered = atom.lower()
+    if ":" in lowered:
+        segments = [seg for seg in lowered.split(":") if seg]
+        if segments:
+            tokens = set(tok for tok in _normalize(segments[0]).split("-")
+                         if tok)
+            if "evo" in tokens and ("dispatch" in tokens
+                                    or "kernel" in tokens):
+                return True
+    name_part = lowered.split(":")[-1]
+    if not name_part:
+        nonempty = [seg for seg in lowered.split(":") if seg]
+        name_part = nonempty[-1] if nonempty else ""
+    return "invoke-capability" in _normalize(name_part)
+
+
+def _unwrap_redefined_name(node):
+    """Return the symbol a defun/defmethod form defines, else None.
+
+    Handles plain names, ``(setf name)`` method names, and one quote layer.
+    Computed names (other lists, variables) yield None: only literal
+    redefinitions of protected symbols escalate to R6.
+    """
+    if isinstance(node, str) and not isinstance(node, s_expr.SString) \
+            and not node.startswith(":"):
+        return node
+    if isinstance(node, (list, tuple)) and node \
+            and isinstance(node[0], str) \
+            and not isinstance(node[0], s_expr.SString):
+        head = node[0].split(":")[-1].lower()
+        if head == "setf" and len(node) > 1 \
+                and isinstance(node[1], str) \
+                and not isinstance(node[1], s_expr.SString) \
+                and not node[1].startswith(":"):
+            return node[1]
+        if head == "quote" and len(node) == 2 \
+                and isinstance(node[1], str) \
+                and not isinstance(node[1], s_expr.SString) \
+                and not node[1].startswith(":"):
+            return node[1]
+    return None
+
+
+def _unwrap_quoted_symbol(node):
+    """Return a literal symbol under an optional single quote, else None."""
+    if isinstance(node, str) and not isinstance(node, s_expr.SString) \
+            and not node.startswith(":"):
+        return node
+    if isinstance(node, (list, tuple)) and len(node) == 2 \
+            and isinstance(node[0], str) \
+            and node[0].lower() == "quote" \
+            and isinstance(node[1], str) \
+            and not isinstance(node[1], s_expr.SString) \
+            and not node[1].startswith(":"):
+        return node[1]
+    return None
+
+
+def _scan_dispatch_redefinition(node, hits):
+    """Append R6 hits for redefinitions of protected dispatch symbols.
+
+    Covers ``(defun NAME ...)`` / ``(defmethod NAME ...)`` and
+    ``(setf``/``psetf`` of a function cell ``(symbol-function`` /
+    ``fdefinition`` / ``macro-function``) ``NAME)`` ...)`` where NAME is a
+    literal protected symbol. Quoted subtrees are skipped and string
+    contents never inspected, matching :func:`_walk` hygiene.
+    """
+    if isinstance(node, s_expr.SString):
+        return
+    if isinstance(node, str):
+        return
+    if isinstance(node, (int, float, bool)) or node is None:
+        return
+    if not isinstance(node, (list, tuple)) or not node:
+        return
+    head = node[0]
+    if isinstance(head, (list, tuple)):
+        for element in node:
+            _scan_dispatch_redefinition(element, hits)
+        return
+    if not isinstance(head, str) or isinstance(head, s_expr.SString):
+        for element in node[1:]:
+            _scan_dispatch_redefinition(element, hits)
+        return
+    if head.startswith(":"):
+        for element in node:
+            _scan_dispatch_redefinition(element, hits)
+        return
+    if head.lower() == "quote":
+        return
+    head_base = head.split(":")[-1].lower()
+    if head_base in _R6_REDEFINITION_HEADS and len(node) > 1:
+        name = _unwrap_redefined_name(node[1])
+        if name is not None and _is_protected_dispatch_symbol(name):
+            hits.append(("R6", "R6: definition redefines protected "
+                               "dispatch/kernel symbol %r via %s "
+                               "(promotion-forbidden)" % (name, head_base)))
+    elif head_base in ("setf", "psetf") and len(node) > 1:
+        place = node[1]
+        if isinstance(place, (list, tuple)) and place \
+                and isinstance(place[0], str) \
+                and not isinstance(place[0], s_expr.SString):
+            place_head = place[0].split(":")[-1].lower()
+            if place_head in _R6_SETF_FUNCTION_PLACES and len(place) > 1:
+                name = _unwrap_quoted_symbol(place[1])
+                if name is not None and _is_protected_dispatch_symbol(name):
+                    hits.append(("R6", "R6: definition redefines protected "
+                                       "dispatch/kernel symbol %r via setf "
+                                       "of %s (promotion-forbidden)"
+                                 % (name, place_head)))
+    for element in node[1:]:
+        _scan_dispatch_redefinition(element, hits)
 
 
 def _scan_atom(atom, is_head, hits, origin):
@@ -474,6 +617,13 @@ def classify(candidate_dict, context=None):
             hits.append(("R5", "R5: mutation target %r names the prompting "
                                "surface (agent policy)" % (target,)))
     _walk(definition, hits)
+    # Adversarial hardening (additive): protected dispatch/kernel targets
+    # and redefinitions are trust-root mutations (R6, promotion-forbidden).
+    if target is not None and _is_protected_dispatch_symbol(target):
+        hits.append(("R6", "R6: mutation target %r is under a protected "
+                           "dispatch/kernel package or names the dispatch "
+                           "entrypoint (promotion-forbidden)" % (target,)))
+    _scan_dispatch_redefinition(definition, hits)
     extra = candidate_dict.get("extra")
     if isinstance(extra, dict):
         for key in (":effects", ":effect"):

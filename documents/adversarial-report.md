@@ -69,3 +69,86 @@ uv run python attacks.py                                  # full suite (7 attack
 uv run python attacks.py infinite-loop memory-bomb        # named subset, no network
 uv run python -m unittest tests.test_attacks -v           # harness unit tests (stubbed, no SBCL)
 ```
+
+## Re-run after sandbox hardening (2026-10-05, same-day follow-up)
+
+Hardening applied since the first run (lane: sandbox-h):
+
+- `risk.py` (additive): targets under `evo.dispatch`/`evo.kernel`-style
+  packages, and `defun`/`defmethod`/`setf`-of-function-cell redefinitions
+  of dispatch entrypoint symbols, classify R6 (promotion-forbidden).
+- `sandbox.py` (new): `refuse_to_rehearse` policy gate (R6 always refused;
+  process/network-write payloads always refused; other R4 refused unless
+  approved), `WORKER_PRELUDE`/`build_prelude`, `WorkerJail` (OverlayFS +
+  StateSandbox audit/cwd-pinning, not OS confinement).
+- `src/worker/worker.lisp` (additive): `install-worker-sandbox` denies
+  file/process/foreign-module ops in-image, gates REQUIRE against a module
+  denylist, disables UNLOCK-PACKAGE, re-locks CL/SB-EXT/SB-ALIEN. Verified
+  working on SBCL 2.6.9; bypassable in-image (SB-UNIX/SB-IMPL/SB-ALIEN).
+- `workers.py` (additive): `run_lisp`/`WorkerPool` install the prelude by
+  default (`sandbox=True`, opt-out `False`) with optional `jail` cwd
+  pinning; `graygoo-eval-all` now binds `*read-eval*` to NIL (issues.md
+  #1 fix) on every worker read path for untrusted input.
+- `evaluator/service.py` (additive): corpus path via `$GRAYGOO_EVAL_CORPUS`
+  (`resolve_corpus_path`: explicit arg > env > in-checkout default);
+  production separation documented in `evaluator/README.md`.
+- `tests/test_sandbox.py` (new, 21 tests): R6 rule, policy gate, jail,
+  corpus env override, sandboxed-worker and `#.` attack cases.
+
+Re-run command: `python attacks.py` (unmodified harness). Observed:
+**SAFE = 5, VULNERABLE = 0, INCONCLUSIVE = 2** (was 2/5/0).
+
+### Per-attack before/after (harness verdicts, quoted exactly)
+
+| Attack | Before | After | After-evidence (observed) | Honest residual |
+|---|---|---|---|---|
+| infinite-loop | SAFE | SAFE | `timed_out=true` after 3.1s, driver alive | None. Unchanged. |
+| memory-bomb | SAFE | SAFE | `HEAP-EXHAUSTED-ERROR`, driver alive | None (heap only; RSS cap still missing, as before). |
+| process-spawn | VULNERABLE | SAFE | `executed=false`; worker error: `rehearsal sandbox denied: SB-EXT:RUN-PROGRAM is forbidden in this worker` | SAFE against the documented payload only. Lisp-level block; an adapted payload via SB-UNIX/FFI is not stopped. No OS sandbox yet. |
+| filesystem-escape | VULNERABLE | INCONCLUSIVE | worker claim `NIL:NIL`; `escape_write_succeeded=false`, `plant_read_succeeded=false`; canaries cleaned up | Payload blocked as written, but the harness cannot confirm SAFE (payload swallows the denial in `ignore-errors`), and the block is bypassable in-image. **Treat the boundary as still VULNERABLE.** OS jail still required. |
+| network-egress | VULNERABLE | SAFE | `connected=false`; worker error: `rehearsal sandbox denied: MODULE SB-BSD-SOCKETS is forbidden in this worker`, denied at `require` before any socket code ran | SAFE against the documented payload only; same Lisp-level caveat as process-spawn. **Zero packets emitted on this re-run** (see safety). |
+| kernel-mutation | VULNERABLE | SAFE | `risk_level=R6` with `R6: ... redefines protected dispatch/kernel symbol 'evo.dispatch:invoke-capability' via defun` + `R6: mutation target ... (promotion-forbidden)`; parent unaffected | Worker-local redefinition still succeeds (`worker_local_redefinition=true`) -- expected and harmless (separate process, kernel not loaded there). Policy layer (`refuse_to_rehearse`) now refuses R6 before any rehearsal. |
+| evaluator-inspection | VULNERABLE | INCONCLUSIVE | `size_matches_corpus=false`; worker error: `rehearsal sandbox denied: COMMON-LISP:PROBE-FILE is forbidden in this worker` | Payload blocked as written, but the corpus file is still OS-readable by the worker's user on this host; only separate-host/user separation (now configurable via `$GRAYGOO_EVAL_CORPUS`, not yet deployed) truly fixes this. **Treat as still VULNERABLE.** |
+
+### issues.md #1 `#.` reader-evaluation case (new; outside `attacks.py`)
+
+Oracle payload: `#.(progn (defun graygoo-read-pwn () :pwned) :x)` plus a
+second form reporting whether the marker was defined. Before the fix
+(observed this session, pre-fix probe): worker returned
+`:READ-EVAL-FIRED` with `ok=true` -- reader evaluation fired (VULNERABLE).
+After binding `*read-eval*` NIL in `graygoo-eval-all`: worker fails with
+`can't read #. while *READ-EVAL* is NIL`, verified both sandboxed and
+`sandbox=False` (the fix lives in the read path, not the prelude) (SAFE).
+Regression tests:
+`tests/test_sandbox.py::ReaderEvalAttackTest` (2 tests). Note: the
+capability-registry read paths (`src/capability/registry.lisp`,
+`load-capability`/`load-registry`) already bound `*read-eval*` NIL and
+were left untouched (outside this lane).
+
+### Safety compliance of the re-run
+
+- Canaries only in `%TEMP%` with unique names; attacks.py removed its own
+  (`plant_removed=true`, `escape_removed=true`); zero `graygoo-*` leftovers
+  from this lane verified afterwards (one foreign `graygoo-cap-probe`
+  entry belongs to a concurrent lane and was not touched).
+- Never read `.env` or any real secret; hidden-corpus probe stayed
+  length-only on the worker side and `getsize` metadata on the driver side.
+- Network: the single documented `example.com:80` probe was authorized but
+  UNSPENT -- the worker was denied at `(require :sb-bsd-sockets)` before
+  any DNS/TCP I/O, so this re-run emitted zero packets. No other external
+  network anywhere in this lane.
+- Zero Cerebras calls. No writes outside TEMP except the owned deliverables
+  listed above. No git commands.
+
+### Overall statement (updated)
+
+**"Confirm all fail safely": still FAIL, but narrower.** No attack payload
+now succeeds as written (0 VULNERABLE by harness verdict), and the R6
+classifier gap plus the `#.` reader gap are closed with regression tests.
+But two of the seven verdicts are INCONCLUSIVE rather than SAFE, and every
+in-worker block is Lisp-level only: a candidate that reaches past the
+denied high-level operators (SB-UNIX/SB-IMPL internals, SB-ALIEN on loaded
+libraries) still runs with the user's full OS rights. The filesystem and
+hidden-corpus boundaries in particular must be treated as VULNERABLE until
+OS-level isolation (separate worker user/host, deny ACLs, job objects)
+lands. Do not rehearse untrusted candidates yet.
