@@ -1,0 +1,45 @@
+# GrayGoo Dashboard
+
+Local control + visualization dashboard for the GrayGoo agent system.
+Stdlib-only backend, vanilla JS frontend, no CDN, no pip dependencies.
+
+## Start
+
+From the repo root:
+
+```sh
+python dashboard/server.py
+```
+
+Then open **http://127.0.0.1:8137/** in a browser.
+
+Custom port:
+
+```sh
+python dashboard/server.py --port 8137
+```
+
+## Views
+
+- **Overview** — todo progress, Cerebras spend vs $50 budget, git log, system checks.
+- **Pipeline** — `run_candidate` stage graph (parse → risk → worker → repair →
+  patch → transfer) plus the last demo summary.
+- **Control** — run smoke / tests / baseline-stub jobs, watch live output, stop.
+
+## API
+
+- `GET /api/status`, `GET /api/pipeline`
+- `POST /api/run` with `{"job": "smoke"|"tests"|"baseline-stub"}` → `{job_id}`
+  (409 while another job runs; one job at a time)
+- `GET /api/jobs/{id}` → `{state, exit_code, tail, output}`
+- `POST /api/jobs/{id}/stop`
+- `GET /api/events` (optional SSE; the UI polls `/api/jobs/{id}` instead)
+
+Job logs go to `artifacts/dashboard/` (gitignored).
+
+## Security notes
+
+- Binds `127.0.0.1` (loopback) only; no auth — single-user local use.
+- Secrets are never served: `CEREBRAS_API_KEY` values are redacted in every
+  response and in every byte written to job logs; the key is reported as
+  present/absent only.

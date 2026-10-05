@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GrayGoo Dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>GrayGoo Dashboard</h1>
+  <nav>
+    <button data-view="overview" class="active">Overview</button>
+    <button data-view="pipeline">Pipeline</button>
+    <button data-view="control">Control</button>
+  </nav>
+  <span id="conn" class="conn">connecting…</span>
+</header>
+
+<main>
+  <section id="view-overview" class="view active">
+    <div class="cards">
+      <div class="card">
+        <h2>Todos</h2>
+        <div class="bar"><div id="todo-bar" class="fill"></div></div>
+        <p id="todo-text">—</p>
+      </div>
+      <div class="card">
+        <h2>Spend</h2>
+        <div class="bar"><div id="spend-bar" class="fill spend"></div></div>
+        <p id="spend-text">—</p>
+      </div>
+      <div class="card">
+        <h2>System checks</h2>
+        <ul id="checks" class="checks"><li>—</li></ul>
+      </div>
+    </div>
+    <div class="card wide">
+      <h2>Recent commits</h2>
+      <pre id="gitlog">—</pre>
+    </div>
+  </section>
+
+  <section id="view-pipeline" class="view">
+    <div class="card wide">
+      <h2>run_candidate pipeline</h2>
+      <svg id="stages" viewBox="0 0 660 120" role="img"
+           aria-label="Pipeline stages: parse, risk, worker, repair, patch, transfer"></svg>
+      <p id="stage-desc" class="muted">Click a stage for details.</p>
+    </div>
+    <div class="card wide">
+      <h2>Last demo run</h2>
+      <pre id="demo">—</pre>
+    </div>
+  </section>
+
+  <section id="view-control" class="view">
+    <div class="card wide">
+      <h2>Run jobs</h2>
+      <div class="btnrow">
+        <button id="run-smoke">Smoke</button>
+        <button id="run-tests">Tests</button>
+        <button id="run-baseline">Baseline (stub)</button>
+        <button id="run-stop" disabled>Stop</button>
+      </div>
+      <p id="job-meta" class="muted">No job running.</p>
+    </div>
+    <div class="card wide">
+      <h2>Live output <span class="muted">(auto-refresh)</span></h2>
+      <pre id="job-tail">Press a run button to start a job.</pre>
+    </div>
+  </section>
+</main>
+
+<p id="file-hint" class="hint" hidden>
+  Opened as a file: static layout works, but live data needs the server —
+  run <code>python dashboard/server.py</code> and open
+  <code>http://127.0.0.1:8137/</code>.
+</p>
+
+<script src="app.js"></script>
+</body>
+</html>
