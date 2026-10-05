@@ -131,6 +131,20 @@ class PromotionGateTest(unittest.TestCase):
         self.assertTrue(any("fail" in r.lower() for r in result["reasons"]))
         self.assertFalse(os.path.exists(self.versions))
 
+    def test_evaluator_call_defaults_to_coarse_detail(self):
+        # issues.md #68: promotion must not pull per-case hidden outcomes.
+        envelope = promotion._call_evaluator("cand-1", correct_outputs())
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["verdict"], "pass")
+        self.assertNotIn("cases", envelope["evidence"])
+        self.assertEqual(envelope["evidence"]["detail"], "coarse")
+
+    def test_evaluator_call_full_detail_opt_in(self):
+        envelope = promotion._call_evaluator("cand-1", correct_outputs(),
+                                             detail="full")
+        self.assertTrue(envelope["ok"])
+        self.assertIn("cases", envelope["evidence"])
+
     def test_reject_when_service_unreachable_fail_closed(self):
         evidence = green_evidence()
         bad_path = os.path.join(self.tmp.name, "no-such-service.py")

@@ -14,7 +14,12 @@ Request schema (all keys required except ``thresholds``/``fresh``)::
       "thresholds": {"min_case_pass_rate": 1.0, "min_check_pass_rate": 1.0},
       "fresh": {"seed": 0, "per_case": 2}   # optional: append seeded fresh cases
       "action": "evaluate" | "fresh_inputs"  # optional, default "evaluate"
+      "detail": "full" | "coarse"  # optional, default "full"
     }
+
+``"detail": "coarse"`` withholds per-case outcomes from the evidence
+(verdict + summary rates only), so untrusted callers cannot hill-climb
+on hidden cases (issues.md #68).
 
 ``"action": "fresh_inputs"`` asks for the fresh case INPUTS (no expected
 outputs, no verdict) so the caller can execute the candidate on them and
@@ -54,8 +59,9 @@ PROTOCOL_VERSION = "1.0"
 
 _REQUEST_KEYS = frozenset(
     {"protocol_version", "request_id", "candidate_id", "outputs",
-     "thresholds", "fresh", "action"}
+     "thresholds", "fresh", "action", "detail"}
 )
+_DETAIL_LEVELS = ("full", "coarse")
 _REQUIRED_KEYS = frozenset({"request_id", "candidate_id", "outputs"})
 _REQUIRED_FRESH_INPUTS_KEYS = frozenset({"request_id", "candidate_id"})
 _ACTIONS = ("evaluate", "fresh_inputs")
@@ -71,7 +77,7 @@ class ProtocolError(Exception):
 
 
 def make_request(candidate_id, outputs, request_id=None, thresholds=None,
-                 fresh=None):
+                 fresh=None, detail=None):
     """Build a protocol request dict (client-side helper)."""
     request = {
         "protocol_version": PROTOCOL_VERSION,
@@ -83,6 +89,8 @@ def make_request(candidate_id, outputs, request_id=None, thresholds=None,
         request["thresholds"] = dict(thresholds)
     if fresh is not None:
         request["fresh"] = dict(fresh)
+    if detail is not None:
+        request["detail"] = detail
     return request
 
 
@@ -176,6 +184,12 @@ def validate_request(obj):
                                 or not isinstance(fresh["per_case"], int)
                                 or fresh["per_case"] < 1):
         raise ProtocolError("fresh.per_case must be a positive int")
+    detail = obj.get("detail", "full")
+    if detail not in _DETAIL_LEVELS:
+        raise ProtocolError(
+            "unknown detail: %r (want one of %s)"
+            % (detail, ", ".join(_DETAIL_LEVELS))
+        )
     return {
         "protocol_version": PROTOCOL_VERSION,
         "request_id": request_id,
@@ -184,6 +198,7 @@ def validate_request(obj):
         "outputs": dict(outputs),
         "thresholds": dict(thresholds),
         "fresh": dict(fresh),
+        "detail": detail,
     }
 
 

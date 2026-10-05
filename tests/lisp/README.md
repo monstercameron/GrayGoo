@@ -23,6 +23,7 @@ Reference runtime: SBCL 2.6.9 (repo standard). Locate it the same way
 | `capability-model.lisp` | #49–#54 model + registry | explicit-NIL clearing, risk validation, lifecycle monotonicity, lineage validation, atomic concurrent versions, order-free reload |
 | `kernel-stubs.lisp` | #47–#48 honesty boundaries | advisory-flag limitation pinned, pure-exclusivity + vocabulary validation |
 | `schema-stubs.lisp` | #18 migration design, evolution disabled | flag on, `apply-migration` refuses, inert design records, compatibility stub verdicts |
+| `model-provenance.lisp` | #66–#67 model/world provenance contracts | lineage round-trip, provenance-key presence, contract pass/fail, staleness consistency |
 
 ## Run them
 
@@ -44,7 +45,7 @@ PROBE epoch-nested: PASS
 (`$LASTEXITCODE` is 0. On failure the tail reads `PROBE <name>: FAIL …`
 and the exit code is 1.)
 
-Run all six:
+Run all ten:
 
 ```powershell
 $sbcl = "$env:LOCALAPPDATA\sbcl-local\sbcl-2.6.9\PFiles\Steel Bank Common Lisp\sbcl.exe"

@@ -273,15 +273,18 @@ def _checked_fresh(fresh):
 
 
 def _call_evaluator(candidate_id, outputs, thresholds=None, timeout=60,
-                    service_path=None, fresh=None):
+                    service_path=None, fresh=None, detail="coarse"):
     """Ask the hidden evaluator for a verdict over its subprocess protocol.
 
     Returns the decoded envelope dict. Raises RuntimeError (or
     propagates OSError) when the service is unreachable or misbehaves;
-    callers MUST treat that as "do not promote".
+    callers MUST treat that as "do not promote". ``detail`` defaults
+    to ``"coarse"`` (verdict + summary only, no per-case outcomes;
+    issues.md #68).
     """
     request = _protocol.make_request(candidate_id, outputs,
-                                     thresholds=thresholds, fresh=fresh)
+                                     thresholds=thresholds, fresh=fresh,
+                                     detail=detail)
     if service_path is None:
         return _evaluator_service.evaluate_in_subprocess(
             request, timeout=timeout)
@@ -358,7 +361,7 @@ def _append_ledger(ledger, event_type, candidate_id, capability_id, version,
 def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
                        versions_dir=None, service_path=None,
                        evaluator_timeout=60, fresh=None,
-                       transfer_tracker=None):
+                       transfer_tracker=None, evaluator_detail="coarse"):
     """Decide whether *candidate_id* may be promoted.
 
     *evidence* carries the promotion inputs (plan.md section 28)::
@@ -389,6 +392,12 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
     fabricated rows cannot sail the gate. When omitted, transfer rows
     are caller-asserted (legacy behavior; wire a tracker in
     production).
+
+    ``evaluator_detail`` (default ``"coarse"``, issues.md #68)
+    controls hidden-evaluator evidence granularity: ``"coarse"``
+    returns verdict + summary rates only, so per-case hidden
+    outcomes never reach promotion evidence, repair loops, or
+    lessons. Pass ``"full"`` only for trusted offline debugging.
 
     Returns ``{"decision": "promote"|"reject", "reasons": [...],
     "version": int|None, "epoch": int|None}``. Rejections always carry
@@ -489,7 +498,8 @@ def evaluate_promotion(candidate_id, evidence, *, generation, ledger=None,
                                    thresholds=thresholds,
                                    timeout=evaluator_timeout,
                                    service_path=service_path,
-                                   fresh=fresh_spec)
+                                   fresh=fresh_spec,
+                                   detail=evaluator_detail)
     except Exception as exc:  # unreachable / crashed / timed out: no verdict
         return reject("evaluator unreachable or failed: %s" % exc,
                       capability_id)

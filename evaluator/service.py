@@ -239,7 +239,7 @@ def _resolve_thresholds(thresholds):
 
 
 def evaluate(candidate_id, outputs, cases=None, thresholds=None,
-             fresh=None):
+             fresh=None, detail="full"):
     """Score candidate outputs against the hidden corpus.
 
     ``outputs`` maps ``"<case_id>:<check_index>"`` to output text.
@@ -248,11 +248,17 @@ def evaluate(candidate_id, outputs, cases=None, thresholds=None,
     ``fresh`` (None/{} disables; else ``{"seed": int, "per_case": int}``)
     appends seeded fresh cases to the evaluated set; missing outputs for
     fresh keys fail like any other missing output.
+    ``detail`` is ``"full"`` (per-case breakdown included) or
+    ``"coarse"`` (verdict + summary rates only; per-case outcomes
+    withheld so untrusted callers cannot hill-climb on hidden cases,
+    issues.md #68).
     """
     if not isinstance(candidate_id, str) or not candidate_id:
         raise ValueError("candidate_id must be a non-empty string")
     if not isinstance(outputs, dict):
         raise ValueError("outputs must be a dict")
+    if detail not in ("full", "coarse"):
+        raise ValueError("detail must be 'full' or 'coarse'")
     if cases is None:
         cases = load_hidden_cases()
     fresh_info = {"seed": 0, "per_case": 0, "generated": 0}
@@ -318,6 +324,16 @@ def evaluate(candidate_id, outputs, cases=None, thresholds=None,
         "cases": case_results,
         "unexpected_outputs": sorted(set(outputs) - known_keys),
     }
+    if detail == "coarse":
+        # Issues.md #68: withhold per-case outcomes (hill-climbing
+        # surface) AND the unexpected-key echo (case-ID probing
+        # surface); verdict + summary rates only.
+        evidence = {
+            "thresholds": evidence["thresholds"],
+            "fresh": evidence["fresh"],
+            "summary": evidence["summary"],
+            "detail": "coarse",
+        }
     return {"verdict": verdict, "evidence": evidence}
 
 
@@ -359,7 +375,8 @@ def handle_request_json(raw):
     try:
         result = evaluate(request["candidate_id"], request["outputs"],
                           thresholds=request["thresholds"],
-                          fresh=request["fresh"])
+                          fresh=request["fresh"],
+                          detail=request.get("detail", "full"))
     except ValueError as exc:
         return _protocol.error_response(
             request["request_id"], ProtocolError(str(exc))), 2

@@ -28,4 +28,7 @@
   (:use :cl)
   (:documentation "Model-facing world-model projections (plan.md §42).")
   (:export #:project-world
-           #:*projection-keys*))
+           #:*projection-keys*
+           #:*projection-provenance-keys*
+           #:check-projection
+           #:projections-consistent-p))

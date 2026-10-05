@@ -392,5 +392,55 @@ class FreshCasesTest(unittest.TestCase):
                 protocol.make_request("c1", {}, fresh={"bogus": 1}))
 
 
+class DetailLevelTest(unittest.TestCase):
+    """issues.md #68: coarse verdicts hide per-case hidden outcomes."""
+
+    def test_detail_defaults_to_full(self):
+        validated = protocol.validate_request(
+            protocol.make_request("c1", {}))
+        self.assertEqual(validated["detail"], "full")
+
+    def test_detail_round_trips_and_rejects_unknown(self):
+        validated = protocol.validate_request(
+            protocol.make_request("c1", {}, detail="coarse"))
+        self.assertEqual(validated["detail"], "coarse")
+        bad = protocol.make_request("c1", {}, detail="verbose")
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.validate_request(bad)
+
+    def test_coarse_evidence_has_summary_but_no_cases(self):
+        request = protocol.make_request("cand-coarse", all_correct_outputs(),
+                                        request_id="req-coarse",
+                                        detail="coarse")
+        envelope = service.evaluate_in_subprocess(request)
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["verdict"], "pass")
+        evidence = envelope["evidence"]
+        self.assertEqual(evidence["summary"]["passed_cases"], 4)
+        self.assertEqual(evidence["detail"], "coarse")
+        self.assertNotIn("cases", evidence)
+        self.assertNotIn("unexpected_outputs", evidence)
+
+    def test_coarse_failure_leaks_no_case_ids(self):
+        outputs = all_correct_outputs()
+        outputs["HID-A-02:0"] = "{}"
+        request = protocol.make_request("cand-coarse-fail", outputs,
+                                        request_id="req-coarse-fail",
+                                        detail="coarse")
+        envelope = service.evaluate_in_subprocess(request)
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["verdict"], "fail")
+        blob = json.dumps(envelope["evidence"])
+        self.assertNotIn("HID-A-01", blob)
+        self.assertNotIn("HID-A-02", blob)
+
+    def test_full_evidence_still_has_cases(self):
+        request = protocol.make_request("cand-full", all_correct_outputs(),
+                                        request_id="req-full", detail="full")
+        envelope = service.evaluate_in_subprocess(request)
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(len(envelope["evidence"]["cases"]), 4)
+
+
 if __name__ == "__main__":
     unittest.main()

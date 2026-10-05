@@ -1,0 +1,61 @@
+# GrayGoo CI — the executable source of truth (issues.md #70).
+#
+# todos.md checkboxes for code work are claims; THIS workflow is the
+# verdict. A box may only be checked when the gates below pass on the
+# commit that did the work (see documents/ci-status.md).
+#
+# Gates (all offline, stdlib + SBCL; zero live model calls):
+#   1. Full Python suite:   python -m unittest discover -s tests
+#   2. Vertical slice smoke: python demo.py --smoke
+#   3. ASDF system load:    sbcl loads :graygoo, prints GRAYGOO-LOAD-OK
+#   4. SBCL regression probes: every tests/lisp/*.lisp exits 0
+#   5. Manifest check:      python manifest.py --check
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    env:
+      GRAYGOO_SBCL: /usr/bin/sbcl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps (smoke/demo only; tests are stdlib)
+        run: pip install openai python-dotenv
+
+      - name: Install SBCL
+        run: sudo apt-get update && sudo apt-get install -y sbcl
+
+      - name: "Gate 1: full Python suite"
+        run: python -m unittest discover -s tests
+
+      - name: "Gate 2: vertical-slice smoke (offline)"
+        run: python demo.py --smoke
+
+      - name: "Gate 3: ASDF system load"
+        run: |
+          sbcl --non-interactive --no-userinit --no-sysinit \
+            --disable-debugger \
+            --eval '(require "asdf")' \
+            --eval '(push (truename "./") asdf:*central-registry*)' \
+            --eval '(asdf:load-system :graygoo)' \
+            --eval '(format t "GRAYGOO-LOAD-OK evo-packages=~D~%" (length (remove-if-not (lambda (p) (search "EVO." (package-name p))) (list-all-packages))))' \
+            --eval '(sb-ext:exit :code 0)'
+
+      - name: "Gate 4: SBCL regression probes"
+        run: |
+          fail=0
+          for probe in tests/lisp/*.lisp; do
+            sbcl --non-interactive --no-userinit --no-sysinit \
+              --disable-debugger --load "$probe" || fail=1
+          done
+          exit $fail
+
+      - name: "Gate 5: reproducibility manifest"
+        run: python manifest.py --check

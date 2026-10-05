@@ -160,7 +160,51 @@ probes and fixed:
   12/12 suite, #61 wired fingerprint + 12/12, #62 distinct-task
   counting, #64/#65 dashboard-only metrics + dead Lisp).
 
-Still REAL, not yet fixed: #66-70 (provenance/metrics/source-of-truth).
+Round-4 remainder CLOSED: #66-70 all fixed in Round 9 below.
+No REAL-but-unfixed items remain from the #41-70 triage.
+
+## Round 9 (2026-10-05): issues #66-68
+
+- #66 (MEDIUM): model call records lacked task/run/candidate/
+  generation/cost identity. Fixed: `inference-metadata` now carries
+  `task-id run-id candidate-id generation cost-usd request-id`
+  (`src/model/model.lisp`); probe `model-provenance.lisp` pins the
+  contract (7 checks: lineage round-trip, provenance-key presence,
+  contract pass/fail, staleness consistency).
+- #67 (MEDIUM): world-model projections had no provenance/freshness
+  contract. Fixed: every projection carries
+  `:derived-through-event :state-generation :active-epoch
+  :projected-at` (`src/model/world.lisp`); same probe pins required
+  keys + staleness comparison.
+- #68 (HIGH): hidden-evaluator verdicts could leak per-case hidden
+  outcomes into mutable memory. Fixed: new `detail` protocol field
+  (`evaluator/protocol.py`, default `"full"` for trusted offline
+  use); `evaluate(..., detail="coarse")` returns verdict + summary
+  rates only — no `cases`, no `unexpected_outputs` (the latter
+  dropped too: key-probing would enumerate hidden case IDs).
+  `promotion._call_evaluator` / `evaluate_promotion` request
+  `"coarse"` BY DEFAULT (`evaluator_detail` opt-out for trusted
+  debugging). Promotion never persisted per-case blobs anyway (only
+  the verdict + check counts in reject reasons); the coarse default
+  now also protects the envelope in transit, logs, and future
+  callers. 7 tests (5 evaluator incl. a leak scan asserting no
+  `HID-A-*` IDs in coarse evidence, 2 promotion default/opt-in).
+- Evidence: evaluator+promotion 49/49 OK, 10/10 Lisp probes PASS
+  (incl. new `model-provenance.lisp`), ASDF 25 packages.
+- #69 (MEDIUM): ASDF claimed zero deps while generations depend on
+  Lisp+Python+SBCL+OS+model jointly. Fixed: `manifest.py`
+  `collect_manifest()` pins all five (python/platform/git/sbcl/asd
+  SHA/source-tree fingerprint/dep versions/model id+prices/sandbox
+  posture); `--check` is CI gate 5. Never touches secrets —
+  tested: live key absent from rendered JSON. 9 tests +
+  `documents/reproducibility.md`.
+- #70 (HIGH): agent-checked boxes vs stub code. Fixed by rule +
+  mechanism: `.github/workflows/ci.yml` runs the five offline gates
+  (suite, smoke, ASDF load, all probes, manifest check);
+  `documents/ci-status.md` makes CI the source of truth (boxes check
+  only on green gates at that commit; red gate reopens boxes).
+  First Actions green run pending next push; local gate evidence
+  stands until then. Probe README fixed (10th probe row, "six"→ten).
 
 ## Round 8 (2026-10-05): issues #47-48
 
