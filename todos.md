@@ -235,7 +235,7 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] Evaluator inspection attempt
   - [ ] Confirm all fail safely
 
-- [ ] **Measure true learning**
+- [x] **Measure true learning**
   - [x] Compare current system against memory-disabled current model
   - [x] Compare against previous stable generation
   - [x] Measure held-out task success
@@ -243,7 +243,7 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Measure negative transfer
   - [x] Measure tokens/task trend
   - [x] Measure calls/task trend
-  - [ ] Measure time-to-verified-mutation
+  - [x] Measure time-to-verified-mutation
   - [x] Measure capability entropy
 
 - [ ] **Define experiment success**
