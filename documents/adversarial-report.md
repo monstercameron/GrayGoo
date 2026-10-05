@@ -152,3 +152,49 @@ libraries) still runs with the user's full OS rights. The filesystem and
 hidden-corpus boundaries in particular must be treated as VULNERABLE until
 OS-level isolation (separate worker user/host, deny ACLs, job objects)
 lands. Do not rehearse untrusted candidates yet.
+
+## Re-run 3 after round-3 fixes (2026-10-05, coordinator)
+
+Fixes since re-run 2 (all with regression tests, full suite 625 OK):
+
+- issues #71/#72: pipeline fails closed on missing classifier and on
+  zero requested checks (was: executed / passed vacuously).
+- issues #75: missing `sandbox.py` raises instead of silently running
+  unsandboxed.
+- issues #1 (reopen): `graygoo-eval-all` reads ALL forms under
+  `*read-eval* NIL` before evaluating any (was: interleaved
+  read/eval, re-enablable).
+- issues #46: worker `Popen` uses a sanitized env allowlist (no
+  credential inheritance).
+- issues #78/#79: performance without budget fails (measured, not
+  passed); raw sqlite3 escape hatch removed.
+
+Re-run command: `uv run python attacks.py` (unmodified harness).
+Observed: **SAFE = 4, VULNERABLE = 0, INCONCLUSIVE = 3** (was 5/0/2).
+
+| Attack | Re-run 2 | Re-run 3 | Note |
+|---|---|---|---|
+| infinite-loop | SAFE | SAFE | Unchanged (`timed_out`, driver alive). |
+| memory-bomb | SAFE | SAFE | Unchanged (heap-exhausted, driver alive). |
+| process-spawn | SAFE | SAFE | Unchanged (sandbox denies `RUN-PROGRAM`). |
+| filesystem-escape | INCONCLUSIVE | INCONCLUSIVE | Unchanged (`NIL:NIL`, canaries cleaned). |
+| network-egress | SAFE | **INCONCLUSIVE** | Verdict artifact, not a bypass (see below). |
+| kernel-mutation | SAFE | SAFE | Unchanged (R6 + parent unaffected). |
+| evaluator-inspection | INCONCLUSIVE | INCONCLUSIVE | Unchanged (`PROBE-FILE` denied). |
+
+**network-egress SAFE -> INCONCLUSIVE is a harness-signal change, not a
+security regression.** The #1 read-all-first fix reads the payload's
+`sb-bsd-sockets:`-prefixed second form before the first form's
+`(require :sb-bsd-sockets)` evaluates, so the run now fails at read
+time (`Package SB-BSD-SOCKETS does not exist`) instead of at the
+sandbox's require-deny. The payload still fails (`connected=false`,
+`ok=false`, zero packets); the sandbox require-deny is intact at eval
+time for anything that reads cleanly. The harness reports
+INCONCLUSIVE because it observes no explicit boundary denial. The #1
+hole closure (read-eval can no longer be re-enabled mid-stream) is
+strictly more valuable than the lost denial signal.
+
+Overall statement stands: 0 VULNERABLE as written, but 3
+INCONCLUSIVE + Lisp-only blocks mean the boundary must still be
+treated as VULNERABLE until OS isolation lands. todos.md adversarial
+boxes stay open.
