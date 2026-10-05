@@ -161,8 +161,30 @@ probes and fixed:
   counting, #64/#65 dashboard-only metrics + dead Lisp).
 
 Still REAL, not yet fixed: #47/#48 (Lisp security/effects stubs),
-#57-60 (worker protocol semantics/compile), #66-70
-(provenance/metrics/source-of-truth).
+#66-70 (provenance/metrics/source-of-truth).
+
+## Round 7 (2026-10-05): issues #57-60
+
+- #60 (HIGH): "Compile inside rehearsal worker" was checked but the
+  hot path only EVALed. Fixed: `graygoo-eval-all` now COMPILEs each
+  form and funcalls the closure; compile-time errors fail rehearsal.
+  Proven by a compiler-macro discriminator (expands iff compiled)
+  plus a defun-under-compile test; all 25 worker tests pass
+  unchanged otherwise.
+- #57/#58 (MEDIUM, narrowed): triage cited a 4000-char
+  `graygoo-prin1` cap that does not exist in the tree; actual
+  behavior was silent length-100/level-10 abbreviation. Fixed
+  honestly: full-fidelity print (circular-safe) up to a 65536-char
+  cap, then abbreviate WITH an explicit `return_truncated` flag
+  through the envelope; pipeline comparisons on truncated values
+  fail as UNVERIFIABLE instead of mismatching confusingly.
+- #59 (LOW): failures carried only condition text. Fixed:
+  `run-test-thunk` returns condition-type as a 4th value (5th:
+  abbreviated-p; extra values ignored by older 3-value callers in
+  pool.py/rehearsal), transported as `error_type` (e.g.
+  `TYPE-ERROR`), so classifiers need no stderr regex.
+- Evidence: workers 25/25, pipeline 13/13, full suite 648 OK,
+  smoke green, 8/8 probes, ASDF 25 packages.
 
 ## Round 6 (2026-10-05): issues #52-54
 

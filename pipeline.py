@@ -16,8 +16,11 @@ Contracts for the injected callables:
 
 * ``worker_fn(code)`` takes a ``str`` of code and returns the worker
   envelope dict ``{"ok", "stdout", "return_value", "error", "timed_out",
-  "elapsed_ms", "candidate_ms?"}`` (``candidate_ms`` is the in-worker
-  candidate-eval time; older doubles may omit it).
+  "elapsed_ms", "candidate_ms?", "error_type?", "return_truncated?"}``
+  (``candidate_ms`` is the in-worker candidate-eval time;
+  ``error_type`` names the signalled condition; ``return_truncated``
+  flags abbreviated values, which fail comparisons as unverifiable;
+  older doubles may omit the ``?`` keys).
 * ``risk_fn(parsed)`` takes the parsed-candidate dict from
   :func:`s_expr.parse_candidate` and returns a dict with at least
   ``"level"`` (``"R0"``..``"R6"`` per plan.md section 7). ``None``, a
@@ -81,6 +84,8 @@ def _run_worker(worker_fn, code):
         "pass": passed,
         "elapsed_ms": result.get("elapsed_ms"),
         "candidate_ms": result.get("candidate_ms"),
+        "error_type": result.get("error_type", ""),
+        "return_truncated": bool(result.get("return_truncated", False)),
         "stdout": result.get("stdout"),
         "return_value": result.get("return_value"),
     }
@@ -127,6 +132,14 @@ def _eval_code_item(item, worker_fn):
         return passed, record
     if "expect" in item or "expected" in item:
         expected = item.get("expect", item.get("expected"))
+        if record.get("return_truncated"):
+            # Issues.md #57/#58: an abbreviated value cannot verify a
+            # comparison — fail as unverifiable, not as a mismatch.
+            record = dict(record)
+            record["pass"] = False
+            record["error"] = ("return_value abbreviated past the "
+                               "transport cap: comparison unverifiable")
+            return False, record
         if not _return_values_match(record.get("return_value"), expected):
             record = dict(record)
             record["pass"] = False

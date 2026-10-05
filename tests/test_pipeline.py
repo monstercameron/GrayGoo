@@ -229,6 +229,37 @@ class RunCandidateTest(unittest.TestCase):
         self.assertEqual(result["evidence"]["performance"]["samples"],
                          [2.0])
 
+    def test_truncated_return_fails_comparison_as_unverifiable(self):
+        # Issues 57/58: abbreviated values cannot verify a comparison.
+        def handler(code):
+            envelope = ok_envelope(return_value="(1 2 ...", elapsed_ms=2)
+            envelope["return_truncated"] = True
+            return envelope
+
+        result = pipeline.run_candidate(
+            GOOD_CANDIDATE,
+            tests={"direct": [{"code": "(t)", "expect": "(1 2 3)"}]},
+            worker_fn=CountingWorker(handler),
+            risk_fn=risk_r0)
+        self.assertFalse(result["ok"])
+        item = result["evidence"]["direct"]["items"][0]
+        self.assertIn("unverifiable", item["error"])
+
+    def test_truncated_return_without_expect_passes(self):
+        def handler(code):
+            envelope = ok_envelope(return_value="(1 2 ...", elapsed_ms=2)
+            envelope["return_truncated"] = True
+            return envelope
+
+        result = pipeline.run_candidate(
+            GOOD_CANDIDATE,
+            tests={"direct": ["(t)"]},
+            worker_fn=CountingWorker(handler),
+            risk_fn=risk_r0)
+        self.assertTrue(result["ok"])
+        item = result["evidence"]["direct"]["items"][0]
+        self.assertTrue(item["return_truncated"])
+
     def test_performance_falls_back_to_elapsed_ms(self):
         result = pipeline.run_candidate(
             GOOD_CANDIDATE,

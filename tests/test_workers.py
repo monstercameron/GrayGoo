@@ -11,7 +11,8 @@ import workers
 
 SBCL_AVAILABLE = os.path.exists(workers.resolve_sbcl())
 RESULT_KEYS = {"ok", "stdout", "return_value", "error", "timed_out",
-               "elapsed_ms", "candidate_ms"}
+               "elapsed_ms", "candidate_ms", "error_type",
+               "return_truncated"}
 
 
 @unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
@@ -188,6 +189,53 @@ class ReadEvalInterleaveTest(unittest.TestCase):
         result = workers.run_lisp("(setq *read-eval* t)\n#.(+ 40 2)")
         self.assertFalse(result["ok"], result)
         self.assertNotEqual(result["return_value"], "42")
+
+
+@unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
+class CompileGateTest(unittest.TestCase):
+    def test_forms_are_compiled_not_interpreted(self):
+        """Issue 60: compiler-macros expand (EVAL would not expand)."""
+        result = workers.run_lisp(
+            "(define-compiler-macro probe-twice (x) `(+ ,x 1000))\n"
+            "(probe-twice 1)",
+            timeout_s=30)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["return_value"], "1001")
+
+    def test_defun_still_defines_under_compile(self):
+        result = workers.run_lisp(
+            "(progn (defun probe-add (a b) (+ a b)) (probe-add 20 22))",
+            timeout_s=30)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["return_value"], "42")
+
+
+@unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
+class PayloadFidelityTest(unittest.TestCase):
+    def test_oversize_value_flagged_truncated(self):
+        """Issues 57/58: values past the cap abbreviate with a flag."""
+        result = workers.run_lisp(
+            "(make-list 20000 :initial-element 'wibble)", timeout_s=30)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["return_truncated"])
+        self.assertLessEqual(len(result["return_value"]), 65536)
+
+    def test_small_value_not_truncated(self):
+        result = workers.run_lisp("(list 1 2 3)", timeout_s=30)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["return_truncated"])
+        self.assertEqual(result["return_value"], "(1 2 3)")
+
+    def test_condition_type_transport(self):
+        """Issue 59: failures carry the condition type, not just text."""
+        result = workers.run_lisp("(car 42)", timeout_s=30)
+        self.assertFalse(result["ok"])
+        self.assertIn("TYPE-ERROR", result["error_type"])
+
+    def test_success_carries_empty_error_type(self):
+        result = workers.run_lisp("(+ 1 2)", timeout_s=30)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["error_type"], "")
 
 
 class SanitizedEnvTest(unittest.TestCase):

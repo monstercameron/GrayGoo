@@ -46,25 +46,56 @@
     (ignore-errors (sb-debug:print-backtrace :stream s :count 24))
     (get-output-stream-string s)))
 
+(defvar *result-char-cap* 65536
+  "Maximum transported PRIN1 chars (issues.md #57/#58); longer values
+are abbreviated and flagged rather than silently mangled.")
+
+(defun %condition-type-name (condition)
+  "Printable type name of CONDITION for envelope transport."
+  (prin1-to-string (type-of condition)))
+
+(defun %print-payload (result)
+  "Print RESULT fully (circular-safe); abbreviate past the cap.
+Returns (VALUES PAYLOAD ABBREVIATED-P)."
+  (let ((full (let ((*print-length* nil)
+                    (*print-level* nil)
+                    (*print-circle* t)
+                    (*print-readably* nil))
+                (prin1-to-string result))))
+    (if (<= (length full) *result-char-cap*)
+        (values full nil)
+        (values (let ((*print-length* 100)
+                      (*print-level* 10)
+                      (*print-circle* t)
+                      (*print-readably* nil))
+                  (prin1-to-string result))
+                t))))
+
 (defun run-test-thunk (thunk)
   "Call THUNK (a function of zero arguments) and report the outcome.
-Returns three values: OK-P, PAYLOAD, BACKTRACE-STRING. On success PAYLOAD
-is the PRIN1 representation of the primary value (print length/level
-capped); on failure PAYLOAD is the condition report string."
+Returns five values: OK-P, PAYLOAD, BACKTRACE-STRING, CONDITION-TYPE,
+ABBREVIATED-P. On success PAYLOAD is the PRIN1 representation of the
+primary value (full fidelity up to *RESULT-CHAR-CAP* chars; longer
+values are abbreviated and ABBREVIATED-P is true, issues.md #57/#58);
+CONDITION-TYPE is \"\". On failure PAYLOAD is the condition report
+string and CONDITION-TYPE names the condition type (issues.md #59).
+Extra values are ignored by older three-value callers."
   (check-type thunk function)
-  (let ((*print-length* 100)
-        (*print-level* 10)
-        (*print-readably* nil))
-    (handler-case
-        (let ((result (funcall thunk)))
-          (handler-case
-              (values t (prin1-to-string result) "")
-            (serious-condition (condition)
-              (values nil
-                      (format nil "result unprintable: ~A" condition)
-                      (%capture-backtrace)))))
-      (serious-condition (condition)
-        (values nil (princ-to-string condition) (%capture-backtrace))))))
+  (handler-case
+      (let ((result (funcall thunk)))
+        (handler-case
+            (multiple-value-bind (payload abbreviated-p)
+                (%print-payload result)
+              (values t payload "" "" abbreviated-p))
+          (serious-condition (condition)
+            (values nil
+                    (format nil "result unprintable: ~A" condition)
+                    (%capture-backtrace)
+                    (%condition-type-name condition)
+                    nil))))
+    (serious-condition (condition)
+      (values nil (princ-to-string condition) (%capture-backtrace)
+              (%condition-type-name condition) nil))))
 
 ;;;; Worker sandbox (adversarial hardening; plan.md §19, §60).
 ;;;;
