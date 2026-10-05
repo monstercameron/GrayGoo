@@ -36,7 +36,14 @@ safety gates.
 - [ ] Negative transfer stays below threshold
 - [ ] Capability growth becomes sublinear
 - [ ] Zero canonical-state corruption
-- [ ] Rollback works reliably
+- [x] Rollback works reliably — MECHANISM PROVEN (2026-10-05):
+  `promotion.set_current_version` moves back-only over atomic writes,
+  preserves version records, refuses forward/no-op/unknown moves, and
+  (new) appends a `candidate rolled back` ledger event feeding
+  `adaptive.postmortem_trigger`; ledger outage keeps the move with an
+  audible receipt note (QA-06 pattern). Tests:
+  `tests/test_promotion.py` rollback section (4 tests incl.
+  end-to-end postmortem trigger + outage injection).
 
 ## v1 acceptance (plan.md §86)
 

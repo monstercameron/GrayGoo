@@ -18,6 +18,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import adaptive
 import promotion
 import risk
 import transfer
@@ -301,6 +302,60 @@ class PromotionGateTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             promotion.set_current_version(
                 "unknown-cap", 1, versions_dir=self.versions)
+
+    def test_rollback_with_ledger_emits_postmortem_trigger(self):
+        # End-to-end: promote v1+v2, roll back with a ledger, and the
+        # emitted event feeds adaptive.postmortem_trigger (todos.md L6).
+        promotion.evaluate_promotion(
+            "cand-1", green_evidence(), generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions)
+        promotion.evaluate_promotion(
+            "cand-2", green_evidence(version=2), generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions)
+        moved = promotion.set_current_version(
+            "demo-cap", 1, versions_dir=self.versions,
+            ledger=self.ledger, reason="regression in prod")
+        self.assertNotIn("ledger_note", moved)
+        rows = self.ledger.get_events_by_type("candidate rolled back")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["capability_id"], "demo-cap")
+        self.assertEqual(rows[0]["capability_version"], 1)
+        payload = json.loads(rows[0]["payload"])
+        self.assertEqual(payload["from_version"], 2)
+        self.assertEqual(payload["to_version"], 1)
+        (candidate,) = adaptive.postmortem_trigger(rows[0])
+        self.assertEqual(candidate["status"], "candidate")
+        self.assertEqual(candidate["source"], "rollback")
+
+    def test_rollback_without_ledger_logs_nothing(self):
+        promotion.evaluate_promotion(
+            "cand-1", green_evidence(), generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions)
+        promotion.evaluate_promotion(
+            "cand-2", green_evidence(version=2), generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions)
+        before = len(self.ledger.get_recent_events(limit=10000))
+        moved = promotion.set_current_version(
+            "demo-cap", 1, versions_dir=self.versions)
+        self.assertEqual(moved["current_version"], 1)
+        self.assertEqual(
+            len(self.ledger.get_recent_events(limit=10000)), before)
+
+    def test_rollback_ledger_outage_keeps_move_audibly(self):
+        promotion.evaluate_promotion(
+            "cand-1", green_evidence(), generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions)
+        promotion.evaluate_promotion(
+            "cand-2", green_evidence(version=2), generation=GENERATION,
+            ledger=self.ledger, versions_dir=self.versions)
+        self.ledger.close()  # outage: further appends raise
+        moved = promotion.set_current_version(
+            "demo-cap", 1, versions_dir=self.versions,
+            ledger=self.ledger, reason="bad deploy")
+        self.assertEqual(moved["current_version"], 1)
+        self.assertIn("ledger append failed", moved["ledger_note"])
+        self.assertEqual(
+            promotion.get_current_version("demo-cap", self.versions), 1)
 
 
 if __name__ == "__main__":

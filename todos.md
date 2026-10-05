@@ -254,7 +254,7 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Negative transfer stays below threshold
   - [ ] Capability growth becomes sublinear
   - [ ] Zero canonical-state corruption
-  - [ ] Rollback works reliably
+  - [x] Rollback works reliably
 
 - [ ] **Harden worker sandbox (adversarial report 2026-10-05)**
   - [x] Fix risk classifier: route dispatch/entrypoint redefinition to R6

@@ -47,6 +47,10 @@ DECISION_REJECT = "reject"
 
 EVENT_PROMOTED = "candidate_promoted"
 EVENT_REJECTED = "candidate_rejected"
+# NOTE: spaced style is deliberate — this MUST match
+# ``instrument.log_rollback``'s type and
+# ``adaptive._ROLLBACK_EVENT_TYPES`` so rollback postmortems fire.
+EVENT_ROLLED_BACK = "candidate rolled back"
 
 
 # ---------------------------------------------------------------------------
@@ -620,7 +624,8 @@ def get_current_epoch(versions_dir=None):
     return _load_epoch(_versions_dir(versions_dir))
 
 
-def set_current_version(capability_id, version, versions_dir=None):
+def set_current_version(capability_id, version, versions_dir=None,
+                      ledger=None, reason=""):
     """Roll back the dispatch pointer for *capability_id* to *version*.
 
     Moves the pointer BACK only: *version* must already be recorded and
@@ -629,6 +634,13 @@ def set_current_version(capability_id, version, versions_dir=None):
     ``{"capability_id": ..., "current_version": ..., "previous_version":
     ...}``. Raises ``KeyError`` for unknown capabilities/versions and
     ``ValueError`` for forward (or no-op) moves.
+
+    When *ledger* is provided, appends one ``"candidate rolled back"``
+    event (payload ``from_version``/``to_version``/``reason``) — the
+    same shape ``instrument.log_rollback`` emits, so
+    ``adaptive.postmortem_trigger`` fires on every logged rollback
+    (todos.md L6). A ledger outage never breaks the committed move:
+    the receipt gains a ``"ledger_note"`` instead (QA-06 pattern).
     """
     vdir = _versions_dir(versions_dir)
     doc = _load_capability_doc(vdir, capability_id)
@@ -650,5 +662,14 @@ def set_current_version(capability_id, version, versions_dir=None):
             % (version, current))
     doc["current_version"] = version
     _write_json_atomic(_capability_path(vdir, capability_id), doc)
-    return {"capability_id": capability_id, "current_version": version,
-            "previous_version": current}
+    receipt = {"capability_id": capability_id, "current_version": version,
+               "previous_version": current}
+    if ledger is not None:
+        try:
+            _append_ledger(ledger, EVENT_ROLLED_BACK, None, capability_id,
+                           version, None,
+                           {"from_version": current, "to_version": version,
+                            "reason": reason})
+        except Exception as exc:  # QA-06: the committed move stands, audibly
+            receipt["ledger_note"] = "ledger append failed: %s" % (exc,)
+    return receipt
