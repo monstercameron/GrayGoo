@@ -56,6 +56,18 @@ def keywords(text):
 
 CATEGORY_BONUS = 2
 
+# Concise-excerpt budget for the matched-rerun experiment (D-fast-path):
+# at most CONCISE_TOP_K entries, each truncated to CONCISE_BUDGET_CHARS.
+CONCISE_TOP_K = 1
+CONCISE_BUDGET_CHARS = 120
+
+
+def estimate_tokens(text):
+    """Rough token estimate for injected memory (chars/4 heuristic)."""
+    if not isinstance(text, str):
+        return 0
+    return (len(text) + 3) // 4
+
 
 def score_entry(query_keywords, query_category, entry):
     """Return (overlap, score) for one memory entry.
@@ -141,6 +153,25 @@ class TextMemory:
                 text = text[: max_chars_per_example - 1] + "…"
             lines.append(text)
         return "\n".join(lines) + "\n"
+
+    def format_block_concise(self, retrieved,
+                               max_chars_per_example=CONCISE_BUDGET_CHARS):
+        """Top-1 entry truncated to a fixed budget (matched-rerun D).
+
+        Only the first (best-ranked) entry is injected; empty retrieval
+        yields "". Callers record ``estimate_tokens(block)`` alongside.
+        """
+        if not retrieved:
+            return ""
+        entry = retrieved[0]["entry"]
+        text = "Solved example (%s):\ninput: %s\noutput: %s" % (
+            entry.get("task_id", "?"),
+            entry.get("input", ""),
+            entry.get("output", ""),
+        )
+        if len(text) > max_chars_per_example:
+            text = text[: max_chars_per_example - 1] + "…"
+        return text + "\n"
 
     # -- persistence -------------------------------------------------
     def to_json(self):

@@ -177,6 +177,64 @@ class PatchMemory:
             patch.get("patch_id"), task.get("id"), helped=bool(helped), **fields
         )
 
+    # -- reuse-without-calls fast path (matched-rerun experiment) ---
+    # Additive: existing retrieve/format_block/record_reuse behavior is
+    # unchanged. On a high-confidence hit the caller reuses the recorded
+    # output with ZERO model calls and records the hit separately from
+    # assisted (model-call) checks.
+    def reuse_history(self):
+        """Per-patch helped/hurt counts from the store's reuse log.
+
+        Returns ``{patch_id: {"helped": n, "hurt": m}}``. Callers
+        snapshot this BEFORE the run (frozen confidence signal) so rows
+        recorded during the run do not move later decisions.
+        """
+        history = {}
+        for row in self.get_reuses():
+            if not isinstance(row, dict):
+                continue
+            patch_id = row.get("patch_id")
+            if not patch_id:
+                continue
+            slot = history.setdefault(patch_id, {"helped": 0, "hurt": 0})
+            if bool(row.get("helped", row.get("success", False))):
+                slot["helped"] += 1
+            else:
+                slot["hurt"] += 1
+        return history
+
+    def find_fast_path(self, task, history=None):
+        """High-confidence patch for zero-call reuse, or None.
+
+        Hit rule: same task family, exact category-tag match, at least
+        one helped reuse on record, and zero hurt reuses. Adversarial
+        tasks are NEVER fast-pathed (always returns None). ``history``
+        is a :meth:`reuse_history` snapshot; when omitted it is built
+        from the live store.
+        """
+        if (task.get("split") or "") == "adversarial":
+            return None
+        if history is None:
+            history = self.reuse_history()
+        for patch in self.retrieve(task, limit=2):
+            if patch.get("task_family") != "A":
+                continue
+            category = task.get("category", "")
+            if category and category not in (patch.get("tags") or []):
+                continue
+            slot = history.get(patch.get("patch_id"), {"helped": 0, "hurt": 0})
+            if slot["helped"] >= 1 and slot["hurt"] == 0:
+                return patch
+        return None
+
+    def fast_path_output(self, patch):
+        """Recorded output text for a fast-path patch (zero-call reuse)."""
+        candidate = patch.get("candidate", {}) if isinstance(patch, dict) else {}
+        if not isinstance(candidate, dict):
+            return candidate if isinstance(candidate, str) else ""
+        output = candidate.get("output", "")
+        return output if isinstance(output, str) else str(output)
+
     # -- library metrics ----------------------------------------------
     def capability_count(self):
         """Number of live (unexpired) patches in the library."""
