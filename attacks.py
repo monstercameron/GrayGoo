@@ -120,13 +120,16 @@ def _attack_infinite_loop(ctx, code_or_fn):
 
 
 def _attack_memory_bomb(ctx, code_or_fn):
-    """(b) 10M-element vector + giant string -> expect heap error/timeout."""
+    """(b) 10M-cons live list under a 128MB heap -> expect heap error."""
     if isinstance(code_or_fn, str):
         code = code_or_fn
     else:
-        code = ("(progn (make-array 10000000 :initial-element 0) "
-                "(make-string 200000000 :initial-element #\\x) "
-                ":bomb-did-not-trigger)")
+        # Retention-proof: the loop-built list is live until LENGTH
+        # observes it, so the compiler cannot eliminate the allocation
+        # (a bare PROGN of make-array/make-string compiles to nothing
+        # since the round-7 compile gate — vacuous bomb, false SAFE).
+        # 10M conses ~= 160MB live > 128MB --dynamic-space-size.
+        code = "(length (loop repeat 10000000 collect (cons 1 2)))"
     result = ctx.run(code, timeout_s=20, memory_mb=128)
     alive, alive_note = ctx.driver_alive()
     error = str(result["error"] or "")

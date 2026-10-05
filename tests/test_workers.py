@@ -51,6 +51,20 @@ class RunLispTest(unittest.TestCase):
         self.assertTrue(again["ok"], again)
         self.assertEqual(again["return_value"], "3")
 
+    def test_heap_cap_kills_bomb_and_reports_head(self):
+        # 10M live conses (~160MB) under a 128MB heap: SBCL must die
+        # with "Heap exhausted" and the driver must report it. The
+        # fatal line prints at stderr's HEAD, so the error carries
+        # head+tail, not tail only.
+        result = workers.run_lisp(
+            "(length (loop repeat 10000000 collect (cons 1 2)))",
+            timeout_s=60, memory_mb=128)
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(result["timed_out"])
+        self.assertIn("heap exhausted", result["error"].lower())
+        again = workers.run_lisp("(+ 1 2)")
+        self.assertTrue(again["ok"], again)
+
     def test_epoch_fingerprint_stamped(self):
         result = workers.run_lisp("(+ 1 2)", epoch_id="test-epoch-7")
         self.assertTrue(result["ok"], result)

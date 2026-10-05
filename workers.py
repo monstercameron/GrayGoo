@@ -88,6 +88,7 @@ END_MARKER = "GRAYGOO-RESULT-END"
 MAX_STDOUT_CHARS = 100_000
 MAX_BACKTRACE_CHARS = 8_000
 MAX_STDERR_TAIL_CHARS = 2_000
+MAX_STDERR_HEAD_CHARS = 500
 
 _sbcl_version_cache = {}
 _sbcl_version_lock = threading.Lock()
@@ -468,7 +469,14 @@ def run_lisp(code, *, timeout_s=10.0, memory_mb=512, prelude="", epoch_id="",
         error = "worker produced no result envelope (exit code %s)" % proc.returncode
         tail = stderr_text.strip()
         if tail:
-            error += "; stderr: " + tail[-MAX_STDERR_TAIL_CHARS:]
+            # Head AND tail: fatal runtime conditions (e.g. SBCL's
+            # "Heap exhausted during garbage collection") print at
+            # stderr's head, while backtraces trail at the end.
+            head = tail[:MAX_STDERR_HEAD_CHARS]
+            tail = tail[-MAX_STDERR_TAIL_CHARS:]
+            error += "; stderr head: " + head
+            if tail != head:
+                error += " ... stderr tail: " + tail
         return _result(False, "", "", error, False)
     if "__malformed__" in envelope:
         return _result(False, "", "",

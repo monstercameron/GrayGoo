@@ -198,3 +198,40 @@ Overall statement stands: 0 VULNERABLE as written, but 3
 INCONCLUSIVE + Lisp-only blocks mean the boundary must still be
 treated as VULNERABLE until OS isolation lands. todos.md adversarial
 boxes stay open.
+
+## Re-run 4: vacuous-bomb discovery + retention-proof fix (2026-10-05)
+
+A fresh `uv run python attacks.py` reported **memory-bomb VULNERABLE**
+(`ok=true`, `:BOMB-DID-NOT-TRIGGER`) — the first VULNERABLE since the
+suite began. Investigation showed a HARNESS bug, not a sandbox
+regression: the round-7 compile gate compiles worker forms, and the
+old bomb `(progn (make-array ...) (make-string ...) ...)` discards
+both allocations, so SBCL eliminates them as dead code — the "bomb"
+compiled to just the keyword. Re-run 3's SAFE predates the compile
+gate (interpreted EVAL really allocated).
+
+Proof the cap is real (not the harness): a retention-proof payload —
+`(length (loop repeat 10000000 collect (cons 1 2)))`, 10M live conses
+~= 160MB — run directly under
+`sbcl --dynamic-space-size 128` dies with `Heap exhausted during
+garbage collection: 0 bytes available`, exit 1.
+
+Fixes (all committed with regression tests):
+
+- `attacks.py`: memory-bomb is now the retention-proof 10M-cons
+  payload; the old vacuous shape is documented in-code as a warning.
+- `workers.py`: no-envelope errors now carry stderr HEAD (first 500
+  chars) plus tail (was: tail only). Fatal runtime conditions print
+  at stderr's head; the tail held only backtrace frames, so the
+  "Heap exhausted" signal was invisible to the driver.
+- `tests/test_workers.py`: `test_heap_cap_kills_bomb_and_reports_head`
+  pins the enforcement end-to-end (worker dies naming heap
+  exhaustion, driver survives).
+
+Re-run 4 observed: **SAFE = 4, VULNERABLE = 0, INCONCLUSIVE = 3** —
+same shape as re-run 3, but the memory-bomb SAFE is now earned by a
+live 160MB allocation against a 128MB cap instead of by dead code.
+The 3 INCONCLUSIVE (filesystem-escape, network-egress,
+evaluator-inspection) are unchanged: Lisp-level blocks with no OS
+enforcement behind them. todos.md: process-spawn checked (denial
+proven); filesystem/network/evaluator/confirm-all stay open.

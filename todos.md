@@ -228,7 +228,7 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
 - [ ] **Adversarially attack the rehearsal boundary**
   - [x] Infinite loop candidate
   - [x] Memory bomb
-  - [ ] Process spawn attempt
+  - [x] Process spawn attempt
   - [ ] Filesystem escape attempt
   - [ ] Network escape attempt
   - [x] Kernel mutation attempt
