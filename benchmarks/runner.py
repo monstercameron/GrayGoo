@@ -201,6 +201,8 @@ def strip_code_fences(text: str) -> tuple:
 
 def compare(expected: str, actual: str, mode: str) -> bool:
     if mode == "exact":
+        if not isinstance(actual, str) or not isinstance(expected, str):
+            return False
         return actual.strip("\n") == expected.strip("\n")
     if mode == "json":
         try:
@@ -249,6 +251,11 @@ def validate_tasks(tasks: list) -> list:
             for key in ("input", "expected", "compare"):
                 if key not in check:
                     problems.append(f"{task_id} check {j}: missing key {key!r}")
+            for key in ("input", "expected"):
+                if key in check and not isinstance(check[key], str):
+                    problems.append(
+                        f"{task_id} check {j}: {key!r} must be a string"
+                    )
             if check.get("compare") not in COMPARE_MODES:
                 problems.append(
                     f"{task_id} check {j}: bad compare {check.get('compare')!r}"
@@ -280,7 +287,7 @@ def run(
                 usage.extend(history[before:])
             compared = actual
             stripped = False
-            if strip_fences:
+            if strip_fences and isinstance(actual, str):
                 compared, stripped = strip_code_fences(actual)
             stripped_flags.append(stripped)
             ok = compare(check["expected"], compared, check["compare"])
@@ -416,6 +423,9 @@ def main(argv=None) -> int:
             print(f"{task['id']}  {task['split']}  {task.get('category', '?')}")
         print(f"{len(tasks)} tasks")
         return 0
+    if not tasks:
+        print("no tasks selected (check --split/--only filters)", file=sys.stderr)
+        return 2
     if args.adapter == "stub":
         if not args.recorded:
             print("--recorded FILE is required with --adapter stub", file=sys.stderr)
