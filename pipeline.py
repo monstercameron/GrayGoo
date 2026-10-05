@@ -19,9 +19,9 @@ Contracts for the injected callables:
   "elapsed_ms"}``.
 * ``risk_fn(parsed)`` takes the parsed-candidate dict from
   :func:`s_expr.parse_candidate` and returns a dict with at least
-  ``"level"`` (``"R0"``..``"R6"`` per plan.md section 7). ``None`` means
-  no classifier is wired in and yields the conservative marker
-  ``{"level": "unclassified"}``.
+  ``"level"`` (``"R0"``..``"R6"`` per plan.md section 7). ``None``, a
+  classifier exception, a malformed return, or an ``"unclassified"``
+  level all fail the run before any worker use (fail closed).
 """
 
 from __future__ import annotations
@@ -274,8 +274,9 @@ def check_performance(parsed, spec, worker_fn):
     are code snippets executed in workers (their ``elapsed_ms`` is
     measured), ``samples`` are pre-measured ``elapsed_ms`` numbers.
     Any sample exceeding ``budget_ms`` fails the stage. With no budget
-    the stage records its samples and passes. A spec that yields zero
-    samples fails instead of passing vacuously.
+    the stage records its samples (``measured: True``) and FAILS: a
+    measurement without a threshold is not verification. A spec that
+    yields zero samples fails instead of passing vacuously.
     """
     del parsed
     if not isinstance(spec, dict):
@@ -317,8 +318,13 @@ def check_performance(parsed, spec, worker_fn):
     if violations:
         return False, evidence
     if budget is None:
-        evidence["note"] = "no budget configured; recorded %d sample(s)" \
-            % len(samples)
+        # Issue 78: a measurement without an acceptance threshold is
+        # telemetry, not verification — it must not satisfy the gate.
+        evidence["measured"] = True
+        evidence["error"] = (
+            "performance measured %d sample(s) without budget_ms: "
+            "measurement is not verification" % len(samples))
+        return False, evidence
     return True, evidence
 
 
@@ -415,11 +421,17 @@ def run_candidate(candidate_text, *, tests, worker_fn, risk_fn=None):
     evidence["parse"] = {"target": parsed.get("target"),
                          "parent": parsed.get("parent")}
 
-    # -- Stage (b): risk via injected risk_fn.
+    # -- Stage (b): risk via injected risk_fn. Fail closed: no
+    # -- classifier (or an unclassified verdict) must never execute.
     if risk_fn is None:
         risk = {"level": "unclassified",
-                "note": "no risk_fn injected; conservative marker"}
-        _record("risk", _OK, "unclassified (no classifier wired in)")
+                "note": "no risk_fn injected; refusing to execute"}
+        evidence["risk"] = risk
+        _fail("risk", "no risk classifier wired in: unclassified "
+              "candidates must not execute")
+        _skip_rest(list(STAGE_ORDER),
+                   "short-circuited: no risk classification")
+        return _finish(False, "risk", failures[-1]["reason"])
     else:
         try:
             risk = risk_fn(parsed)
@@ -441,6 +453,12 @@ def run_candidate(candidate_text, *, tests, worker_fn, risk_fn=None):
                        "short-circuited after risk failure")
             return _finish(False, "risk", failures[-1]["reason"])
     evidence["risk"] = risk
+    if risk.get("level") == "unclassified":
+        _fail("risk", "risk classification unclassified: refusing "
+              "to execute without a risk level")
+        _skip_rest(list(STAGE_ORDER),
+                   "short-circuited: unclassified risk")
+        return _finish(False, "risk", failures[-1]["reason"])
     if _risk_blocks(risk):
         _fail("risk", "risk level %s blocks promotion (plan.md R6: "
               "trusted kernel/evaluator is not self-modifiable)"
@@ -448,9 +466,7 @@ def run_candidate(candidate_text, *, tests, worker_fn, risk_fn=None):
         _skip_rest(list(STAGE_ORDER),
                    "short-circuited: risk classification blocks promotion")
         return _finish(False, "risk", failures[-1]["reason"])
-    if risk_fn is not None:
-        # The None path already recorded its marker above.
-        _record("risk", _OK, "level %s" % (risk.get("level"),))
+    _record("risk", _OK, "level %s" % (risk.get("level"),))
 
     # -- Stages (c)+(d): checks, cheap first, early stop on failure.
     if tests is None:
@@ -489,7 +505,9 @@ def run_candidate(candidate_text, *, tests, worker_fn, risk_fn=None):
         return _finish(False, name, reason)
 
     if not ran_any:
-        return _finish(True, None, "candidate parsed; no checks requested")
+        _fail("tests", "no verification stages requested: zero checks "
+              "executed is not a pass")
+        return _finish(False, "tests", failures[-1]["reason"])
     return _finish(True, None, "all requested stages passed")
 
 

@@ -169,12 +169,16 @@ class RunCandidateTest(unittest.TestCase):
         self.assertFalse(failing["ok"])
         self.assertTrue(passing["ok"])
 
-    def test_risk_none_uses_unclassified_marker_and_continues(self):
+    def test_risk_none_fails_closed_without_worker_use(self):
+        # Issue 71: no classifier must fail closed, never execute.
+        worker = CountingWorker(lambda code: ok_envelope())
         result = pipeline.run_candidate(
             GOOD_CANDIDATE, tests={"direct": ["(t)"]},
-            worker_fn=CountingWorker(lambda code: ok_envelope()))
-        self.assertTrue(result["ok"])
+            worker_fn=worker)
+        self.assertFalse(result["ok"])
         self.assertEqual(result["risk"]["level"], "unclassified")
+        self.assertEqual(result["verdict"]["failed_stage"], "risk")
+        self.assertEqual(worker.calls, [])
 
     def test_r6_risk_blocks_before_any_worker_use(self):
         worker = CountingWorker(lambda code: ok_envelope())
@@ -197,6 +201,17 @@ class RunCandidateTest(unittest.TestCase):
         self.assertEqual(result["verdict"]["failed_stage"], "performance")
         self.assertEqual(result["evidence"]["performance"]["violations"],
                          [25])
+
+    def test_performance_without_budget_is_measured_not_passed(self):
+        # Issue 78: measurement without a threshold is not verification.
+        result = pipeline.run_candidate(
+            GOOD_CANDIDATE,
+            tests={"performance": {"samples": [4, 5]}},
+            worker_fn=CountingWorker(lambda code: ok_envelope()),
+            risk_fn=risk_r0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["verdict"]["failed_stage"], "performance")
+        self.assertTrue(result["evidence"]["performance"]["measured"])
 
 
 if __name__ == "__main__":

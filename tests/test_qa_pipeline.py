@@ -100,6 +100,45 @@ class PipelineStageSeamTest(unittest.TestCase):
         self.assertIn("worker_fn raised",
                       result["evidence"]["direct"]["items"][0]["error"])
 
+    def test_missing_classifier_fails_closed_without_worker_use(self):
+        """Issue 71: risk_fn=None must fail before any execution."""
+        calls = []
+
+        def spy(code):
+            calls.append(code)
+            return _ok_worker(code)
+
+        result = pipeline.run_candidate(
+            CANDIDATE, tests={"direct": ["(+ 1 2)"]},
+            worker_fn=spy, risk_fn=None)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["verdict"]["failed_stage"], "risk")
+        self.assertEqual(calls, [])
+
+    def test_unclassified_level_fails_closed_without_worker_use(self):
+        """Issue 71: an 'unclassified' verdict must not execute."""
+        calls = []
+
+        def spy(code):
+            calls.append(code)
+            return _ok_worker(code)
+
+        result = pipeline.run_candidate(
+            CANDIDATE, tests={"direct": ["(+ 1 2)"]},
+            worker_fn=spy, risk_fn=lambda p: {"level": "unclassified"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["verdict"]["failed_stage"], "risk")
+        self.assertEqual(calls, [])
+
+    def test_zero_requested_stages_does_not_pass(self):
+        """Issue 72: {} / None tests must fail, never pass vacuously."""
+        for tests in ({}, None):
+            result = pipeline.run_candidate(
+                CANDIDATE, tests=tests,
+                worker_fn=_ok_worker, risk_fn=_r0)
+            self.assertFalse(result["ok"], tests)
+            self.assertEqual(result["verdict"]["failed_stage"], "tests")
+
     def test_live_worker_envelope_matches_pipeline_contract(self):
         """Guard: real run_lisp envelope feeds _run_worker (1 SBCL run)."""
         import workers

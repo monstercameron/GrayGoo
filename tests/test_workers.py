@@ -106,5 +106,39 @@ class WorkerPoolTest(unittest.TestCase):
             pool.run("(+ 1 2)")
 
 
+class SandboxPreludeTest(unittest.TestCase):
+    def test_missing_sandbox_module_fails_closed(self):
+        """Issue 75: sandbox=True with no module must raise, not degrade."""
+        real, workers._sandbox = workers._sandbox, None
+        self.addCleanup(setattr, workers, "_sandbox", real)
+        with self.assertRaises(RuntimeError):
+            workers._sandbox_prelude(True, None)
+        self.assertEqual(workers._sandbox_prelude(False, None), "")
+
+
+@unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
+class ReadEvalInterleaveTest(unittest.TestCase):
+    def test_evaluated_form_cannot_enable_reader_eval(self):
+        """Issue 1 (reopen): all forms read before any is evaluated."""
+        result = workers.run_lisp("(setq *read-eval* t)\n#.(+ 40 2)")
+        self.assertFalse(result["ok"], result)
+        self.assertNotEqual(result["return_value"], "42")
+
+
+class SanitizedEnvTest(unittest.TestCase):
+    def test_allowlist_only(self):
+        """Issue 46: worker env carries the allowlist, never secrets."""
+        env = workers._sanitized_env()
+        self.assertTrue(set(env) <= set(workers._WORKER_ENV_ALLOWLIST))
+        for secret in ("CEREBRAS_API_KEY", "CEREBRAS",
+                       "GRAYGOO_EVAL_CORPUS"):
+            self.assertNotIn(secret, env)
+
+    def test_viability_keys_preserved(self):
+        if "SYSTEMROOT" in os.environ:
+            self.assertEqual(workers._sanitized_env()["SYSTEMROOT"],
+                             os.environ["SYSTEMROOT"])
+
+
 if __name__ == "__main__":
     unittest.main()
