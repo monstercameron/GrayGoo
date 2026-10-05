@@ -135,11 +135,19 @@ def _payload_atom(atom, hits):
                                       "rehearsed)" % atom))
 
 
-def _payload_walk(node, hits):
+#: Operators that can execute quoted/data subtrees as code
+#: (conservative executable subset of risk.py's ``_R4_DYNAMIC_HEADS``).
+_EVAL_LIKE_HEADS = frozenset({"eval", "apply", "funcall", "compile",
+                              "load"})
+
+
+def _payload_walk(node, hits, _under_eval=False):
     """Walk parsed candidate nodes for hard-deny payload signals.
 
-    String contents and quoted subtrees are data, never scanned (same
-    hygiene as risk.py).
+    String contents are data, never scanned. Quoted subtrees are data
+    too — EXCEPT under eval-like operators, where quoted code may
+    execute (issues.md #74: ``(eval '(sb-ext:run-program ...))`` must
+    not slip past the hard process deny); those subtrees are scanned.
     """
     if isinstance(node, s_expr.SString):
         return
@@ -153,11 +161,13 @@ def _payload_walk(node, hits):
     if not node:
         return
     head = node[0]
-    if isinstance(head, str) and not isinstance(head, s_expr.SString) \
-            and head.lower() == "quote":
+    head_name = head.lower() if isinstance(head, str) \
+        and not isinstance(head, s_expr.SString) else ""
+    if head_name == "quote" and not _under_eval:
         return
+    under = _under_eval or head_name in _EVAL_LIKE_HEADS
     for element in node:
-        _payload_walk(element, hits)
+        _payload_walk(element, hits, under)
 
 
 def refuse_to_rehearse(candidate_text, risk, approved=False):

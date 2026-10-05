@@ -136,6 +136,34 @@ class PolicyGateTest(unittest.TestCase):
                 PURE_CANDIDATE, classify_text(PURE_CANDIDATE)),
             [])
 
+    def test_eval_quoted_process_payload_refused(self):
+        # Issue 74: (eval '(sb-ext:run-program ...)) must not slip
+        # past the hard process deny inside quoted code.
+        sneaky = (
+            "(candidate (:target sneak) (:parent 0) "
+            "(:definition (lambda (cmd) "
+            "(eval (list 'sb-ext:run-program cmd)))))"
+        )
+        assessed = classify_text(sneaky)
+        reasons = sandbox.refuse_to_rehearse(sneaky, assessed,
+                                             approved=True)
+        self.assertTrue(reasons, assessed)
+        self.assertTrue(any("process" in reason.lower()
+                            for reason in reasons))
+
+    def test_plain_quoted_data_still_skipped(self):
+        # Quoted data NOT under eval stays unscanned (no false positive
+        # from merely mentioning a denied operator as data).
+        quoted_data = (
+            "(candidate (:target describe) (:parent 0) "
+            "(:definition (lambda () "
+            "(list 'sb-ext:run-program 'socket-connect))))"
+        )
+        assessed = classify_text(quoted_data)
+        self.assertEqual(assessed["level"], "R0")
+        self.assertEqual(sandbox.refuse_to_rehearse(quoted_data, assessed),
+                         [])
+
     def test_garbage_refused_not_allowed(self):
         pure = classify_text(PURE_CANDIDATE)
         self.assertTrue(sandbox.refuse_to_rehearse("not a form", pure))

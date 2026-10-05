@@ -118,16 +118,17 @@ FIXED this round (fail-closed, with regression tests):
   now uses `_sanitized_env()` (allowlist: SYSTEMROOT/WINDIR/PATH/
   PATHEXT/TEMP/TMP). `workers.py`, tests added; full worker suite
   proves SBCL still starts.
+- #74 (HIGH): `(eval '(sb-ext:run-program ...))` slipped the hard
+  process deny inside skipped quoted code. `_payload_walk` now scans
+  quoted subtrees under eval-like operators (`eval/apply/funcall/
+  compile/load`); plain quoted data stays unscanned (no false
+  positive). `sandbox.py`, 2 tests added (refusal + no-false-positive).
 
 ACCEPTED, documented, not yet fixed:
 
 - #73 (HIGH) parser differential (Python scan vs SBCL read): real;
   fix is the canonical-emitter architecture the issue proposes —
   project-scale, tracked for the hardening milestone.
-- #74 (HIGH) `eval`-quoted hard-deny bypass: premise verified
-  (`_payload_walk` skips quoted subtrees); fix direction (eval-family
-  unrehearsable or stronger boundary) is a policy change needing a
-  deliberate decision — recorded, not unilaterally changed.
 - #76 (HIGH) caller prelude runs post-lockdown: order verified;
   reorder is risky (trusted setup may need pre-lockdown authority),
   so the trust boundary is now explicit in the `run_lisp` docstring
