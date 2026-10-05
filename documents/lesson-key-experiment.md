@@ -132,3 +132,34 @@ contexts only (max ~1088 injected chars/task):
   35-task × 4-condition run (~280 calls), repeated runs for variance,
   and the repair-loops metric (0 by protocol here — repair is disabled,
   so loop-count comparisons need a repair-enabled protocol).
+
+## Pilot 2 (2026-10-05): targeted refinement re-run
+
+Diagnosis of pilot 1: condition C retrieved topically irrelevant
+lessons for A-TRN-08 (csv/repro/rollback process lessons — no
+logs-tagged lesson existed in the 13-seed registry), while B's
+logs-category excerpts (A-EXP-13/17) fixed it. Fix: distilled
+`log-field-structure-first` from exactly those winning excerpts
+(match structural fields, don't word-split or substring-match) and
+added it as the 14th seed (`lessons.py`).
+
+Result (64 live calls, ~$0.02; pilot-1 table preserved in
+`artifacts/lesson-key/summary-pilot1.json`):
+
+| Condition | Pilot 1 | Pilot 2 | Fails |
+|---|---|---|---|
+| A no-memory | 5/8 | 5/8 | TRN-02, 06, 08 |
+| B raw transcripts | 6/8 | 6/8 | TRN-02, 06 |
+| C distilled lessons | 5/8 | **6/8** | TRN-02, 06 |
+| D lessons + patches | 6/8 | 6/8 | TRN-02, 06 |
+
+The refinement validated: C now injects the new lesson first for the
+logs tasks and fixes TRN-08. But strict **D > C > A is still NOT
+confirmed** (B = C = D = 6 > A = 5): distilled now matches raw
+instead of losing to it, and D's patch memory shows zero marginal
+gain (retrieval works mechanically — 2 category-matched patches per
+task — but flips nothing). TRN-02/06 fail under ALL conditions
+(floor tasks; no memory variant helps). todos.md "Confirm D > C >
+A" stays open: n=8 cannot resolve 1-task differences, and D needs a
+task set where executable patches beat prose. Next step per honest
+notes stands: full 35-task × 4-condition run with variance.

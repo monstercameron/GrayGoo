@@ -302,7 +302,7 @@ class LessonStore:
 
 
 def seed_10_20():
-    """Return 13 manually seeded Family A lessons (todos.md L2).
+    """Return 14 manually seeded Family A lessons (todos.md L2).
 
     Covers all five lesson classes with narrow applicability bounds
     (memory.md section 7) and mixed fact/heuristic kinds (section 20).
@@ -534,6 +534,26 @@ def seed_10_20():
             created_generation=5, last_validated=5, status="active",
             tags=["scope", "refactor", "prompt"],
             failure_classes=["over-refactor", "test-overfit"],
+        ),
+        make_lesson(
+            "log-field-structure-first", "repair",
+            "When parsing log lines, match structural fields — quoted "
+            "strings, bracket groups, exact field positions — instead of "
+            "splitting on whitespace or matching substrings.",
+            when="parsing log or line-oriented inputs where fields may "
+                 "contain spaces, quotes, or variable-width text",
+            when_not="clean single-token-per-field records with no "
+                     "quoting or embedded spaces",
+            evidence=[{"task_id": "A-EXP-13",
+                       "note": "word-split broke the quoted request "
+                               "field; structural regex passed"},
+                      {"task_id": "A-EXP-17",
+                       "note": "substring match caught message text; "
+                               "exact field match passed"}],
+            confidence=0.8,
+            created_generation=6, last_validated=6, status="active",
+            tags=["logs", "parsing", "fields", "family-a"],
+            failure_classes=["wrong-output", "edge-case"],
         ),
     ]
 
