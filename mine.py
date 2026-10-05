@@ -5,10 +5,9 @@ todos.md "Mine lessons automatically (learning L3)" items.
 
 The mining loop clusters recurring failures (and successful repairs)
 from ledger events, builds evidenced candidate lessons, and
-deduplicates near-identical candidates. Candidate statements are
-deterministic templates; a future step may ask the model to rephrase
-them (the ``statement`` override on :func:`propose_lesson_candidate`
-is the hook).
+deduplicates near-identical candidates. Candidate statements default
+to deterministic templates; :func:`phrase_with_model` rephrases them
+through an injected model callable instead.
 
 Stdlib only.
 """
@@ -176,6 +175,43 @@ def propose_lesson_candidate(cluster, statement=None,
         "confidence": min(0.85, 0.5 + 0.05 * (count or 0)),
         "status": "candidate",
     }
+
+
+def _lesson_prompt(cluster):
+    """Build the model phrasing prompt for one cluster."""
+    failure_class = cluster.get("failure_class") or "unknown"
+    family = cluster.get("family") or "unknown"
+    count = cluster.get("count", len(cluster.get("events", []))) or 0
+    task_ids = list(cluster.get("task_ids", []))
+    repairs = cluster.get("repairs") or cluster.get("repair_kinds") or []
+    return (
+        "Summarize this recurring development failure as ONE concise "
+        "actionable lesson (single sentence, no preamble):\n"
+        "failure class: %s\ntask family: %s\noccurrences: %d\n"
+        "example tasks: %s\nobserved repairs: %s"
+        % (failure_class, family, count,
+           ", ".join(task_ids[:5]) or "none",
+           ", ".join(repairs[:5]) if repairs else "none"))
+
+
+def phrase_with_model(cluster, generate_fn, lesson_class="failure"):
+    """Build a candidate lesson with a model-phrased statement.
+
+    *generate_fn* is an injected ``prompt -> text`` callable (no direct
+    model import: tests pass fakes, production passes the Cerebras
+    client). Empty or non-string model output raises ValueError;
+    evidence comes from the cluster exactly as in
+    :func:`propose_lesson_candidate`.
+    """
+    if not callable(generate_fn):
+        raise TypeError("generate_fn must be callable, got %s"
+                        % type(generate_fn).__name__)
+    text = generate_fn(_lesson_prompt(cluster))
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("model produced no usable lesson statement")
+    return propose_lesson_candidate(
+        cluster, statement=" ".join(text.split()),
+        lesson_class=lesson_class)
 
 
 def _tokens(text):

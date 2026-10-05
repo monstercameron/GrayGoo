@@ -192,5 +192,47 @@ class ReplayDeltasTest(unittest.TestCase):
             replay.ab_replay("not-a-fn", [{"id": 1}], lesson_text="L")
 
 
+def _fake_cluster():
+    return {"failure_class": "edge-case", "family": "csv",
+            "count": 4, "task_ids": ["A-1", "A-2"],
+            "event_ids": ["e1", "e2", "e3", "e4"],
+            "repairs": ["escape fields"]}
+
+
+class ModelPhrasingTest(unittest.TestCase):
+    def test_prompt_carries_cluster_facts(self):
+        seen = {}
+
+        def fake(prompt):
+            seen["prompt"] = prompt
+            return "Escape CSV fields before splitting rows."
+
+        candidate = mine.phrase_with_model(_fake_cluster(), fake)
+        self.assertIn("edge-case", seen["prompt"])
+        self.assertIn("csv", seen["prompt"])
+        self.assertIn("4", seen["prompt"])
+        self.assertEqual(candidate["statement"],
+                         "Escape CSV fields before splitting rows.")
+        self.assertEqual(candidate["evidence"]["task_ids"], ["A-1", "A-2"])
+        self.assertEqual(candidate["evidence"]["count"], 4)
+
+    def test_empty_model_output_rejected(self):
+        with self.assertRaises(ValueError):
+            mine.phrase_with_model(_fake_cluster(),
+                                   lambda prompt: "  ")
+        with self.assertRaises(ValueError):
+            mine.phrase_with_model(_fake_cluster(),
+                                   lambda prompt: None)
+
+    def test_non_callable_rejected(self):
+        with self.assertRaises(TypeError):
+            mine.phrase_with_model(_fake_cluster(), "not-a-fn")
+
+    def test_whitespace_normalized(self):
+        candidate = mine.phrase_with_model(
+            _fake_cluster(), lambda prompt: "  Check\n  edges.  ")
+        self.assertEqual(candidate["statement"], "Check edges.")
+
+
 if __name__ == "__main__":
     unittest.main()

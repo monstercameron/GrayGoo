@@ -51,14 +51,22 @@ First end-to-end target (§92): novel goal → no capability → Qwen candidate
 temporary patch → later related task reuses it → transfer succeeds → patch
 becomes skill → equivalent tasks run with zero model calls.
 
-## Current status
+## Current status (2026-10-05)
 
-- Done: Cerebras API access verified live via Python + OpenAI SDK
-  (`cerebras_client.py`, model `qwen-3.8-27b`, `.venv` w/ `openai`,
-  `python-dotenv`). Covers latency + token accounting.
-- Next candidates: structured S-expression output mode + malformed-output
-  rejection (rest of the Cerebras todos), then benchmark Family A, since
-  baselines unblock all learning measurement.
+Core machine built and tested: SBCL runtime + ASDF system loads (25
+`evo.*` packages); Cerebras client with structured S-expression output,
+cost/request tracking; Family A (35 tasks) with baselines A–D recorded
+(`documents/baseline-a.md`, `documents/baselines-bcd.md`); rehearsal
+workers with pool, fingerprints, timeouts; mutation pipeline with risk
+gates; promotion authority with mandatory hidden-test verdict;
+patch/skill memory with transfer promotion; learning layers L1–L6;
+adversarial report with sandbox hardening in progress. Full Python
+suite green (500+ tests), SBCL probes under `tests/lisp/`.
+Spend to date is well under $1 of the $50 budget.
+
+Next: close the remaining hardening/QA/learning-measurement items
+(see `todos.md` open boxes), then evaluate the core-experiment gate
+for post-v1 work.
 
 ## Post-v1 (gated on core experiment succeeding)
 

@@ -55,6 +55,7 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Add metamorphic/equivalent-input tests
   - [x] Add adversarial edge cases
   - [x] Make evaluator verdict mandatory for promotion
+  - [ ] Execute candidates on fresh inputs in the promotion path (service-side fresh eval exists; promotion must run candidates on fresh cases and submit outputs)
 
 - [x] **Implement green-stop**
   - [x] Define task success contracts
@@ -195,19 +196,19 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Decay confidence on runtime/model upgrades; revalidate or downgrade
   - [x] Track counterexamples per lesson; refine overgeneralized lessons
 
-- [ ] **Consolidate lessons into principles and playbooks (learning L5)**
+- [x] **Consolidate lessons into principles and playbooks (learning L5)**
   - [x] Merge overlapping lessons
   - [x] Generalize survivors into principles; retire narrow duplicates
   - [x] Compile high-confidence lessons into task-family playbooks
-  - [ ] Promote stable playbooks to executable Lisp workflows
+  - [x] Promote stable playbooks to executable Lisp workflows
 
-- [ ] **Close the adaptive-development loop (learning L6)**
+- [x] **Close the adaptive-development loop (learning L6)**
   - [x] Learn context composition (which elements correlate with success)
   - [x] Learn test ordering (fastest/highest-yield first)
   - [x] Learn repair routing (deterministic fix vs model repair vs escalate)
-  - [ ] Learn risk classification from predicted-vs-actual outcomes
-  - [ ] Learn capability applicability boundaries from retrieval outcomes
-  - [ ] Trigger lesson postmortem on every production rollback
+  - [x] Learn risk classification from predicted-vs-actual outcomes
+  - [x] Learn capability applicability boundaries from retrieval outcomes
+  - [x] Trigger lesson postmortem on every production rollback
 
 - [ ] **Run the lesson key experiment**
   - [x] Condition A: no lesson memory
@@ -268,11 +269,11 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] QA-02: runner exits nonzero when filter selects zero tasks
   - [ ] QA-03: pipeline fails on unknown stage names
   - [ ] QA-04: normalize worker return_value comparison in pipeline checks
-  - [ ] QA-05: collision-proof promotion version filenames
-  - [ ] QA-06: promotion ledger outage returns reject dict (fail closed)
+  - [x] QA-05: collision-proof promotion version filenames
+  - [x] QA-06: promotion ledger outage returns reject dict (fail closed)
   - [x] QA-07: risk scan value-position atoms, not just head position
   - [x] QA-08: flag mutation targets naming core dynamic forms
-  - [ ] QA-09: reject promotion on corrupt versions/epochs state
+  - [x] QA-09: reject promotion on corrupt versions/epochs state
   - [ ] QA-10: fail (or skip explicitly) stages running zero checks
   - [x] QA-11: depth guard in risk walker
   - [x] QA-12: type-check check values in runner validate_tasks
