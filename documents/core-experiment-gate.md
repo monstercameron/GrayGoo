@@ -17,15 +17,18 @@ Baseline A/BCD re-proofs.
 | # | Criterion | Old | New | Evidence |
 |---|---|---|---|---|
 | 1 | Held-out success stable/up | PASS (fragile) | PASS (replicated 1-task edge) | B/D 6/8 vs A 5/8; TRN-08 flip replicates 2/2 B-runs and survives the 256-token A re-check (`documents/b-rerun.md`). Still one task — needs more transfer tasks to fully settle. |
-| 2 | Calls/task decreases | FAIL | FAIL (unchanged) | Flat 2.057 by protocol design; no protocol change since. |
-| 3 | Tokens/task decreases | FAIL | FAIL (diet tried) | Diet-B (top-1/120ch): 342.7, still +29% over bar, and regressed ADV-05 (`documents/b-diet.md`). Starving retrieval cannot reach 264.7; needs input-matched fast-path. |
-| 4 | Reuse increases | UNMEASURABLE | UNMEASURABLE (darker) | Still no time series — and matched-rerun adds negative evidence: fast-path reuse 0/4 on input-matched cases (`documents/matched-rerun.md`). Reuse exists; reuse *growth* is unproven and the reuse that exists doesn't transfer. |
+| 2 | Calls/task decreases | FAIL | PASS (repeated streams) / FAIL (held-out) | Stream: 2.000 → 1.000 → 0.722, success held, replicated (`documents/repeat-stream.md`). Held-out: still flat — fast-path fires 0/32 on novel inputs. |
+| 3 | Tokens/task decreases | FAIL | PASS (repeated streams) / FAIL (held-out) | Stream: 273.5 → 120.7 → 88.5 vs 264.7 bar (`documents/repeat-stream.md`). Held-out: memory still strictly costs tokens (diet-B 342.7 + ADV-05 regression). |
+| 4 | Reuse increases | UNMEASURABLE | PASS (repeated streams) | Hit rate 0% → 50% → 64% across rounds, 35/35 helped (`documents/repeat-stream.md`). Held-out reuse growth still unproven (0/32 fires). |
 | 5 | Negative transfer below threshold | PASS | PASS (unchanged) | 0 A-relative regressions; re-proof confirms fail sets bit-stable. |
-| 6 | Sublinear growth | UNMEASURABLE | UNMEASURABLE (unchanged) | One growth interval; store-everything. No consolidation-on experiment run. |
+| 6 | Sublinear growth | UNMEASURABLE | PASS (dedup policy) | Lib 12 → 23 → 34 over cumulative 12 → 36 → 72 checks (concave; naive would be 69). Mechanism = dedup-by-check + reuse, not consolidation (`documents/repeat-stream.md`). |
 | 7 | Zero corruption | UNMEASURABLE | UNMEASURABLE (nearer) | Adversarial re-run 4: 4 SAFE / 0 VULN / 3 INCONCLUSIVE with a now-honest memory bomb — but v1 bar is 1000 adversarial executions and fs/net/evaluator remain INCONCLUSIVE (no OS enforcement). Mechanism evidence up, bar still far. |
 | 8 | Rollback works | UNMEASURABLE | **PASS (mechanism)** | `set_current_version` now proven: back-only, atomic, record-preserving, refusal modes, ledger event → `postmortem_trigger`, outage-audible (`tests/test_promotion.py`, 4 rollback tests). Caveat: tempfile drills, not production break-then-restore; production drills still future work. |
 
-Score: **3 PASS (1 fragile, 1 mechanism-only) / 2 FAIL / 3 UNMEASURABLE.**
+Score: **7 scoped-PASS / 1 UNMEASURABLE (#7)** — but #2/#3/#4/#6
+pass ONLY on repeated-input streams while failing (or moot) on
+held-out, so the gate (premised on held-out transfer) stays closed.
+See decision below.
 
 ## What changed since the assessment
 
@@ -42,11 +45,20 @@ Score: **3 PASS (1 fragile, 1 mechanism-only) / 2 FAIL / 3 UNMEASURABLE.**
 
 ## Gate decision
 
-The gate requires the learning criteria to move, and they have not:
-calls/task flat, tokens/task up, reuse growth unproven with fresh
-negative evidence, growth curve unknown. Mechanism work (rollback,
-sandbox hardening, TTVM, provenance, CI truth) all landed, but
-mechanism is not learning. **Stretch section stays closed.**
+Update after the repeat-stream experiment: the learning criteria HAVE
+moved — on repeated-input streams. Calls/task 2.0 → 0.72, tokens/task
+273 → 88, reuse 0% → 64%, growth concave, all replicated, zero
+regressions. That is genuine reuse learning with real mechanisms
+(input-gated fast-path, seed+outcome confidence, dedup-by-check).
+
+**Stretch section stays closed anyway.** The gate's premise is
+held-out TRANSFER — doing NEW tasks better — and there the score is
+unchanged: one replicated single-task edge (TRN-08), flat calls,
+memory strictly costs tokens, fast-path fires 0/32. Caching repeated
+work is not transfer. What would open it: a second transfer edge
+(more transfer tasks), or a reuse mechanism that fires on novel
+inputs without misfiring (the gated fast-path proves the safety
+half; the recall half on novel inputs is the open problem).
 
 Next experiments that could open it, cheapest first (all within the
 remaining ~$49 budget):
@@ -65,5 +77,7 @@ remaining ~$49 budget):
    back to 5/8, D flips TRN-08 with zero hits) — but fires 0/32 on
    novel inputs, so the fast-path route to #2/#3 is structurally
    closed on held-out tasks. Needs repeated-input streams instead.
-4. Multi-timepoint reuse/growth series with consolidation on —
-   measures #4/#6 instead of asserting them.
+4. ~~Multi-timepoint reuse/growth series~~ DONE
+   (`documents/repeat-stream.md`): reuse 0%→50%→64%, growth concave
+   — via dedup-by-check, not consolidation. Consolidation-on growth
+   remains unmeasured (open).

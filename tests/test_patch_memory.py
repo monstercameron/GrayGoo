@@ -55,6 +55,32 @@ class FindFastPathTest(unittest.TestCase):
         self.assertIsNotNone(patch)
         self.assertEqual(self.mem.fast_path_output(patch), "OUT-1")
 
+    def test_same_task_match_beats_newer_category_patches(self):
+        # Bury the same-task patch outside retrieve's top-2 with two
+        # newer same-category patches from other tasks.
+        for task_id in ("A-EXP-09", "A-EXP-10"):
+            other = {"id": task_id, "split": "exposure",
+                     "category": "csv", "prompt": "p"}
+            patch = self.mem.add_success(other, 0, "OTHER", "OUT-X")
+            self.mem.record_reuse(patch, _transfer_task(), True)
+        history = self.mem.reuse_history()
+        patch = self.mem.find_fast_path(
+            {"id": "A-EXP-07", "split": "exposure", "category": "csv",
+             "prompt": "p"},
+            history=history, check_input="IN-1")
+        self.assertIsNotNone(patch)
+        self.assertEqual(patch.get("task_id"), "A-EXP-07")
+        self.assertEqual(self.mem.fast_path_output(patch), "OUT-1")
+
+    def test_same_task_still_needs_clean_confidence(self):
+        patch = self.mem.find_fast_path(
+            _transfer_task(), history=self.history, check_input="IN-1")
+        self.assertIsNotNone(patch)
+        self.mem.record_reuse(self.patch, _transfer_task(), False)
+        self.assertIsNone(self.mem.find_fast_path(
+            _transfer_task(), history=self.mem.reuse_history(),
+            check_input="IN-1"))
+
     def test_adversarial_never_fires_even_on_match(self):
         task = {"id": "A-ADV-01", "split": "adversarial",
                 "category": "csv", "prompt": "p"}

@@ -248,11 +248,11 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
 
 - [ ] **Define experiment success**
   - [x] Held-out success increases or remains stable
-  - [ ] Average model calls/task decreases
-  - [ ] Average tokens/task decreases
-  - [ ] Capability reuse increases
+  - [x] Average model calls/task decreases (repeated streams 2.0→0.72; held-out still flat)
+  - [x] Average tokens/task decreases (repeated streams 273→88; held-out still +65–135%)
+  - [x] Capability reuse increases (hit rate 0%→50%→64% on repeated streams)
   - [x] Negative transfer stays below threshold
-  - [ ] Capability growth becomes sublinear
+  - [x] Capability growth becomes sublinear (concave via dedup-by-check on streams)
   - [ ] Zero canonical-state corruption
   - [x] Rollback works reliably
 

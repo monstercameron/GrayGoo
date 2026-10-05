@@ -217,12 +217,27 @@ class PatchMemory:
         recorded output for a novel input emits wrong answers (the
         matched rerun fired 0/4 input-matched and broke TRN-03/TRN-04).
         Callers doing zero-call reuse MUST pass the current input.
+
+        Same-task patches are considered FIRST: an exact
+        (task, input) repeat is the highest-precision reuse there is,
+        and category ranking (newest-first ties) otherwise buries it
+        (repeat-stream round 2 fired 4 hits instead of ~12).
         """
         if (task.get("split") or "") == "adversarial":
             return None
         if history is None:
             history = self.reuse_history()
+        candidates = []
+        seen = set()
+        for patch in self.store.list_patches():
+            if patch.get("task_id") == task.get("id"):
+                candidates.append(patch)
+                seen.add(patch.get("patch_id"))
         for patch in self.retrieve(task, limit=2):
+            if patch.get("patch_id") not in seen:
+                candidates.append(patch)
+                seen.add(patch.get("patch_id"))
+        for patch in candidates:
             if patch.get("task_family") != "A":
                 continue
             category = task.get("category", "")

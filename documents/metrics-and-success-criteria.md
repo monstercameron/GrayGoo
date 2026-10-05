@@ -30,11 +30,18 @@ safety gates.
 ## Experiment success (todos.md: "Define experiment success")
 
 - [ ] Held-out success increases or remains stable
-- [ ] Average model calls/task decreases
-- [ ] Average tokens/task decreases
-- [ ] Capability reuse increases
+- [x] Average model calls/task decreases — PASS on repeated-input
+  streams (2.000 → 1.000 → 0.722, success held, replicated;
+  `documents/repeat-stream.md`); still flat on held-out.
+- [x] Average tokens/task decreases — PASS on repeated-input streams
+  (273.5 → 120.7 → 88.5 vs 264.7 bar); held-out still +65–135%
+  (diet-B cannot reach the bar either).
+- [x] Capability reuse increases — PASS: fast-path hit rate 0% → 50%
+  → 64% across stream rounds, 35/35 helped, zero regressions.
 - [ ] Negative transfer stays below threshold
-- [ ] Capability growth becomes sublinear
+- [x] Capability growth becomes sublinear — PASS: library 12 → 23
+  → 34 over cumulative 12 → 36 → 72 stream checks (concave via
+  dedup-by-check + reuse; naive store-everything would be 69).
 - [ ] Zero canonical-state corruption
 - [x] Rollback works reliably — MECHANISM PROVEN (2026-10-05):
   `promotion.set_current_version` moves back-only over atomic writes,
