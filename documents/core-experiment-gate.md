@@ -16,7 +16,7 @@ Baseline A/BCD re-proofs.
 
 | # | Criterion | Old | New | Evidence |
 |---|---|---|---|---|
-| 1 | Held-out success stable/up | PASS (fragile) | PASS (fragile, unchanged) | B/D 6/8 vs A 5/8; sole flip still TRN-08 (truncation artifact, 256-token re-check still pending). Lesson-key pilot-2 (C 6/8) is a different memory axis, not a replication. |
+| 1 | Held-out success stable/up | PASS (fragile) | PASS (replicated 1-task edge) | B/D 6/8 vs A 5/8; TRN-08 flip replicates 2/2 B-runs and survives the 256-token A re-check (`documents/b-rerun.md`). Still one task — needs more transfer tasks to fully settle. |
 | 2 | Calls/task decreases | FAIL | FAIL (unchanged) | Flat 2.057 by protocol design; no protocol change since. |
 | 3 | Tokens/task decreases | FAIL | FAIL (unchanged) | +65–135% over A; no retrieval-diet experiment run since. |
 | 4 | Reuse increases | UNMEASURABLE | UNMEASURABLE (darker) | Still no time series — and matched-rerun adds negative evidence: fast-path reuse 0/4 on input-matched cases (`documents/matched-rerun.md`). Reuse exists; reuse *growth* is unproven and the reuse that exists doesn't transfer. |
@@ -49,10 +49,13 @@ sandbox hardening, TTVM, provenance, CI truth) all landed, but
 mechanism is not learning. **Stretch section stays closed.**
 
 Next experiments that could open it, cheapest first (all within the
-remaining ~$49 budget, none started):
+remaining ~$49 budget):
 
-1. TRN-08 256-token re-check (does the only +1 survive budget?) —
-   firms or topples criterion #1.
+1. ~~TRN-08 256-token re-check~~ DONE (`documents/b-rerun.md`): A
+   still fails TRN-08 at 256 (check-1 `[]` is competence, not
+   budget), and a full B rerun replicates the flip exactly (30/35,
+   identical fail sets, 35/35 stable verdicts/tokens). Criterion #1
+   firms from "fragile" to replicated-single-task PASS. Cost $0.018.
 2. Retrieval-diet rerun (top-1, concise excerpts, token-matched D) —
    the only plausible #3 flip.
 3. Input-matched reuse fix + matched-rerun re-run — prerequisite for
