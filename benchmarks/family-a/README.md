@@ -64,10 +64,11 @@ A task passes iff **all** of its checks pass.
 ## Running (offline)
 
 ```powershell
-# All 35 tasks against the recorded passing fixture: expect 35/35, exit 0
+# All 43 tasks against the recorded passing fixture: expect 43/43, exit 0
+# (35 original + 8 supplemental transfer A-TRN-09..16, see below)
 python benchmarks/runner.py --recorded benchmarks/family-a/recorded/stub_all_pass.json
 
-# Fail-detection proof: expect 0/35, exit 1
+# Fail-detection proof: expect 0/43, exit 1
 python benchmarks/runner.py --recorded benchmarks/family-a/recorded/stub_all_fail.json
 
 # One split, one task, or just list
@@ -100,3 +101,18 @@ the model's raw output text. See `StubAdapter` (recorded replay) and
 4. Equivalent transforms must set `derived_from` + `transforms_applied`.
 5. Regenerate `recorded/stub_all_pass.json` from the new expected outputs and
    re-run the runner both ways before finishing.
+
+## Supplemental transfer set (A-TRN-09..16, 2026-10-05)
+
+Appended per the recipe above (pure append: the original 35 tasks are
+byte-identical). Reference generator:
+`benchmarks/family-a/make_transfer2.py` — every expected output is
+computed by an independent stdlib reference implementation, and
+`tests/test_transfer2.py` pins byte-identity
+(`make_transfer2.py --check`) plus the frozen-task invariant.
+Motivation: transfer recall cannot settle at n=8
+(`documents/core-experiment-gate.md`); the 8 new tasks (epoch
+seconds, 12-hour+EST, quoted-tab TSV, backslash pipes, unflatten,
+group-by-count, Apache combined, quoted key=value) double the
+held-out set without touching the frozen 35 or their recorded
+baselines (all baseline artifacts + verifiers pin the original runs).

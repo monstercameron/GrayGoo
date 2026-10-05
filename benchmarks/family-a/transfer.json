@@ -158,5 +158,165 @@
       }
     ],
     "notes": "Held-out: multi-line stateful sessionization; interleaved users in check 1."
+  },
+  {
+    "id": "A-TRN-09",
+    "family": "A",
+    "split": "transfer",
+    "category": "dates",
+    "prompt": "Each input line is Unix epoch seconds (integer, may be negative for pre-1970). Convert each line to UTC ISO-8601 'YYYY-MM-DDTHH:MM:SSZ', one per output line, same order. Output only the converted datetimes.",
+    "checks": [
+      {
+        "input": "0\n946684800",
+        "expected": "1970-01-01T00:00:00Z\n2000-01-01T00:00:00Z",
+        "compare": "exact"
+      },
+      {
+        "input": "-86400\n1728000000",
+        "expected": "1969-12-31T00:00:00Z\n2024-10-04T00:00:00Z",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Held-out: raw integer epochs incl. a negative (pre-1970) value; no weekday/offset decoration unlike A-TRN-01."
+  },
+  {
+    "id": "A-TRN-10",
+    "family": "A",
+    "split": "transfer",
+    "category": "dates",
+    "prompt": "Each input line is 'MM/DD/YYYY HH:MM:SS AM|PM' in US Eastern Standard Time (UTC-5; all dates are January so no daylight saving applies). Convert each line to UTC ISO-8601 'YYYY-MM-DDTHH:MM:SSZ', one per output line, same order. Output only the converted datetimes.",
+    "checks": [
+      {
+        "input": "01/15/2026 12:00:00 AM\n01/15/2026 12:00:00 PM",
+        "expected": "2026-01-15T05:00:00Z\n2026-01-15T17:00:00Z",
+        "compare": "exact"
+      },
+      {
+        "input": "01/02/2026 11:59:59 PM\n01/31/2026 01:02:03 AM",
+        "expected": "2026-01-03T04:59:59Z\n2026-01-31T06:02:03Z",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Held-out: 12-hour clock plus named-zone offset in one step; midnight/noon meridiem edges included."
+  },
+  {
+    "id": "A-TRN-11",
+    "family": "A",
+    "split": "transfer",
+    "category": "csv",
+    "prompt": "Input is tab-separated values: first line is the header, fields may be double-quoted (quotes may contain literal tabs). Output a JSON array of objects, one per data row, keys from the header. Output only the JSON.",
+    "checks": [
+      {
+        "input": "name\tcity\namy\toslo",
+        "expected": "[{\"name\": \"amy\", \"city\": \"oslo\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "a\tb\n\"x\ty\"\tz",
+        "expected": "[{\"a\": \"x\\ty\", \"b\": \"z\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: tab delimiter with quoted-tab fields; goes beyond semicolon/comment variants in TRN-03/04."
+  },
+  {
+    "id": "A-TRN-12",
+    "family": "A",
+    "split": "transfer",
+    "category": "csv",
+    "prompt": "Input is pipe-separated values: first line is the header. A backslash escapes the next character (\\| is a literal pipe, \\\\ is a literal backslash). Output a JSON array of objects, one per data row. Output only the JSON.",
+    "checks": [
+      {
+        "input": "a|b\nx|y",
+        "expected": "[{\"a\": \"x\", \"b\": \"y\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "p|q\nv\\|w|x\\\\y",
+        "expected": "[{\"p\": \"v|w\", \"q\": \"x\\\\y\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: backslash-escape discipline instead of quoting; the escape char itself appears in check 2."
+  },
+  {
+    "id": "A-TRN-13",
+    "family": "A",
+    "split": "transfer",
+    "category": "records",
+    "prompt": "Input is one flat JSON object whose keys are dot paths (e.g. {\"a.b\": 1}). Output the nested JSON object it denotes. Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"a.b\": 1, \"a.c\": 2}",
+        "expected": "{\"a\": {\"b\": 1, \"c\": 2}}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"x\": 0, \"a.b.c\": 3, \"a.b.d\": 4}",
+        "expected": "{\"x\": 0, \"a\": {\"b\": {\"c\": 3, \"d\": 4}}}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: inverse direction of the flatten tasks in exposure; shared-prefix merging required."
+  },
+  {
+    "id": "A-TRN-14",
+    "family": "A",
+    "split": "transfer",
+    "category": "records",
+    "prompt": "Input is a JSON array of objects, each with a \"status\" string field. Output one JSON object mapping each distinct status to its count. Output only the JSON.",
+    "checks": [
+      {
+        "input": "[{\"status\": \"ok\"}, {\"status\": \"err\"}, {\"status\": \"ok\"}]",
+        "expected": "{\"ok\": 2, \"err\": 1}",
+        "compare": "json"
+      },
+      {
+        "input": "[{\"status\": \"x\", \"n\": 1}, {\"status\": \"y\"}, {\"status\": \"x\", \"n\": 2}]",
+        "expected": "{\"x\": 2, \"y\": 1}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: aggregation over records (group-by-count); exposure aggregates logs, never record arrays."
+  },
+  {
+    "id": "A-TRN-15",
+    "family": "A",
+    "split": "transfer",
+    "category": "logs",
+    "prompt": "Each input line is an Apache combined log line. Output a JSON array with one object per line: {\"host\", \"user\", \"method\", \"path\", \"status\" (number), \"bytes\" (number, 0 when the field is '-')}. Ignore ident, timestamp, referrer, and user-agent. Output only the JSON.",
+    "checks": [
+      {
+        "input": "127.0.0.1 - amy [10/Oct/2026:13:55:36 +0000] \"GET /a HTTP/1.1\" 200 123",
+        "expected": "[{\"host\": \"127.0.0.1\", \"user\": \"amy\", \"method\": \"GET\", \"path\": \"/a\", \"status\": 200, \"bytes\": 123}]",
+        "compare": "json"
+      },
+      {
+        "input": "10.0.0.2 - - [10/Oct/2026:13:56:01 +0000] \"POST /b?c=d HTTP/1.1\" 404 -",
+        "expected": "[{\"host\": \"10.0.0.2\", \"user\": \"-\", \"method\": \"POST\", \"path\": \"/b?c=d\", \"status\": 404, \"bytes\": 0}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: combined format with quoted request plus two trailing quoted fields; '-' byte counts included."
+  },
+  {
+    "id": "A-TRN-16",
+    "family": "A",
+    "split": "transfer",
+    "category": "logs",
+    "prompt": "Input is one line of space-separated key=value pairs; values may be single- or double-quoted and quoted values may contain spaces and '='. Output one JSON object of the pairs (quotes removed). Output only the JSON.",
+    "checks": [
+      {
+        "input": "a=1 b=2",
+        "expected": "{\"a\": \"1\", \"b\": \"2\"}",
+        "compare": "json"
+      },
+      {
+        "input": "msg=\"hello world\" k='a=b' n=3",
+        "expected": "{\"msg\": \"hello world\", \"k\": \"a=b\", \"n\": \"3\"}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Held-out: quoted values with interior spaces and '='; naive whitespace splitting fails."
   }
 ]
