@@ -264,18 +264,18 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] Re-run adversarial suite until all attacks fail safely
 
 - [ ] **Fix QA findings (qa-report 2026-10-05)**
-  - [ ] QA-01: coerce non-string recorded output in runner exact compare
-  - [ ] QA-02: runner exits nonzero when filter selects zero tasks
+  - [x] QA-01: coerce non-string recorded output in runner exact compare
+  - [x] QA-02: runner exits nonzero when filter selects zero tasks
   - [ ] QA-03: pipeline fails on unknown stage names
   - [ ] QA-04: normalize worker return_value comparison in pipeline checks
   - [ ] QA-05: collision-proof promotion version filenames
   - [ ] QA-06: promotion ledger outage returns reject dict (fail closed)
-  - [ ] QA-07: risk scan value-position atoms, not just head position
-  - [ ] QA-08: flag mutation targets naming core dynamic forms
+  - [x] QA-07: risk scan value-position atoms, not just head position
+  - [x] QA-08: flag mutation targets naming core dynamic forms
   - [ ] QA-09: reject promotion on corrupt versions/epochs state
   - [ ] QA-10: fail (or skip explicitly) stages running zero checks
-  - [ ] QA-11: depth guard in risk walker
-  - [ ] QA-12: type-check check values in runner validate_tasks
+  - [x] QA-11: depth guard in risk walker
+  - [x] QA-12: type-check check values in runner validate_tasks
 
 - [ ] **Only after the core experiment succeeds**
   - [ ] Add shadow execution on real workloads
