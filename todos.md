@@ -278,6 +278,18 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] QA-11: depth guard in risk walker
   - [x] QA-12: type-check check values in runner validate_tasks
 
+- [ ] **Focus: executable reuse thesis (session goal 2026-10-05)**
+  - [x] Define REUSE/COMPOSE/ADAPT/NOVEL outcome taxonomy (`outcomes.py`)
+  - [x] Build executable capability registry with applicability gate (`execaps.py`, 5 verified seeds)
+  - [x] Build composition executor: plans reusing >=2 capabilities, zero model calls
+  - [x] Add reuse-designed held-out tasks (`benchmarks/family-r/`: 4 reuse + 1 trap + 2 compose)
+  - [x] Build canonical A/B/C/D driver (`benchmarks/run_abcd.py`)
+  - [x] Verify offline: D 7/7 at 1 call vs A 7/7 at 13 calls; C 5/7 honest misfire pinned
+  - [x] Compression warning live: 7 tasks / 7 artifacts = 1.0, warning firing (see `documents/abcd.md`)
+  - [x] Run live Family-R comparison (28 calls, $0.007): D 7/7 dominates A/B 6/7 at 13x fewer calls
+  - [ ] Generalize seeds so artifact count stays flat as reuse tasks grow (close compression warning)
+  - [ ] Contract-coverage applicability: single-cap abstains when prompt demands more than its contract
+
 - [ ] **Only after the core experiment succeeds**
   - [ ] Add shadow execution on real workloads
   - [ ] Add canary promotion

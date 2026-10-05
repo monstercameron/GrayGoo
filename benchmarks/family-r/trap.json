@@ -1,0 +1,17 @@
+[
+  {
+    "id": "R-ADP-01",
+    "family": "R",
+    "split": "transfer",
+    "category": "dates",
+    "prompt": "Convert each date on its own input line to ISO format YYYY-MM-DD, one converted date per output line, in the same order. Supported input formats: 'D Mon YYYY' (full or abbreviated English month name, e.g. 5 Oct 2026), 'Mon D, YYYY', 'YYYY/MM/DD', 'DD.MM.YYYY'. Output only the converted dates, nothing else.",
+    "checks": [
+      {
+        "input": "5 Oct 2026\n2026-W41-3",
+        "expected": "2026-10-05\n2026-10-07",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Applicability trap: '2026-W41-3' matches no supported format, so cap-date-iso must abstain and the model path solves it."
+  }
+]

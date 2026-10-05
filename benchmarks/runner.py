@@ -28,6 +28,9 @@ from pathlib import Path
 
 SPLITS = ("exposure", "transfer", "adversarial", "equivalent-transform")
 COMPARE_MODES = ("exact", "json")
+# Task families: A = parsing/data-transformation procedures,
+# R = reuse-designed held-out tasks (same-procedure REUSE + COMPOSE).
+FAMILIES = ("A", "R")
 
 # Mirrors cerebras_client qwen-3.8-27b pricing (USD per million tokens).
 # Kept local (not imported) so the offline path never touches the client.
@@ -239,8 +242,8 @@ def validate_tasks(tasks: list) -> list:
         if task_id in seen:
             problems.append(f"{task_id}: duplicate id")
         seen.add(task_id)
-        if task.get("family") != "A":
-            problems.append(f"{task_id}: family must be 'A'")
+        if task.get("family") not in FAMILIES:
+            problems.append(f"{task_id}: family must be one of {FAMILIES}")
         if task.get("split") not in SPLITS:
             problems.append(f"{task_id}: bad split {task.get('split')!r}")
         checks = task.get("checks", None)

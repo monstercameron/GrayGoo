@@ -1,0 +1,86 @@
+[
+  {
+    "id": "R-REU-01",
+    "family": "R",
+    "split": "transfer",
+    "category": "dates",
+    "prompt": "Convert each date on its own input line to ISO format YYYY-MM-DD, one converted date per output line, in the same order. Supported input formats: 'D Mon YYYY' (full or abbreviated English month name, e.g. 5 Oct 2026), 'Mon D, YYYY', 'YYYY/MM/DD', 'DD.MM.YYYY'. Output only the converted dates, nothing else.",
+    "checks": [
+      {
+        "input": "12 Feb 2024\nMarch 3, 2025\n2023/07/04\n25.12.2000",
+        "expected": "2024-02-12\n2025-03-03\n2023-07-04\n2000-12-25",
+        "compare": "exact"
+      },
+      {
+        "input": "Sept 9, 1999\n9 Sep 1999",
+        "expected": "1999-09-09\n1999-09-09",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Same-procedure reuse of A-EXP-01 with held-out inputs.",
+    "derived_from": "A-EXP-01"
+  },
+  {
+    "id": "R-REU-02",
+    "family": "R",
+    "split": "transfer",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). Output a JSON array of objects mapping header names to field values (all values strings, row order preserved). Output only the JSON.",
+    "checks": [
+      {
+        "input": "id,name\n1,\"Smith, John\"\n2,Ana",
+        "expected": "[{\"id\": \"1\", \"name\": \"Smith, John\"}, {\"id\": \"2\", \"name\": \"Ana\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "a,b,c\n1,2,3\n4,5,6",
+        "expected": "[{\"a\": \"1\", \"b\": \"2\", \"c\": \"3\"}, {\"a\": \"4\", \"b\": \"5\", \"c\": \"6\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Same-procedure reuse of A-EXP-05 with held-out inputs.",
+    "derived_from": "A-EXP-05"
+  },
+  {
+    "id": "R-REU-03",
+    "family": "R",
+    "split": "transfer",
+    "category": "records",
+    "prompt": "The input is one JSON object. Flatten it: nested objects become dot-separated keys; array elements become key[i]; empty objects/arrays are preserved as values; scalars are unchanged. Output the flat JSON object. Output only the JSON.",
+    "checks": [
+      {
+        "input": "{\"user\": {\"name\": \"ann\", \"tags\": [\"x\", \"y\"]}, \"n\": 3}",
+        "expected": "{\"user.name\": \"ann\", \"user.tags[0]\": \"x\", \"user.tags[1]\": \"y\", \"n\": 3}",
+        "compare": "json"
+      },
+      {
+        "input": "{\"a\": {}, \"b\": [[1]], \"c\": \"s\"}",
+        "expected": "{\"a\": {}, \"b[0][0]\": 1, \"c\": \"s\"}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Same-procedure reuse of A-EXP-09 with held-out inputs.",
+    "derived_from": "A-EXP-09"
+  },
+  {
+    "id": "R-REU-04",
+    "family": "R",
+    "split": "transfer",
+    "category": "logs",
+    "prompt": "Parse one Common Log Format line: host ident user [time] \"METHOD path PROTO\" status bytes. Output JSON {\"host\":...,\"user\":...,\"time\":...,\"method\":...,\"path\":...,\"status\":N,\"bytes\":N} with time = bracket contents, user null when '-', bytes 0 when '-'. Output only the JSON.",
+    "checks": [
+      {
+        "input": "203.0.113.7 - maria [11/Nov/2024:08:00:00 +0000] \"DELETE /old HTTP/1.1\" 204 0",
+        "expected": "{\"host\": \"203.0.113.7\", \"user\": \"maria\", \"time\": \"11/Nov/2024:08:00:00 +0000\", \"method\": \"DELETE\", \"path\": \"/old\", \"status\": 204, \"bytes\": 0}",
+        "compare": "json"
+      },
+      {
+        "input": "198.51.100.23 - - [01/Jan/2025:00:00:01 -0500] \"GET / HTTP/2\" 301 -",
+        "expected": "{\"host\": \"198.51.100.23\", \"user\": null, \"time\": \"01/Jan/2025:00:00:01 -0500\", \"method\": \"GET\", \"path\": \"/\", \"status\": 301, \"bytes\": 0}",
+        "compare": "json"
+      }
+    ],
+    "notes": "Same-procedure reuse of A-EXP-13 with held-out inputs.",
+    "derived_from": "A-EXP-13"
+  }
+]

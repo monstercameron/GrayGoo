@@ -1,0 +1,50 @@
+[
+  {
+    "id": "R-CMP-01",
+    "family": "R",
+    "split": "transfer",
+    "category": "csv",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). One column is named 'date' with dates in mixed formats ('D Mon YYYY', 'Mon D, YYYY', 'YYYY/MM/DD', 'DD.MM.YYYY'). Normalize every value in the date column to ISO format YYYY-MM-DD. Output a JSON array of objects mapping header names to field values. Output only the JSON.",
+    "checks": [
+      {
+        "input": "name,date\nann,5 Oct 2026\nbob,2026/10/06",
+        "expected": "[{\"name\": \"ann\", \"date\": \"2026-10-05\"}, {\"name\": \"bob\", \"date\": \"2026-10-06\"}]",
+        "compare": "json"
+      },
+      {
+        "input": "id,date,note\n7,\"March 3, 2025\",\"hi\"\n8,25.12.2000,\"x,y\"",
+        "expected": "[{\"id\": \"7\", \"date\": \"2025-03-03\", \"note\": \"hi\"}, {\"id\": \"8\", \"date\": \"2000-12-25\", \"note\": \"x,y\"}]",
+        "compare": "json"
+      }
+    ],
+    "notes": "Composite of cap-csv-parse + cap-date-iso; neither alone suffices (single-cap execution yields un-normalized dates).",
+    "composes": [
+      "cap-csv-parse",
+      "cap-date-iso"
+    ]
+  },
+  {
+    "id": "R-CMP-02",
+    "family": "R",
+    "split": "transfer",
+    "category": "records",
+    "prompt": "Flatten the input JSON object (nested objects become dot-separated keys; array elements become key[i]; scalars unchanged), then serialize the flat object as CSV rows: a header row 'key,value' followed by one 'key,value' row per entry in flat-key order. Output only the CSV.",
+    "checks": [
+      {
+        "input": "{\"a\": {\"b\": 1}, \"c\": \"x\"}",
+        "expected": "key,value\na.b,1\nc,x",
+        "compare": "exact"
+      },
+      {
+        "input": "{\"x\": [true, null], \"y\": {}}",
+        "expected": "key,value\nx[0],true\nx[1],null\ny,{}",
+        "compare": "exact"
+      }
+    ],
+    "notes": "Composite of cap-flatten + cap-table-csv via key/value-row glue; flatten alone yields JSON, not CSV.",
+    "composes": [
+      "cap-flatten",
+      "cap-table-csv"
+    ]
+  }
+]
