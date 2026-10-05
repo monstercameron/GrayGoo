@@ -1,0 +1,33 @@
+# secrets — never commit (note: .env is already tracked historically; do not add more secrets to it)
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# build / runtime artifacts — everything generated goes to artifacts/ (see AGENTS.md)
+artifacts/*
+!artifacts/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# lisp
+*.fasl
+*.lib
+sbcl.exe.stackdump
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
