@@ -16,6 +16,27 @@ incidents, rehearsal/live divergence, stale-candidate rejections.
 Complexity: capability count, semantic duplication, call-graph depth,
 unused-capability ratio, entropy score.
 
+### Entropy score, formally (issues.md #85)
+
+`metrics.entropy_from_counts(counts)` is Shannon entropy in **nats**:
+`-Σ (c/total)·ln(c/total)` over count categories (empty → TBD, never
+0). Two instantiations, both keyed by the *reusable procedure* so
+they are comparable across memory kinds:
+
+- `text_reuse_entropy(tasks)`: keys are source task ids from
+  Phase-2 `text_sources` (both retrieved checks of one task count
+  toward that task).
+- `patch_reuse_entropy_from_tasks(tasks)` /
+  `reuse_entropy_from_ledger(rows)`: keys are patch ids.
+
+Worked example: reuse counts [6, 2] over two procedures → total 8 →
+`-(0.75·ln0.75 + 0.25·ln0.25)` ≈ 0.562 nats. Uniform reuse maximizes
+the score (ln K for K procedures); single-procedure reuse scores 0.
+Interpretation rule: entropy measures reuse *spread*, not reuse
+*quality* — always report alongside helped/hurt rates (#82), never
+alone. Semantic duplication, graph depth, and unused-capability
+ratio remain separate metrics (not folded into one number).
+
 ## Core learning score (plan.md §66)
 
 ```text

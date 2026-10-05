@@ -163,6 +163,136 @@ probes and fixed:
 Round-4 remainder CLOSED: #66-70 all fixed in Round 9 below.
 No REAL-but-unfixed items remain from the #41-70 triage.
 
+## Round 10 (2026-10-05): issues #80-110 (scientific validity)
+
+Line 895 of issues.md names #80, #83, #88, #93, #98-100, #109
+highest-value; all get verdicts below. Verified against code, not
+assumed (each ALREADY-FIXED cites the mechanism + test/probe).
+
+ALREADY-FIXED (6):
+
+- #81 (contamination): transfer-2 (A-TRN-09..16) IS procedurally
+  generated — `make_transfer2.py` reference generator, byte-pinned by
+  `tests/test_transfer2.py`. A synthetic family exists.
+- #83 (zero-call gaming): the gated fast-path fires ONLY on exact
+  recorded-input repeats (transfer held-out: 0/32 fires) and
+  `documents/repeat-stream.md` scopes the #2/#3 flips to
+  repeated-input streams explicitly. Memorization is fenced, named,
+  and measured — exactly what the issue asks.
+- #84 (normalized growth): repeat-stream reports lib size per
+  cumulative check (slopes 0.92 → 0.61) + naive-vs-dedup counts.
+  Qualitative "slows" replaced by numbers.
+- #92 (price dependence): every usage record carries input/output
+  tokens + calls + latency alongside USD (`runner.py` snapshot,
+  `cerebras_client.complete`). USD never stands alone.
+- #101 (cold vs warm): repeat-stream round 1 (cold, 2.000
+  calls/task) vs round 3 (warm, 0.722) on the SAME 18 tasks, twice
+  replicated. Clean accumulated-value estimate exists.
+- #107 (reproducibility target): `manifest.py` pins python/platform/
+  git/SBCL/ASDF-SHA/tree-fingerprint/deps/model/sandbox;
+  `documents/reproducibility.md` defines the reproduce recipe.
+  Random seeds: temp-0.0 runs replicate bit-identically (B-rerun,
+  repeat-stream, transfer-2 revalidation).
+
+MOOT (1):
+
+- #88 (replay overfit): `replay.ab_replay` has ZERO production
+  callers (tests only). No live loop validates repeatedly on any
+  corpus, so overfit-to-corpus cannot occur. Matters only if/when
+  replay drives promotion — recorded as a precondition then.
+
+REAL, fixed this round (docs + offline batch):
+
+- #93 (HIGH, failure criterion): ADDED — `documents/core-experiment-
+  gate.md` "Falsification criteria" section: exact numeric bars whose
+  breach retires the transfer thesis (docs-only, no code).
+- #109 (HIGH, headline experiment): DECLARED — same doc: the
+  canonical headline is now "transfer-2 16-task B/D vs A" (11/16 vs
+  12/16, sole TRN-08 edge, 4× replicated). One primary result,
+  named and cited.
+- #102 (catastrophic memory): DEMONSTRATED offline —
+  `tests/test_catastrophic_memory.py` (stub): inject wrong patch →
+  exactly 1 misfire → hurt row revokes → retire → re-store recovers
+  (uses production `PatchMemory`/`consolidate` paths, no new code).
+- #103 (retrieval overhead): MEASURED offline —
+  `tests/test_retrieval_scale.py` seeds 500 patches, asserts
+  retrieval latency bounded generously + reports ms/100-patches;
+  numbers recorded in `documents/retrieval-scale.md`.
+- #105 (learning efficiency): DEFINED + COMPUTED —
+  `metrics.learning_efficiency()` (held-out improvement per extra
+  token vs no-memory baseline) + unit tests; computed for B/D (old +
+  transfer-2) and repeat-stream in `documents/learning-efficiency.md`.
+- #106 (restart durability): PROVEN offline — stream round, close,
+  reopen `PatchMemory` on the same dir, repeats still hit
+  (`tests/test_repeat_stream.py` addition, stub).
+- #108 (artifact bundle): BUILT — `bundle.py` writes one
+  `bundle.json` (manifest + summary + git sha + event-log hash) per
+  run dir (+ lists member files); `tests/test_bundle.py`.
+- #85 (entropy definition): DOCUMENTED — `metrics.entropy_from_counts`
+  is Shannon nats over stated units (patch ids / source task ids);
+  definition + units + worked example added to
+  `documents/metrics-and-success-criteria.md`. No code change: the
+  function already implements exactly this.
+- #91 (TTVM decomposition): retrieval split out of the context stage
+  (`ttvm_sample.py`, timed separately); evaluator/promotion stay
+  explicitly UNMEASURABLE (documented in-module: fixed-corpus
+  scoring, task samples don't target it). Verified by a 2-sample
+  live run ($0.002).
+
+REAL, fixed this round (live batch, ~$0.02):
+
+- #89 + #97 (lesson counterexamples + precision): WIRED —
+  `key_experiment` condition C now records per-task lesson outcomes
+  (retrieved ids → helped=passed) and counterexamples on failures;
+  `lessons.precision()` added (successes/retrievals over usage).
+  C rerun (16 calls): first measured lesson precision numbers.
+- #95 (forgetting A/B): TTL arm ADDED — `--retire-ttl-rounds K`
+  (retire by age regardless of hits) vs usage-weighted; churn
+  stream rerun with TTL=1 (~$0.004): lib controlled both ways,
+  usage-weighted keeps hot patches TTL drops (numbers in doc).
+- #98 (factorial attribution): E=both ARM ADDED — `key_experiment`
+  gains condition E (distilled lessons + patch memory), completing
+  neither/lesson/capability/both (16 calls): attribution table.
+- #99 + #100 (difficulty/order bias): RANDOMIZED stream — repeat
+  order shuffled by seed, rerun live (~$0.005): reuse curve
+  order-invariant (numbers in doc); difficulty-by-position analysis
+  from round-1 data included (fails cluster mid-list, not late —
+  no curriculum gradient).
+
+REAL, recorded (needs design/scale/user):
+
+- #80 (HIGH, provider drift): PARTIAL — usage records carry
+  provider-reported model id + request_id + finish_reason, and
+  sampling params are documented per experiment; but temperature/
+  max_tokens/reasoning/date are NOT in the stored record. Fix
+  designed (extend `complete()` result + runner snapshot) but
+  touches usage-entry keys asserted across the suite — needs a
+  careful key-migration pass, scheduled next.
+- #86 (lesson confound): MOOT-WHILE-NULL — a handcrafted-guidance
+  control only matters when claiming learning; lesson-key is null
+  (D=C=B). Reopen if any lesson arm ever beats A.
+- #87 (weak transcript baseline): REAL — condition B retrieves
+  same-category excerpts with truncation (crude but not verbatim);
+  fairer = overlap-ranked like text memory. Needs protocol change +
+  rerun; scheduled with the next lesson-key round.
+- #90 (first-pass synthesis): REAL — `replay` tracks first-pass per
+  replay and `repair_loop` returns repairs_used, but NO loop
+  aggregates first-pass/repair counts across runs. Needs an
+  aggregating production loop that does not exist yet.
+- #94 (cross-family transfer): REAL-BIG — needs a second benchmark
+  family (all current families live in Family A). Design task.
+- #96 (consolidation ablation): REAL — flat-vs-family retrieval
+  comparison unrun. Needs skills-family retrieval harness first.
+- #104 (near-match benchmark): REAL — observed instances exist
+  (diet ADV-05, TRN-03/04 breakage) but no dedicated task set.
+  Deferred: transfer-2 just landed; another task wave is scope
+  creep today.
+
+Evidence: full suite green (count at commit), 10/10 probes, new
+tests test_catastrophic_memory/test_retrieval_scale/test_bundle +
+metric/stream/runner additions, live spend +~$0.025 (session stays
+far under $50).
+
 ## Round 9 (2026-10-05): issues #66-68
 
 - #66 (MEDIUM): model call records lacked task/run/candidate/

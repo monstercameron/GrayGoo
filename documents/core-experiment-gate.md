@@ -60,6 +60,47 @@ work is not transfer. What would open it: a second transfer edge
 inputs without misfiring (the gated fast-path proves the safety
 half; the recall half on novel inputs is the open problem).
 
+## Headline experiment (issues.md #109)
+
+The canonical primary result — the one experiment a newcomer should
+read first:
+
+> **Transfer-2: 16 held-out transfer tasks, memory (B/D) vs no-memory
+> (A). A 11/16, B 12/16, D 12/16. The sole memory edge is TRN-08,
+> replicated 4× (B, B-rerun, D, gated-D); 15/16 tasks are
+> memory-invariant; zero A-relative regressions.**
+
+Evidence: `documents/transfer2.md` (+ `baseline-a.md`,
+`baselines-bcd.md`, `b-rerun.md` for the original-8 components).
+Everything else (repeat-stream reuse curves, TTVM, lesson-key null,
+adversarial boundary) is supporting, not primary. If a future run
+moves the headline numbers, THIS section gets a dated addendum — the
+headline is versioned prose, not a frozen claim.
+
+## Falsification criteria (issues.md #93)
+
+The transfer thesis ("executable + lesson memory improves held-out
+task performance") is RETIRED — not merely left open — if any of
+these hold after the next full transfer round (a blind re-run of all
+16 transfer tasks per arm, ~$0.02, runnable any time):
+
+1. **No edge**: B AND D both ≤ A on held-out pass count (the TRN-08
+   edge fails to replicate).
+2. **Negative transfer**: any arm shows ≥2 A-relative regressions on
+   tasks A passes (memory actively harms novelty).
+3. **No efficiency path**: on repeated-input streams, calls/task
+   fails to beat 1.5× the no-memory baseline by round 3 (the reuse
+   mechanism itself degrades — currently 0.72 vs 2.0, so this bar
+   has large margin).
+4. **Harmful reuse dominates**: fast-path hit-helped rate < 50% over
+   any 20+ hit window (reuse becomes a lottery; currently 46/46).
+
+Conversely the thesis is PROMOTED to "established (narrow)" if a
+second independent transfer edge appears (any new task flipped by
+memory, replicated 2×) with zero regressions. Until either trigger
+fires, the standing is "one replicated edge" — interesting, not
+conclusive.
+
 Next experiments that could open it, cheapest first (all within the
 remaining ~$49 budget):
 

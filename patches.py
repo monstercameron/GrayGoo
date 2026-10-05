@@ -91,6 +91,11 @@ class PatchStore:
         self._patches_dir = os.path.join(self.directory, "patches")
         os.makedirs(self._patches_dir, exist_ok=True)
         self._reuse_path = os.path.join(self.directory, "reuse.jsonl")
+        # Read cache: filename -> (mtime_ns, record). Validated per
+        # file on every list/get, so external writers can never serve
+        # stale (issues.md #103: uncached re-reads cost ~500ms/query
+        # at 500 patches on Windows file-open overhead).
+        self._read_cache = {}
 
     # -- internal helpers ------------------------------------------
     def _patch_path(self, patch_id):
@@ -112,14 +117,46 @@ class PatchStore:
             return None
         return data if isinstance(data, dict) else None
 
+    def _read_cached(self, path, mtime_ns=None):
+        """Read one patch file, reusing the record when mtime matches.
+
+        Pass the scandir mtime when available to skip a second stat.
+        """
+        key = os.path.basename(path)
+        if mtime_ns is None:
+            try:
+                mtime_ns = os.stat(path).st_mtime_ns
+            except OSError:
+                return None
+        cached = self._read_cache.get(key)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+        record = self._read_patch_file(path)
+        if record is not None:
+            self._read_cache[key] = (mtime_ns, record)
+        else:
+            self._read_cache.pop(key, None)
+        return record
+
     def _iter_patch_files(self):
+        for path, _mtime_ns in self._iter_patch_entries():
+            yield path
+
+    def _iter_patch_entries(self):
+        """Yield (path, mtime_ns) via one scandir (mtimes are free)."""
         try:
-            names = sorted(os.listdir(self._patches_dir))
+            entries = sorted(os.scandir(self._patches_dir),
+                             key=lambda e: e.name)
         except OSError:
             return
-        for name in names:
-            if name.endswith(".json"):
-                yield os.path.join(self._patches_dir, name)
+        for entry in entries:
+            if not entry.name.endswith(".json") or not entry.is_file():
+                continue
+            try:
+                mtime_ns = entry.stat().st_mtime_ns
+            except OSError:
+                continue
+            yield entry.path, mtime_ns
 
     # -- patch lifecycle -------------------------------------------
     def save_patch(self, task_id, candidate, task_family=None, tags=None,
@@ -165,15 +202,15 @@ class PatchStore:
             # Fall back to scanning (covers patches written with an
             # older filename scheme, if any).
             for candidate_path in self._iter_patch_files():
-                data = self._read_patch_file(candidate_path)
+                data = self._read_cached(candidate_path)
                 if data and data.get("patch_id") == patch_id:
                     path = candidate_path
                     break
             else:
                 return None
-            patch = self._read_patch_file(path)
+            patch = self._read_cached(path)
         else:
-            patch = self._read_patch_file(path)
+            patch = self._read_cached(path)
         if patch is None:
             return None
         if _is_expired(patch, now):
@@ -186,13 +223,19 @@ class PatchStore:
     def list_patches(self, include_expired=False, now=None):
         """Return all stored patches (expired excluded by default)."""
         out = []
-        for path in self._iter_patch_files():
-            patch = self._read_patch_file(path)
+        seen = set()
+        for path, mtime_ns in self._iter_patch_entries():
+            patch = self._read_cached(path, mtime_ns)
             if patch is None:
                 continue
+            seen.add(os.path.basename(path))
             if not include_expired and _is_expired(patch, now):
                 continue
             out.append(patch)
+        # Prune cache entries whose files vanished (external delete).
+        for cached_key in list(self._read_cache):
+            if cached_key not in seen:
+                self._read_cache.pop(cached_key, None)
         out.sort(key=lambda p: p.get("created_at", 0.0))
         return out
 

@@ -464,6 +464,30 @@ def library_growth_from_tasks(tasks):
     return capability_growth(p1_count, p1_count + added)
 
 
+def learning_efficiency(base_passed, base_total, run_passed, run_total,
+                        base_tokens, run_tokens):
+    """Held-out improvement per extra token vs a no-memory baseline.
+
+    ``(run_rate - base_rate) / max(1, run_tokens - base_tokens)`` —
+    how much held-out success each additional token buys. Positive
+    means learning paid for its context; zero/negative means the
+    memory cost tokens without improving (or while harming) held-out
+    success. When the run uses FEWER tokens and still improves, the
+    denominator clamps to 1 (pure win, value == rate delta). TBD
+    when either population is empty (issues.md #105).
+    """
+    if not base_total or not run_total:
+        return tbd("empty baseline or run population")
+    improvement = run_passed / run_total - base_passed / base_total
+    extra = run_tokens - base_tokens
+    return metric(improvement / max(1, extra),
+                  run_total + base_total,
+                  "held-out rate delta %.4f over %d extra tokens "
+                  "(%d/%d vs %d/%d)" % (
+                      improvement, extra, run_passed, run_total,
+                      base_passed, base_total))
+
+
 def entropy_from_counts(counts):
     """Shannon entropy (nats) of a category-count distribution."""
     total = sum(counts)

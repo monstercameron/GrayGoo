@@ -11,6 +11,7 @@ import metrics
 from metrics import (
     entropy_from_counts,
     held_out_success,
+    learning_efficiency,
     negative_transfer_a_relative,
     negative_transfer_outcome,
     resources_per_task,
@@ -212,6 +213,30 @@ class SuccessAndReuseTest(unittest.TestCase):
         self.assertAlmostEqual(result["value"]["median_ms"], 200.0)
         self.assertEqual(result["value"]["min_ms"], 100.0)
         self.assertEqual(result["value"]["max_ms"], 300.0)
+
+
+class LearningEfficiencyTest(unittest.TestCase):
+    """issues.md #105: improvement per extra token vs baseline."""
+
+    def test_positive_when_learning_pays(self):
+        result = learning_efficiency(5, 8, 6, 8, 2000, 3000)
+        check_envelope(self, result)
+        self.assertAlmostEqual(result["value"], (6 / 8 - 5 / 8) / 1000)
+        self.assertGreater(result["value"], 0)
+
+    def test_zero_improvement_is_zero(self):
+        result = learning_efficiency(6, 8, 6, 8, 2000, 3000)
+        self.assertEqual(result["value"], 0.0)
+
+    def test_cheaper_and_better_clamps_denominator(self):
+        result = learning_efficiency(4, 8, 6, 8, 3000, 2000)
+        self.assertAlmostEqual(result["value"], 6 / 8 - 4 / 8)
+
+    def test_empty_population_is_tbd(self):
+        result = learning_efficiency(0, 0, 6, 8, 0, 3000)
+        check_envelope(self, result)
+        self.assertIsNone(result["value"])
+        self.assertEqual(result["n"], 0)
 
 
 if __name__ == "__main__":
