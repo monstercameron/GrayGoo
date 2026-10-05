@@ -18,7 +18,7 @@ Baseline A/BCD re-proofs.
 |---|---|---|---|---|
 | 1 | Held-out success stable/up | PASS (fragile) | PASS (replicated 1-task edge) | B/D 6/8 vs A 5/8; TRN-08 flip replicates 2/2 B-runs and survives the 256-token A re-check (`documents/b-rerun.md`). Still one task — needs more transfer tasks to fully settle. |
 | 2 | Calls/task decreases | FAIL | FAIL (unchanged) | Flat 2.057 by protocol design; no protocol change since. |
-| 3 | Tokens/task decreases | FAIL | FAIL (unchanged) | +65–135% over A; no retrieval-diet experiment run since. |
+| 3 | Tokens/task decreases | FAIL | FAIL (diet tried) | Diet-B (top-1/120ch): 342.7, still +29% over bar, and regressed ADV-05 (`documents/b-diet.md`). Starving retrieval cannot reach 264.7; needs input-matched fast-path. |
 | 4 | Reuse increases | UNMEASURABLE | UNMEASURABLE (darker) | Still no time series — and matched-rerun adds negative evidence: fast-path reuse 0/4 on input-matched cases (`documents/matched-rerun.md`). Reuse exists; reuse *growth* is unproven and the reuse that exists doesn't transfer. |
 | 5 | Negative transfer below threshold | PASS | PASS (unchanged) | 0 A-relative regressions; re-proof confirms fail sets bit-stable. |
 | 6 | Sublinear growth | UNMEASURABLE | UNMEASURABLE (unchanged) | One growth interval; store-everything. No consolidation-on experiment run. |
@@ -56,8 +56,10 @@ remaining ~$49 budget):
    budget), and a full B rerun replicates the flip exactly (30/35,
    identical fail sets, 35/35 stable verdicts/tokens). Criterion #1
    firms from "fragile" to replicated-single-task PASS. Cost $0.018.
-2. Retrieval-diet rerun (top-1, concise excerpts, token-matched D) —
-   the only plausible #3 flip.
+2. ~~Retrieval-diet rerun~~ DONE (`documents/b-diet.md`): 342.7
+   still over bar with an ADV-05 regression — diet alone cannot flip
+   #3. Only remaining route: input-matched fast-path (fewer calls
+   net of injection).
 3. Input-matched reuse fix + matched-rerun re-run — prerequisite for
    any #4 movement.
 4. Multi-timepoint reuse/growth series with consolidation on —
