@@ -342,5 +342,55 @@ class MalformedProtocolTest(unittest.TestCase):
             self.assertEqual(envelope["error"]["code"], code, raw)
 
 
+class FreshCasesTest(unittest.TestCase):
+    def test_generation_is_seeded_and_deterministic(self):
+        cases = service.load_hidden_cases()
+        first = service.generate_fresh_cases(cases, seed=3, per_case=1)
+        second = service.generate_fresh_cases(cases, seed=3, per_case=1)
+        self.assertTrue(first)
+        self.assertEqual(first, second)
+        other = service.generate_fresh_cases(cases, seed=4, per_case=1)
+        self.assertNotEqual(
+            [c["checks"][0]["input"] for c in first],
+            [c["checks"][0]["input"] for c in other])
+
+    def test_fresh_cases_validate(self):
+        cases = service.load_hidden_cases()
+        fresh = service.generate_fresh_cases(cases, seed=0, per_case=2)
+        self.assertTrue(fresh)
+        for case in fresh:
+            self.assertTrue(case["id"].startswith("fresh:"))
+            self.assertTrue(transforms.check_case({
+                "kind": case["kind"],
+                "input": case["checks"][0]["input"],
+                "expected": case["checks"][0]["expected"],
+                "compare": case["checks"][0]["compare"],
+                "params": case["params"]}), case["id"])
+
+    def test_evaluate_with_fresh_scores_provided_outputs(self):
+        cases = service.load_hidden_cases()
+        fresh = service.generate_fresh_cases(cases, seed=1, per_case=1)
+        outputs = {}
+        for case in list(cases) + fresh:
+            for index, check in enumerate(case["checks"]):
+                outputs["%s:%d" % (case["id"], index)] = check["expected"]
+        result = service.evaluate("c1", outputs, cases=cases,
+                                  fresh={"seed": 1, "per_case": 1})
+        self.assertEqual(result["verdict"], "pass", result["evidence"])
+        self.assertEqual(result["evidence"]["fresh"]["generated"],
+                         len(fresh))
+
+    def test_fresh_wire_field_round_trip(self):
+        request = protocol.make_request("c1", {}, fresh={"seed": 2})
+        validated = protocol.validate_request(request)
+        self.assertEqual(validated["fresh"], {"seed": 2})
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.validate_request(
+                protocol.make_request("c1", {}, fresh={"seed": -1}))
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.validate_request(
+                protocol.make_request("c1", {}, fresh={"bogus": 1}))
+
+
 if __name__ == "__main__":
     unittest.main()

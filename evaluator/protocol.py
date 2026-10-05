@@ -11,7 +11,8 @@ Request schema (all keys required except ``thresholds``)::
       "request_id": "<non-empty string>",
       "candidate_id": "<non-empty string>",
       "outputs": {"<case_id>:<check_index>": "<candidate output text>"},
-      "thresholds": {"min_case_pass_rate": 1.0, "min_check_pass_rate": 1.0}
+      "thresholds": {"min_case_pass_rate": 1.0, "min_check_pass_rate": 1.0},
+      "fresh": {"seed": 0, "per_case": 2}   # optional: append seeded fresh cases
     }
 
 Success response::
@@ -46,7 +47,8 @@ import uuid
 PROTOCOL_VERSION = "1.0"
 
 _REQUEST_KEYS = frozenset(
-    {"protocol_version", "request_id", "candidate_id", "outputs", "thresholds"}
+    {"protocol_version", "request_id", "candidate_id", "outputs",
+     "thresholds", "fresh"}
 )
 _REQUIRED_KEYS = frozenset({"request_id", "candidate_id", "outputs"})
 _THRESHOLD_KEYS = frozenset({"min_case_pass_rate", "min_check_pass_rate"})
@@ -60,7 +62,8 @@ class ProtocolError(Exception):
         self.code = code
 
 
-def make_request(candidate_id, outputs, request_id=None, thresholds=None):
+def make_request(candidate_id, outputs, request_id=None, thresholds=None,
+                 fresh=None):
     """Build a protocol request dict (client-side helper)."""
     request = {
         "protocol_version": PROTOCOL_VERSION,
@@ -70,6 +73,8 @@ def make_request(candidate_id, outputs, request_id=None, thresholds=None):
     }
     if thresholds is not None:
         request["thresholds"] = dict(thresholds)
+    if fresh is not None:
+        request["fresh"] = dict(fresh)
     return request
 
 
@@ -126,12 +131,29 @@ def validate_request(obj):
             raise ProtocolError("threshold %r must be a number" % name)
         if not 0.0 <= value <= 1.0:
             raise ProtocolError("threshold %r out of range [0, 1]" % name)
+    fresh = obj.get("fresh", {})
+    if not isinstance(fresh, dict):
+        raise ProtocolError("fresh must be an object")
+    unknown_f = set(fresh) - {"seed", "per_case"}
+    if unknown_f:
+        raise ProtocolError(
+            "unknown fresh key(s): %s" % ", ".join(sorted(unknown_f))
+        )
+    if "seed" in fresh and (isinstance(fresh["seed"], bool)
+                            or not isinstance(fresh["seed"], int)
+                            or fresh["seed"] < 0):
+        raise ProtocolError("fresh.seed must be a non-negative int")
+    if "per_case" in fresh and (isinstance(fresh["per_case"], bool)
+                                or not isinstance(fresh["per_case"], int)
+                                or fresh["per_case"] < 1):
+        raise ProtocolError("fresh.per_case must be a positive int")
     return {
         "protocol_version": PROTOCOL_VERSION,
         "request_id": request_id,
         "candidate_id": candidate_id,
         "outputs": dict(outputs),
         "thresholds": dict(thresholds),
+        "fresh": dict(fresh),
     }
 
 

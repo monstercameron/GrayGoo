@@ -39,9 +39,11 @@ import sys
 
 try:
     from evaluator import protocol as _protocol
+    from evaluator import transforms as _transforms
 except ImportError:  # running as a script: evaluator/service.py
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import protocol as _protocol
+    import transforms as _transforms
 
 ProtocolError = _protocol.ProtocolError
 
@@ -128,6 +130,54 @@ def load_hidden_cases(path=None):
 
 
 # --------------------------------------------------------------------------
+# Fresh cases
+# --------------------------------------------------------------------------
+
+#: Kinds eligible for seeded fresh-case generation (boundary pools).
+_FRESH_BOUNDARY_KINDS = ("flatten", "csv_select", "kv_parse", "dates")
+
+
+def generate_fresh_cases(cases, *, seed=0, per_case=2):
+    """Seeded fresh boundary cases derived from loaded corpus kinds.
+
+    For every static case whose ``kind`` is supported, emits ``per_case``
+    solver-computed boundary examples (rotated by ``seed``), returned as
+    service-shaped case dicts with ``fresh:<n>`` ids. Unsupported kinds
+    are skipped, never fatal. Deterministic in ``(seed, per_case)``.
+    """
+    if (isinstance(seed, bool) or not isinstance(seed, int) or seed < 0):
+        raise ValueError("seed must be a non-negative int")
+    if (isinstance(per_case, bool) or not isinstance(per_case, int)
+            or per_case < 1):
+        raise ValueError("per_case must be a positive int")
+    fresh = []
+    counter = 0
+    for index, case in enumerate(cases):
+        kind = case.get("kind") if isinstance(case, dict) else None
+        if kind not in _FRESH_BOUNDARY_KINDS:
+            continue
+        params = case.get("params", {}) or {}
+        try:
+            made = _transforms.new_boundary_examples(
+                kind, seed=seed + index, count=per_case, params=params)
+        except (ValueError, KeyError):
+            continue
+        for boundary in made:
+            fresh.append({
+                "id": "fresh:%d" % counter,
+                "kind": kind,
+                "params": dict(params),
+                "checks": [{"input": boundary["input"],
+                            "expected": boundary["expected"],
+                            "compare": boundary["compare"]}],
+                "fresh": True,
+                "fresh_seed": seed + index,
+            })
+            counter += 1
+    return fresh
+
+
+# --------------------------------------------------------------------------
 # Scoring
 # --------------------------------------------------------------------------
 
@@ -163,12 +213,16 @@ def _resolve_thresholds(thresholds):
     return merged
 
 
-def evaluate(candidate_id, outputs, cases=None, thresholds=None):
+def evaluate(candidate_id, outputs, cases=None, thresholds=None,
+             fresh=None):
     """Score candidate outputs against the hidden corpus.
 
     ``outputs`` maps ``"<case_id>:<check_index>"`` to output text.
     Returns exactly ``{"verdict": "pass"|"fail", "evidence": {...}}``
     where evidence carries per-case results plus the applied thresholds.
+    ``fresh`` (None/{} disables; else ``{"seed": int, "per_case": int}``)
+    appends seeded fresh cases to the evaluated set; missing outputs for
+    fresh keys fail like any other missing output.
     """
     if not isinstance(candidate_id, str) or not candidate_id:
         raise ValueError("candidate_id must be a non-empty string")
@@ -176,6 +230,17 @@ def evaluate(candidate_id, outputs, cases=None, thresholds=None):
         raise ValueError("outputs must be a dict")
     if cases is None:
         cases = load_hidden_cases()
+    fresh_info = {"seed": 0, "per_case": 0, "generated": 0}
+    if fresh:
+        if not isinstance(fresh, dict):
+            raise ValueError("fresh must be a dict")
+        fresh_cases = generate_fresh_cases(
+            cases, seed=fresh.get("seed", 0),
+            per_case=fresh.get("per_case", 2))
+        cases = list(cases) + fresh_cases
+        fresh_info = {"seed": fresh.get("seed", 0),
+                      "per_case": fresh.get("per_case", 2),
+                      "generated": len(fresh_cases)}
     applied = _resolve_thresholds(thresholds)
 
     case_results = []
@@ -215,6 +280,7 @@ def evaluate(candidate_id, outputs, cases=None, thresholds=None):
                   for c in case_results for i in range(len(c["checks"]))}
     evidence = {
         "thresholds": applied,
+        "fresh": fresh_info,
         "summary": {
             "candidate_id": candidate_id,
             "total_cases": len(case_results),
@@ -257,7 +323,8 @@ def handle_request_json(raw):
         return _protocol.error_response(request_id, exc), 2
     try:
         result = evaluate(request["candidate_id"], request["outputs"],
-                          thresholds=request["thresholds"])
+                          thresholds=request["thresholds"],
+                          fresh=request["fresh"])
     except ValueError as exc:
         return _protocol.error_response(
             request["request_id"], ProtocolError(str(exc))), 2
