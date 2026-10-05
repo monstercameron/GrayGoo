@@ -44,6 +44,9 @@ import text_memory as text_mem_mod
 BASELINES = ("b", "c", "d")
 MEMORY_KIND = {"b": "text", "c": "patch", "d": "dual"}
 PHASE1_SPLIT = "exposure"
+# Supplemental transfer ids (A-TRN-09..16): their A outcomes come from
+# load_a_transfer2, not the frozen A_STRIPPED reference.
+NEW_TASK_IDS = frozenset("A-TRN-%02d" % n for n in range(9, 17))
 
 # Baseline A stripped reference (documents/baseline-a.md + stripped-summary).
 # Used only for comparison deltas; the driver also tries to load the
@@ -121,31 +124,78 @@ def entropy(counts):
 
 
 def load_baseline_a_task_totals(tasks_dir):
-    """Per-task (tokens, latency) from Baseline A stripped files, if present."""
+    """Per-task (tokens, latency) from Baseline A stripped files, if present.
+
+    Also scans artifacts/transfer2/stripped for the supplemental
+    transfer tasks (same per-task shape); absent dirs contribute
+    nothing and callers fall back to zeros.
+    """
     totals = {}
-    base = Path(tasks_dir).resolve().parent.parent / "artifacts" / "baseline-a"
-    stripped = base / "stripped"
-    if not stripped.is_dir():
-        return totals
-    for path in stripped.glob("A-*.json"):
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-            tasks = data.get("summary", {}).get("tasks", [])
-            if tasks:
-                task = tasks[0]
-                totals[task.get("id", path.stem)] = {
-                    "total_tokens": task.get("totals", {}).get("total_tokens", 0),
-                    "latency_ms": task.get("totals", {}).get("latency_ms", 0.0),
-                }
-        except (OSError, ValueError):
+    artifacts = Path(tasks_dir).resolve().parent.parent / "artifacts"
+    dirs = [artifacts / "baseline-a" / "stripped",
+            artifacts / "transfer2" / "stripped"]
+    for stripped in dirs:
+        if not stripped.is_dir():
             continue
+        for path in stripped.glob("A-*.json"):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                tasks = data.get("summary", {}).get("tasks", [])
+                if tasks:
+                    task = tasks[0]
+                    totals[task.get("id", path.stem)] = {
+                        "total_tokens": task.get("totals", {}).get(
+                            "total_tokens", 0),
+                        "latency_ms": task.get("totals", {}).get(
+                            "latency_ms", 0.0),
+                    }
+            except (OSError, ValueError):
+                continue
     return totals
 
 
+def load_a_transfer2(tasks_dir):
+    """Baseline-A outcomes for supplemental transfer (TRN-09..16).
+
+    Reads artifacts/transfer2/stripped/A-TRN-*.json (same per-task
+    shape as baseline-a files). Returns {"passed", "total",
+    "fail_ids"}; empty/zeroed when the validation run is absent, in
+    which case new-task A-relative claims are withheld, not guessed.
+    """
+    outcome = {"passed": 0, "total": 0, "fail_ids": set()}
+    base = (Path(tasks_dir).resolve().parent.parent / "artifacts"
+            / "transfer2" / "stripped")
+    if not base.is_dir():
+        return outcome
+    for path in sorted(base.glob("A-TRN-*.json")):
+        if path.stem not in NEW_TASK_IDS:
+            continue  # old-transfer revalidation lives here too
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            tasks = data.get("summary", {}).get("tasks", [])
+            if not tasks:
+                continue
+            outcome["total"] += 1
+            if tasks[0].get("passed"):
+                outcome["passed"] += 1
+            else:
+                outcome["fail_ids"].add(tasks[0].get("id", path.stem))
+        except (OSError, ValueError):
+            continue
+    return outcome
+
+
 def run_baseline(baseline, tasks, out_root, inner, a_totals, top_k=2,
-                 max_chars=320):
-    """Run one baseline's two phases; return the summary dict."""
+                 max_chars=320, phase2_ids=None, a2=None):
+    """Run one baseline's two phases; return the summary dict.
+
+    ``phase2_ids`` (optional) restricts Phase 2 to those task ids
+    (Phase 1 still runs full exposure: memory must seed identically).
+    Unknown or exposure ids raise ValueError. ``a2`` is the
+    :func:`load_a_transfer2` reference (new-task A outcomes).
+    """
     out_dir = Path(out_root) / baseline
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -330,6 +380,17 @@ def run_baseline(baseline, tasks, out_root, inner, a_totals, top_k=2,
         (t for t in tasks if t["split"] != PHASE1_SPLIT),
         key=lambda t: t["id"],
     )
+    partial = False
+    if phase2_ids is not None:
+        want = list(phase2_ids)
+        known = {t["id"] for t in phase2}
+        bad = [i for i in want if i not in known]
+        if bad:
+            raise ValueError(
+                "phase2_ids must name Phase-2 tasks, unknown/exposure: %s"
+                % (", ".join(sorted(set(bad))),))
+        phase2 = [t for t in phase2 if t["id"] in set(want)]
+        partial = True
     print("baseline %s (%s): phase 1 exposure x%d (no memory)" % (
         baseline, kind, len(exposure)))
     for task in exposure:
@@ -361,13 +422,75 @@ def run_baseline(baseline, tasks, out_root, inner, a_totals, top_k=2,
         baseline, kind, per_task_records, out_root,
         p1_text, p1_patches, text_mem, patch_mem,
         text_reuse_counts, patch_reuse_counts,
+        partial=partial, a2=a2,
     )
+
+
+def _comparison_block(passed, total, by_split, phase2, partial, a2,
+                      a_fail_ids):
+    """A-relative comparison block.
+
+    Legacy keys keep their exact 35-task-reference meaning; when the
+    run population differs (supplemental tasks, --phase2-ids filter),
+    ``population_mismatch``/``partial`` flags say so instead of
+    letting the deltas mislead. ``transfer2_vs_a`` carries the
+    new-task evidence table whenever its A reference loaded.
+    """
+    block = {
+        "tasks_delta": passed - A_STRIPPED["tasks_passed"],
+        "rate_delta": round(passed / total - A_STRIPPED["tasks_passed"] / 35.0, 4)
+        if total else 0.0,
+        "by_split_delta": {
+            split: (
+                by_split[split]["passed"]
+                - A_STRIPPED["by_split"][split]["passed"]
+            )
+            for split in by_split
+            if split in A_STRIPPED["by_split"]
+        },
+        "reference_tasks": 35,
+        "run_tasks": total,
+        "population_mismatch": total != 35,
+        "partial": bool(partial),
+    }
+    new_rows = [r for r in phase2
+                if r["summary"]["tasks"][0]["id"] in NEW_TASK_IDS]
+    if new_rows and a2["total"] > 0:
+        new_passed = sum(1 for r in new_rows
+                         if r["summary"]["tasks"][0]["passed"])
+        block["transfer2_vs_a"] = {
+            "run_passed": new_passed,
+            "run_total": len(new_rows),
+            "a_passed": a2["passed"],
+            "a_total": a2["total"],
+            "improvements": sorted(
+                r["summary"]["tasks"][0]["id"] for r in new_rows
+                if r["summary"]["tasks"][0]["id"] in a_fail_ids
+                and r["summary"]["tasks"][0]["passed"]),
+            "regressions": sorted(
+                r["summary"]["tasks"][0]["id"] for r in new_rows
+                if r["summary"]["tasks"][0]["id"] not in a_fail_ids
+                and not r["summary"]["tasks"][0]["passed"]),
+        }
+    elif new_rows:
+        block["transfer2_vs_a"] = {
+            "withheld": "transfer-2 A reference absent; run the "
+                        "artifacts/transfer2 validation first",
+        }
+    return block
 
 
 def summarize_baseline(baseline, kind, records, out_root,
                        p1_text, p1_patches, text_mem, patch_mem,
-                       text_reuse_counts, patch_reuse_counts):
-    """Aggregate per-task records into a baseline summary dict + file."""
+                       text_reuse_counts, patch_reuse_counts,
+                       partial=False, a2=None):
+    """Aggregate per-task records into a baseline summary dict + file.
+
+    ``partial`` marks --phase2-ids runs (comparison deltas vs the
+    full-35 A reference are withheld, not miscomputed). ``a2`` is the
+    transfer-2 A reference; without it, new-task A-relative claims
+    are withheld.
+    """
     total = len(records)
     passed = sum(1 for r in records if r["summary"]["tasks"][0]["passed"])
     by_split = {}
@@ -424,15 +547,22 @@ def summarize_baseline(baseline, kind, records, out_root,
         if r["memory"].get("retrieval", {}).get("patches", {}).get("reuse")
         and r["summary"]["tasks"][0]["passed"]
     )
-    # Transfer deltas vs Baseline A stripped (Phase 2 only).
+    # Transfer deltas vs Baseline A stripped (Phase 2 only). The A
+    # fail set combines the frozen 35-task reference with the
+    # transfer-2 A outcomes when loaded; new-task ids with no A
+    # reference are excluded (a regression claim needs an A outcome).
+    a2 = a2 or {"passed": 0, "total": 0, "fail_ids": set()}
+    a_fail_ids = set(A_STRIPPED["fail_ids"]) | set(a2["fail_ids"])
     neg_transfer = sorted(
         r["summary"]["tasks"][0]["id"] for r in phase2
-        if r["summary"]["tasks"][0]["id"] not in A_STRIPPED["fail_ids"]
+        if r["summary"]["tasks"][0]["id"] not in a_fail_ids
         and not r["summary"]["tasks"][0]["passed"]
+        and (r["summary"]["tasks"][0]["id"] not in NEW_TASK_IDS
+             or a2["total"] > 0)
     )
     pos_transfer = sorted(
         r["summary"]["tasks"][0]["id"] for r in phase2
-        if r["summary"]["tasks"][0]["id"] in A_STRIPPED["fail_ids"]
+        if r["summary"]["tasks"][0]["id"] in a_fail_ids
         and r["summary"]["tasks"][0]["passed"]
     )
     # Patch reuse outcomes via the root transfer module.
@@ -491,19 +621,8 @@ def summarize_baseline(baseline, kind, records, out_root,
             "text_reuse_entropy": round(entropy(text_reuse_counts), 4),
             "capability_entropy": round(entropy(patch_reuse_counts), 4),
         },
-        "comparison_vs_a_stripped": {
-            "tasks_delta": passed - A_STRIPPED["tasks_passed"],
-            "rate_delta": round(passed / total - A_STRIPPED["tasks_passed"] / 35.0, 4)
-            if total else 0.0,
-            "by_split_delta": {
-                split: (
-                    by_split[split]["passed"]
-                    - A_STRIPPED["by_split"][split]["passed"]
-                )
-                for split in by_split
-                if split in A_STRIPPED["by_split"]
-            },
-        },
+        "comparison_vs_a_stripped": _comparison_block(
+            passed, total, by_split, phase2, partial, a2, a_fail_ids),
     }
     out_path = Path(out_root) / ("%s-summary.json" % baseline)
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -524,6 +643,9 @@ def main(argv=None) -> int:
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--top-k", type=int, default=2)
     parser.add_argument("--max-chars", type=int, default=320)
+    parser.add_argument("--phase2-ids", default=None,
+                        help="comma-separated Phase-2 task ids to run "
+                             "(Phase 1 still runs full exposure)")
     args = parser.parse_args(argv)
 
     tasks = runner.load_tasks(Path(args.tasks))
@@ -533,13 +655,28 @@ def main(argv=None) -> int:
         for problem in problems:
             print("  %s" % problem, file=sys.stderr)
         return 2
-    if len(tasks) != 35:
-        print("expected 35 tasks, got %d" % len(tasks), file=sys.stderr)
+    # The load-bearing invariant is frozen Phase 1 (18 exposure tasks);
+    # later splits may grow by append (transfer-2: 43 tasks total).
+    n_exposure = sum(1 for t in tasks if t["split"] == PHASE1_SPLIT)
+    if n_exposure != 18 or len(tasks) < 35:
+        print("expected 18 exposure tasks and >= 35 total, got %d/%d"
+              % (n_exposure, len(tasks)), file=sys.stderr)
         return 2
+    phase2_ids = None
+    if args.phase2_ids:
+        phase2_ids = [i.strip() for i in args.phase2_ids.split(",")
+                      if i.strip()]
+        if not phase2_ids:
+            print("--phase2-ids names no tasks", file=sys.stderr)
+            return 2
 
     baselines = BASELINES if args.baseline == "all" else (args.baseline,)
     a_totals = load_baseline_a_task_totals(args.tasks)
-    print("baseline A per-task totals loaded: %d/35" % len(a_totals))
+    print("baseline A per-task totals loaded: %d/%d"
+          % (len(a_totals), len(tasks)))
+    a2 = load_a_transfer2(args.tasks)
+    print("transfer-2 A reference: %d/%d passed"
+          % (a2["passed"], a2["total"]))
 
     overall_ok = True
     for baseline in baselines:
@@ -551,13 +688,27 @@ def main(argv=None) -> int:
             inner = runner.StubAdapter(Path(args.recorded))
         else:
             inner = runner.CerebrasAdapter(max_tokens=args.max_tokens)
-        summary = run_baseline(
-            baseline, tasks, args.artifacts, inner, a_totals,
-            top_k=args.top_k, max_chars=args.max_chars,
-        )
-        print("baseline %s: %d/%d stripped (delta vs A: %+d)" % (
-            baseline, summary["tasks_passed"], summary["tasks_total"],
-            summary["comparison_vs_a_stripped"]["tasks_delta"]))
+        try:
+            summary = run_baseline(
+                baseline, tasks, args.artifacts, inner, a_totals,
+                top_k=args.top_k, max_chars=args.max_chars,
+                phase2_ids=phase2_ids, a2=a2,
+            )
+        except ValueError as exc:
+            print("bad --phase2-ids: %s" % exc, file=sys.stderr)
+            return 2
+        cmp_block = summary["comparison_vs_a_stripped"]
+        scope = "partial" if cmp_block.get("partial") else "full"
+        t2 = cmp_block.get("transfer2_vs_a", {})
+        print("baseline %s [%s]: %d/%d stripped (delta vs A: %+d)" % (
+            baseline, scope, summary["tasks_passed"],
+            summary["tasks_total"], cmp_block["tasks_delta"]))
+        if isinstance(t2, dict) and "run_passed" in t2:
+            print("  transfer2: run %d/%d vs A %d/%d; improvements=%s "
+                  "regressions=%s" % (
+                      t2["run_passed"], t2["run_total"],
+                      t2["a_passed"], t2["a_total"],
+                      t2["improvements"], t2["regressions"]))
         overall_ok = overall_ok and summary["tasks_passed"] == summary["tasks_total"]
     return 0 if overall_ok else 1
 
