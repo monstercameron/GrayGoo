@@ -5,7 +5,7 @@ outputs pass, wrong/missing outputs fail), transform semantics
 preservation across every transform type, hidden-corpus self-consistency,
 and strict rejection of malformed protocol requests.
 
-Run from the repo root:  python -m unittest discover -s evaluator -v
+Run from the repo root:  python -m unittest discover -s tests -v
 """
 
 import json
@@ -14,11 +14,9 @@ import subprocess
 import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import protocol
-import service
-import transforms
+from evaluator import protocol, service, transforms
 
 CSV_PARAMS = {"columns": {"name": "name", "city": "city", "note": "note"}}
 KV_PARAMS = {"ignore": ["trace"]}

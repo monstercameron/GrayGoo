@@ -35,7 +35,7 @@ verified, how, and what remains open.
 
 - `src/` + `graygoo.asd` — Common Lisp system (primary runtime language)
 - Root `*.py` — Python tooling/adapters (`cerebras_client.py`, `s_expr.py`, `events.py`)
-- `tests/` — `unittest` suites, one file per module (`test_<module>.py`)
+- `tests/` — all test code lives here: `unittest` suites one file per module (`test_<module>.py`), standalone verifiers (`verify_*.py`), SBCL probes (`lisp/`). Never scatter tests into source dirs or `artifacts/`.
 - `benchmarks/` — task families + offline runner
 - `documents/` — digests; `docs/` — static GitHub Pages site; `artifacts/` — generated outputs (gitignored)
 
