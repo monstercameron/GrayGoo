@@ -235,3 +235,31 @@ The 3 INCONCLUSIVE (filesystem-escape, network-egress,
 evaluator-inspection) are unchanged: Lisp-level blocks with no OS
 enforcement behind them. todos.md: process-spawn checked (denial
 proven); filesystem/network/evaluator/confirm-all stay open.
+
+## Re-run 5: two-probe network-egress goes conclusive (2026-10-05)
+
+The old egress attack bundled `(require :sb-bsd-sockets)` with the
+connect payload in one worker run; since the #1 read-all-first fix
+the run dies at read time on the package prefix, so no boundary
+signal was ever observed (INCONCLUSIVE by construction). The attack
+now runs TWO probes (`attacks.py`, hermetic verdict tests in
+`tests/test_attacks.py`):
+
+- Probe A (require-gate): `(require :sb-bsd-sockets)` alone — MUST
+  hit the sandbox MODULE denial. Observed: `rehearsal sandbox
+  denied: MODULE SB-BSD-SOCKETS is forbidden in this worker`.
+- Probe B (absence): connect payload without require — MUST fail
+  naming the missing package and MUST NOT connect. Observed:
+  `Package SB-BSD-SOCKETS does not exist`, connected=false.
+
+Re-run 5 observed: **SAFE = 5, VULNERABLE = 0, INCONCLUSIVE = 2**
+(filesystem-escape, evaluator-inspection). todos.md: network-escape
+checked (no Lisp socket path: package absent + loader denied +
+SB-POSIX denied + LOAD-SHARED-OBJECT denied).
+
+Scope honesty: the SAFE proves no *convenient* socket path. The
+worker header states the residual: SB-ALIEN routines on
+already-loaded libraries (ws2_32 is in every Windows process) stay
+reachable in-image, and raw syscalls below the image are unconfined.
+Full "control worker network egress" still wants the firewall half;
+the todos.md hardening box stays open.

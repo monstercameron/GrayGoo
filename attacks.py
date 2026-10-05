@@ -277,54 +277,78 @@ def _attack_filesystem_escape(ctx, code_or_fn):
 
 
 def _attack_network_egress(ctx, code_or_fn):
-    """(e) ONE example.com:80 connect from the worker, 5s wall-clock max.
+    """(e) Socket egress from the worker: require-gate + absence probes.
 
-    The whole worker run (DNS + connect + close) is bounded by
-    ``timeout_s=5``. No fallback probe, no retries: this attack performs at
-    most one outbound connection per suite run.
+    Two sub-probes, at most one outbound connection attempt per suite
+    run (probe B, bounded by ``timeout_s=5``):
+
+    * Probe A (require-gate): ``(require :sb-bsd-sockets)`` alone —
+      reads cleanly (no package prefix) and MUST hit the sandbox's
+      MODULE denial. Proves sockets cannot be loaded.
+    * Probe B (absence): the connect payload WITHOUT require — MUST
+      fail naming the missing package and MUST NOT connect. Proves
+      sockets are absent from the worker image.
+
+    SAFE requires BOTH: denial observed AND no connect. Scope: this
+    proves no Lisp socket path (package absent + loader denied, and
+    SB-POSIX is denied too). Raw syscalls below the image are NOT
+    covered — no OS enforcement exists (adversarial-report caveat).
     """
     if isinstance(code_or_fn, str):
-        code = code_or_fn
-        timeout_s = 5
+        codes = [("_custom", code_or_fn, 5)]
     else:
-        # NOTE: two top-level forms, not one PROGN: the worker reads and
-        # evals incrementally, so REQUIRE takes effect before the second
-        # form's SB-BSD-SOCKETS symbols are read.
-        code = (
-            "(require :sb-bsd-sockets) "
-            "(let ((addr (car (sb-bsd-sockets:host-ent-addresses "
-            '(sb-bsd-sockets:get-host-by-name "%s"))))) '
-            "(let ((s (make-instance 'sb-bsd-sockets:inet-socket "
-            ":type :stream :protocol :tcp))) "
-            "(unwind-protect "
-            "(progn (sb-bsd-sockets:socket-connect s addr %d) :egress-open) "
-            "(ignore-errors (sb-bsd-sockets:socket-close s)))))"
-            % (EGRESS_HOST, EGRESS_PORT))
-        timeout_s = 5
-    result = ctx.run(code, timeout_s=timeout_s)
-    connected = str(result["return_value"] or "") == ":EGRESS-OPEN"
+        codes = [
+            ("require-gate", "(require :sb-bsd-sockets)", 10),
+            ("absence",
+             "(let ((addr (car (sb-bsd-sockets:host-ent-addresses "
+             '(sb-bsd-sockets:get-host-by-name "%s"))))) '
+             "(let ((s (make-instance 'sb-bsd-sockets:inet-socket "
+             ":type :stream :protocol :tcp))) "
+             "(unwind-protect "
+             "(progn (sb-bsd-sockets:socket-connect s addr %d) "
+             ":egress-open) "
+             "(ignore-errors (sb-bsd-sockets:socket-close s)))))"
+             % (EGRESS_HOST, EGRESS_PORT), 5),
+        ]
+    probes = {}
+    for name, code, timeout_s in codes:
+        result = ctx.run(code, timeout_s=timeout_s)
+        probes[name] = {
+            "connected": (str(result["return_value"] or "")
+                          == ":EGRESS-OPEN"),
+            "ok": result["ok"],
+            "timed_out": result["timed_out"],
+            "return_value": _snippet(result["return_value"], 200),
+            "error": _snippet(result["error"]),
+        }
     evidence = {
-        "expected": "connect blocked or denied by the boundary",
+        "expected": "require denied AND connect impossible (no sockets)",
         "target": "%s:%d" % (EGRESS_HOST, EGRESS_PORT),
-        "probe_budget": "single TCP connect, worker wall-clock %ss" % timeout_s,
-        "connected": connected,
-        "ok": result["ok"],
-        "timed_out": result["timed_out"],
-        "return_value": _snippet(result["return_value"], 200),
-        "error": _snippet(result["error"]),
+        "probe_budget": ("one require-gate probe + one TCP connect, "
+                         "worker wall-clock 5s max"),
+        "connected": any(p["connected"] for p in probes.values()),
+        "probes": probes,
     }
-    if connected:
+    if evidence["connected"]:
         return "VULNERABLE", evidence
-    lowered = str(result["error"] or "").lower()
-    if any(word in lowered for word in
-           ("denied", "forbidden", "sandbox", "not permitted",
-            "operation not allowed", "protocol not supported")):
+    if len(codes) == 1:  # custom payload: single-probe legacy verdict
+        lowered = probes[codes[0][0]]["error"].lower()
+        if "denied" in lowered or "forbidden" in lowered:
+            return "SAFE", evidence
+        evidence["note"] = "no boundary denial observed"
+        return "INCONCLUSIVE", evidence
+    gate_error = probes["require-gate"]["error"].lower()
+    gate_denied = ("denied" in gate_error and "module" in gate_error
+                   and not probes["require-gate"]["ok"])
+    absence_error = probes["absence"]["error"].lower()
+    absent = (not probes["absence"]["ok"]
+              and "sb-bsd-sockets" in absence_error)
+    evidence["require_denied"] = gate_denied
+    evidence["package_absent"] = absent
+    if gate_denied and absent:
         return "SAFE", evidence
-    # Refused/timeout/DNS failure proves nothing about the boundary: the
-    # sandbox itself imposed no restriction, the packet just did not
-    # complete. Report honestly instead of claiming a block.
-    evidence["note"] = ("no boundary denial observed; egress path is "
-                        "unrestricted by the rehearsal sandbox")
+    evidence["note"] = ("incomplete socket removal: require_denied=%s "
+                        "package_absent=%s" % (gate_denied, absent))
     return "INCONCLUSIVE", evidence
 
 

@@ -86,5 +86,61 @@ class AttackRegistryTest(unittest.TestCase):
             attacks.run_all(["infinite-loop", "bogus"])
 
 
+class FakeCtx:
+    """Duck-typed AttackContext: canned worker results, no SBCL."""
+
+    def __init__(self, results):
+        self._results = list(results)
+
+    def run(self, code, timeout_s=10.0, memory_mb=512):
+        del code, timeout_s, memory_mb
+        return self._results.pop(0)
+
+
+def _worker_result(ok=False, error="", return_value="",
+                   timed_out=False):
+    return {"ok": ok, "error": error, "return_value": return_value,
+            "timed_out": timed_out, "stdout": "", "elapsed_ms": 1.0}
+
+
+class NetworkEgressVerdictTest(unittest.TestCase):
+    """Hermetic tests for the two-probe egress verdict logic."""
+
+    def test_both_signals_is_safe(self):
+        ctx = FakeCtx([
+            _worker_result(
+                error="rehearsal sandbox denied: MODULE SB-BSD-SOCKETS "
+                      "is forbidden in this worker"),
+            _worker_result(
+                error="Package SB-BSD-SOCKETS does not exist."),
+        ])
+        verdict, evidence = attacks._attack_network_egress(ctx, None)
+        self.assertEqual(verdict, "SAFE")
+        self.assertTrue(evidence["require_denied"])
+        self.assertTrue(evidence["package_absent"])
+        self.assertFalse(evidence["connected"])
+
+    def test_missing_gate_signal_is_inconclusive(self):
+        ctx = FakeCtx([
+            _worker_result(ok=True, return_value=":ALREADY-LOADED"),
+            _worker_result(
+                error="Package SB-BSD-SOCKETS does not exist."),
+        ])
+        verdict, evidence = attacks._attack_network_egress(ctx, None)
+        self.assertEqual(verdict, "INCONCLUSIVE")
+        self.assertFalse(evidence["require_denied"])
+
+    def test_connect_is_vulnerable(self):
+        ctx = FakeCtx([
+            _worker_result(
+                error="rehearsal sandbox denied: MODULE SB-BSD-SOCKETS "
+                      "is forbidden in this worker"),
+            _worker_result(ok=True, return_value=":EGRESS-OPEN"),
+        ])
+        verdict, evidence = attacks._attack_network_egress(ctx, None)
+        self.assertEqual(verdict, "VULNERABLE")
+        self.assertTrue(evidence["connected"])
+
+
 if __name__ == "__main__":
     unittest.main()

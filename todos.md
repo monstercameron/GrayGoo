@@ -230,7 +230,7 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Memory bomb
   - [x] Process spawn attempt
   - [ ] Filesystem escape attempt
-  - [ ] Network escape attempt
+  - [x] Network escape attempt
   - [x] Kernel mutation attempt
   - [ ] Evaluator inspection attempt
   - [ ] Confirm all fail safely
