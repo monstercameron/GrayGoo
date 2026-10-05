@@ -31,7 +31,12 @@
            #:derive-version
            #:capability-expired-p
            #:*lifecycle-states*
-           #:lifecycle-state-p))
+           #:lifecycle-state-p
+           #:stable-id
+           #:stable-id-p
+           #:make-stable-id
+           #:capability-stable-id
+           #:capability-display-name))
 
 (defpackage :evo.contract
   (:use :cl)
@@ -75,4 +80,6 @@
            #:save-capability
            #:load-capability
            #:save-registry
-           #:load-registry))
+           #:load-registry
+           #:find-by-stable-id
+           #:stable-id-pathname))

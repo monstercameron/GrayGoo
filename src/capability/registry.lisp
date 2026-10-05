@@ -49,6 +49,36 @@ re-registering an existing (ID . VERSION) signals an error."
              *registry*)
     (sort versions #'<)))
 
+(defun find-by-stable-id (stable-id)
+  "Return the sorted version list for the family named by STABLE-ID.
+Only entries whose record is a capability struct carrying STABLE-ID
+match; raw (non-struct) records are skipped. Returns NIL when the
+stable-id is unknown. Signals an error when STABLE-ID is malformed."
+  (unless (evo.capability:stable-id-p stable-id)
+    (error "Malformed stable-id: ~S." stable-id))
+  (let (versions)
+    (maphash (lambda (key value)
+               (let ((record (getf value :record)))
+                 (when (and (evo.capability:capability-p record)
+                            (string= (evo.capability:capability-stable-id
+                                      record)
+                                     stable-id))
+                   (push (cdr key) versions))))
+             *registry*)
+    (sort versions #'<)))
+
+(defun stable-id-pathname (stable-id version &optional (dir *registry-data-dir*))
+  "Drift-proof pathname for the family named by STABLE-ID at VERSION.
+Unlike VERSION-PATHNAME (symbol-derived, human-browsable), this name
+survives package moves and renames; both spellings persist the same
+plist shape. Signals an error when STABLE-ID is malformed."
+  (unless (evo.capability:stable-id-p stable-id)
+    (error "Malformed stable-id: ~S." stable-id))
+  (merge-pathnames (make-pathname
+                    :name (format nil "~A-v~D" stable-id version)
+                    :type "lisp")
+                   dir))
+
 (defun lineage (id version)
   "Return the parent-version chain for ID at VERSION, newest first."
   (loop with v = version
@@ -108,7 +138,14 @@ plists; every other field must already be printable (see SAVE-CAPABILITY)."
           :dependencies (evo.capability:capability-dependencies capability)
           :source (evo.capability:capability-source capability)
           :creator (evo.capability:capability-creator capability)
-          :model (evo.capability:capability-model capability))))
+          :model (evo.capability:capability-model capability)
+          ;; Stable identity (issues.md #15): round-tripped so reloads
+          ;; keep the family identity across package moves. Optional on
+          ;; read: files written before this field existed load with a
+          ;; fresh stable-id (see PLIST->CAPABILITY).
+          :stable-id (evo.capability:capability-stable-id capability)
+          :display-name (evo.capability:capability-display-name
+                         capability))))
 
 (defun reconstruct-id (name package-name)
   "Rebuild the capability-id symbol stored as NAME + PACKAGE-NAME.
@@ -143,7 +180,11 @@ time are interned in CL-USER."
      :dependencies (getf plist :dependencies)
      :source (getf plist :source)
      :creator (getf plist :creator)
-     :model (getf plist :model))))
+     :model (getf plist :model)
+     ;; Missing keys (pre-#15 files) fall back to MAKE-CAPABILITY
+     ;; defaults: a fresh stable-id and the symbol-name display name.
+     :stable-id (getf plist :stable-id)
+     :display-name (getf plist :display-name))))
 
 (defun save-capability (capability &optional (dir *registry-data-dir*))
   "Persist CAPABILITY to a printable file under DIR; return the pathname.

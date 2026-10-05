@@ -9,6 +9,24 @@
 
 (in-package :evo.dispatch)
 
+;;; --- Control-plane lock (issues.md #16) ------------------------------
+;;; Epochs, pins, version tables, and promotion state can race under
+;;; concurrent mutation. Every control-plane UPDATE (register, publish,
+;;; drain, pin/unpin) runs under *DISPATCH-LOCK*; read-only resolution
+;;; (%RESOLVE-VERSION against an immutable snapshot) stays lock-free so
+;;; steady-state invocation never blocks on the control plane.
+;;; Additive: no signature changed; WITH-DISPATCH-LOCK is also available
+;;; to future control-plane callers (via EVO.DISPATCH:: until the kernel
+;;; packages file exports it).
+
+(defvar *dispatch-lock* (sb-thread:make-mutex :name "evo.dispatch")
+  "Serializes control-plane updates (register/promote/rollback/drain/pin).")
+
+(defmacro with-dispatch-lock (() &body body)
+  "Execute BODY holding the dispatch control-plane lock."
+  `(sb-thread:with-mutex (*dispatch-lock*)
+     ,@body))
+
 ;;; --- Dispatch cells ------------------------------------------------
 ;;; Each cell maps a capability-id to an immutable version list (entries are
 ;;; added, never removed) plus a current pointer naming the live version.
@@ -63,15 +81,17 @@ is unknown or already drained."
 
 (defun %pin-epoch (epoch)
   "Pin EPOCH for one live request. Signals when EPOCH is not live."
-  (%snapshot epoch)
-  (setf (gethash epoch *epoch-pins*)
-        (1+ (gethash epoch *epoch-pins* 0))))
+  (with-dispatch-lock ()
+    (%snapshot epoch)
+    (setf (gethash epoch *epoch-pins*)
+          (1+ (gethash epoch *epoch-pins* 0)))))
 
 (defun %unpin-epoch (epoch)
   "Release one request pin on EPOCH."
-  (let ((count (gethash epoch *epoch-pins* 0)))
-    (when (plusp count)
-      (setf (gethash epoch *epoch-pins*) (1- count)))))
+  (with-dispatch-lock ()
+    (let ((count (gethash epoch *epoch-pins* 0)))
+      (when (plusp count)
+        (setf (gethash epoch *epoch-pins*) (1- count))))))
 
 (defmacro with-epoch (epoch &body body)
   "Execute BODY with requests pinned to EPOCH (plan.md §27).
@@ -95,17 +115,18 @@ Re-registering an existing version is an error: versions are immutable."
   (check-type name symbol)
   (unless (functionp function)
     (error "Not a function: ~S." function))
-  (let ((versions (or (gethash name *cells*)
-                      (setf (gethash name *cells*)
-                            (make-hash-table :test 'eql)))))
-    (when (nth-value 1 (gethash version versions))
-      (error "Version ~S of capability ~S is already registered (immutable)."
-             version name))
-    (setf (gethash version versions) function)
-    (unless (nth-value 1 (gethash name *current-versions*))
-      (setf (gethash name *current-versions*) version)
-      (setf (gethash name (%snapshot *latest-epoch*)) version))
-    version))
+  (with-dispatch-lock ()
+    (let ((versions (or (gethash name *cells*)
+                        (setf (gethash name *cells*)
+                              (make-hash-table :test 'eql)))))
+      (when (nth-value 1 (gethash version versions))
+        (error "Version ~S of capability ~S is already registered (immutable)."
+               version name))
+      (setf (gethash version versions) function)
+      (unless (nth-value 1 (gethash name *current-versions*))
+        (setf (gethash name *current-versions*) version)
+        (setf (gethash name (%snapshot *latest-epoch*)) version))
+      version)))
 
 (defun capability-versions (name)
   "Return the ascending list of registered versions for capability NAME.
@@ -125,18 +146,19 @@ The list only grows: versions are never deleted (plan.md §4.7)."
   "Point NAME at VERSION under a fresh epoch. Returns the new epoch.
 Copies the latest snapshot so older epochs keep resolving exactly what
 they resolved before; never deletes any version."
-  (let ((versions (gethash name *cells*)))
-    (unless (and versions (nth-value 1 (gethash version versions)))
-      (error "No such version ~S of capability ~S." version name)))
-  (let ((snapshot (make-hash-table :test 'eq))
-        (new-epoch (1+ *latest-epoch*)))
-    (maphash (lambda (k v) (setf (gethash k snapshot) v))
-             (%snapshot *latest-epoch*))
-    (setf (gethash name snapshot) version)
-    (setf (gethash new-epoch *epoch-snapshots*) snapshot)
-    (setf *latest-epoch* new-epoch)
-    (setf (gethash name *current-versions*) version)
-    new-epoch))
+  (with-dispatch-lock ()
+    (let ((versions (gethash name *cells*)))
+      (unless (and versions (nth-value 1 (gethash version versions)))
+        (error "No such version ~S of capability ~S." version name)))
+    (let ((snapshot (make-hash-table :test 'eq))
+          (new-epoch (1+ *latest-epoch*)))
+      (maphash (lambda (k v) (setf (gethash k snapshot) v))
+               (%snapshot *latest-epoch*))
+      (setf (gethash name snapshot) version)
+      (setf (gethash new-epoch *epoch-snapshots*) snapshot)
+      (setf *latest-epoch* new-epoch)
+      (setf (gethash name *current-versions*) version)
+      new-epoch)))
 
 (defun promote-version (name version)
   "Promote VERSION of capability NAME to current under a new epoch
@@ -158,15 +180,16 @@ Returns the new epoch."
 Refuses the latest epoch and any epoch with pinned requests. The
 version functions are retained: draining drops only the epoch's routing
 table. Returns EPOCH."
-  (when (eql epoch *latest-epoch*)
-    (error "Cannot drain the latest epoch ~S." epoch))
-  (%snapshot epoch)
-  (when (epoch-pinned-p epoch)
-    (error "Cannot drain epoch ~S: ~D request(s) still pinned."
-           epoch (gethash epoch *epoch-pins*)))
-  (remhash epoch *epoch-snapshots*)
-  (remhash epoch *epoch-pins*)
-  epoch)
+  (with-dispatch-lock ()
+    (when (eql epoch *latest-epoch*)
+      (error "Cannot drain the latest epoch ~S." epoch))
+    (%snapshot epoch)
+    (when (epoch-pinned-p epoch)
+      (error "Cannot drain epoch ~S: ~D request(s) still pinned."
+             epoch (gethash epoch *epoch-pins*)))
+    (remhash epoch *epoch-snapshots*)
+    (remhash epoch *epoch-pins*)
+    epoch))
 
 ;;; --- Invocation ------------------------------------------------------
 

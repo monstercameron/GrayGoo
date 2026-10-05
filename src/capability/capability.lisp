@@ -18,6 +18,58 @@ Symbols name globally addressable capabilities."
   "Return true when ID is a valid CAPABILITY-ID."
   (typep id 'capability-id))
 
+;;;; Stable identity (issues.md #15).
+;;;;
+;;;; The symbol ID is the in-image binding name: it can drift across
+;;;; package moves, reloads, and persistence round-trips (see
+;;;; EVO.REGISTRY:RECONSTRUCT-ID, which interns into CL-USER when the
+;;;; home package is missing). The STABLE-ID is the persistent identity:
+;;;; a UUID version-4 string minted once per capability family, shared by
+;;;; every version (see DERIVE-VERSION), and round-tripped through
+;;;; persistence. DISPLAY-NAME is the human-facing binding label and
+;;;; defaults to the symbol name. New code should key long-lived
+;;;; references (ledgers, manifests, fingerprints) on the stable-id and
+;;;; treat the symbol as display only.
+
+(deftype stable-id ()
+  "A persistent capability-identity string (UUID version 4)."
+  'string)
+
+(defvar *stable-id-random-state* (make-random-state t)
+  "Random source for MAKE-STABLE-ID, seeded from the clock at load.")
+
+(defun %uuid-hex (bytes)
+  "Format 16 BYTES as a UUID version-4 string."
+  (setf (aref bytes 6) (logior (logand (aref bytes 6) #x0F) #x40))
+  (setf (aref bytes 8) (logior (logand (aref bytes 8) #x3F) #x80))
+  (with-output-to-string (out)
+    (loop for index below 16
+          for byte = (aref bytes index)
+          do (when (member index '(4 6 8 10)) (write-char #\- out))
+             (format out "~2,'0X" byte))))
+
+(defun make-stable-id ()
+  "Mint a fresh stable identity: a UUID version-4 string.
+No external dependencies; randomness comes from
+*STABLE-ID-RANDOM-STATE*."
+  (let ((bytes (make-array 16 :element-type '(unsigned-byte 8))))
+    (loop for index below 16
+          do (setf (aref bytes index)
+                   (random 256 *stable-id-random-state*)))
+    (string-downcase (%uuid-hex bytes))))
+
+(defun stable-id-p (id)
+  "Return true when ID is a well-formed stable-id UUID string."
+  (and (stringp id)
+       (= (length id) 36)
+       (char= (char id 8) #\-) (char= (char id 13) #\-)
+       (char= (char id 18) #\-) (char= (char id 23) #\-)
+       (loop for index below 36
+             for ch = (char id index)
+             always (or (member index '(8 13 18 23))
+                        (digit-char-p ch 16)))
+       t))
+
 (defvar *lifecycle-states*
   '(:proposed :ephemeral :patch :skill :procedural-family :stable
     :deprecated :retired)
@@ -57,20 +109,38 @@ source (a string or a readable form) for persistence (plan.md §43)."
   (dependencies nil :type list :read-only t)
   (source nil :type t :read-only t)
   (creator nil :type t :read-only t)
-  (model nil :type t :read-only t))
+  (model nil :type t :read-only t)
+  ;; Stable identity (issues.md #15): STABLE-ID is the persistent,
+  ;; package-independent identity shared by every version of one family;
+  ;; DISPLAY-NAME is the human/symbolic binding name. Both are additive:
+  ;; older code that never passes them keeps working (see MAKE-CAPABILITY
+  ;; defaults). New slots are appended so keyword construction is
+  ;; unaffected.
+  (stable-id nil :type (or null string) :read-only t)
+  (display-name nil :type (or null string) :read-only t))
 
 (defun make-capability (id &key (version 1) parent-version (state :proposed)
                              promotion-status (risk :r0)
                              (created-at (get-universal-time))
                              ttl intent contract inputs outputs effects
-                             dependencies source creator model)
+                             dependencies source creator model
+                             stable-id display-name)
   "Construct an immutable capability version record.
 
 ID must be a CAPABILITY-ID, VERSION a positive integer, and STATE /
 PROMOTION-STATUS known lifecycle states (PROMOTION-STATUS defaults to
-STATE). TTL is NIL or a non-negative integer number of seconds."
+STATE). TTL is NIL or a non-negative integer number of seconds.
+STABLE-ID defaults to a fresh UUID string (see MAKE-STABLE-ID) and
+DISPLAY-NAME defaults to the symbol name of ID; both are validated when
+given explicitly."
   (unless (capability-id-p id)
     (error "Capability id must be a symbol, got ~S." id))
+  (let ((stable (or stable-id (make-stable-id)))
+        (display (or display-name (symbol-name id))))
+    (unless (stable-id-p stable)
+      (error "Stable id must be a UUID string, got ~S." stable))
+    (unless (stringp display)
+      (error "Display name must be a string, got ~S." display))
   (unless (and (integerp version) (> version 0))
     (error "Capability version must be a positive integer, got ~S." version))
   (when (and parent-version
@@ -90,13 +160,15 @@ STATE). TTL is NIL or a non-negative integer number of seconds."
                       :intent intent :contract contract
                       :inputs inputs :outputs outputs :effects effects
                       :dependencies dependencies :source source
-                      :creator creator :model model)))
+                      :creator creator :model model
+                      :stable-id stable :display-name display))))
 
 (defun derive-version (capability &key version state promotion-status risk ttl
                                     (intent nil intent-given-p)
                                     (contract nil contract-given-p)
                                     inputs outputs effects
-                                    dependencies source creator model)
+                                    dependencies source creator model
+                                    stable-id display-name)
   "Create the child version of CAPABILITY without mutating it.
 
 The child keeps every parent field unless overridden. Its VERSION
@@ -104,7 +176,9 @@ defaults to one plus the parent version and its PARENT-VERSION is the
 parent version, forming the lineage chain (todos: parent-version
 lineage). An explicit :STATE also moves :PROMOTION-STATUS unless an
 explicit :PROMOTION-STATUS is given. Pass :INTENT NIL / :CONTRACT NIL
-explicitly to clear those slots."
+explicitly to clear those slots. The STABLE-ID is inherited from the
+parent (one family, one identity) unless explicitly overridden; the
+DISPLAY-NAME is inherited likewise."
   (unless (capability-p capability)
     (error "Not a capability: ~S." capability))
   (let* ((child-version (or version (1+ (capability-version capability))))
@@ -129,7 +203,12 @@ explicitly to clear those slots."
                                        (capability-dependencies capability))
                      :source (or source (capability-source capability))
                      :creator (or creator (capability-creator capability))
-                     :model (or model (capability-model capability)))))
+                     :model (or model (capability-model capability))
+                     :stable-id (or stable-id
+                                    (capability-stable-id capability))
+                     :display-name (or display-name
+                                       (capability-display-name
+                                        capability)))))
 
 (defun capability-expired-p (capability &optional (now (get-universal-time)))
   "Return true when CAPABILITY's TTL has elapsed relative to NOW.
