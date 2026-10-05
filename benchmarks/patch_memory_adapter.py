@@ -203,7 +203,7 @@ class PatchMemory:
                 slot["hurt"] += 1
         return history
 
-    def find_fast_path(self, task, history=None):
+    def find_fast_path(self, task, history=None, check_input=None):
         """High-confidence patch for zero-call reuse, or None.
 
         Hit rule: same task family, exact category-tag match, at least
@@ -211,6 +211,12 @@ class PatchMemory:
         tasks are NEVER fast-pathed (always returns None). ``history``
         is a :meth:`reuse_history` snapshot; when omitted it is built
         from the live store.
+
+        When ``check_input`` is provided, the recorded
+        ``candidate["input"]`` must additionally EQUAL it: returning a
+        recorded output for a novel input emits wrong answers (the
+        matched rerun fired 0/4 input-matched and broke TRN-03/TRN-04).
+        Callers doing zero-call reuse MUST pass the current input.
         """
         if (task.get("split") or "") == "adversarial":
             return None
@@ -223,8 +229,15 @@ class PatchMemory:
             if category and category not in (patch.get("tags") or []):
                 continue
             slot = history.get(patch.get("patch_id"), {"helped": 0, "hurt": 0})
-            if slot["helped"] >= 1 and slot["hurt"] == 0:
-                return patch
+            if slot["helped"] < 1 or slot["hurt"] != 0:
+                continue
+            if check_input is not None:
+                candidate = patch.get("candidate", {}) or {}
+                if not isinstance(candidate, dict):
+                    continue
+                if candidate.get("input") != check_input:
+                    continue
+            return patch
         return None
 
     def fast_path_output(self, patch):

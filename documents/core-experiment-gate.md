@@ -60,7 +60,10 @@ remaining ~$49 budget):
    still over bar with an ADV-05 regression — diet alone cannot flip
    #3. Only remaining route: input-matched fast-path (fewer calls
    net of injection).
-3. Input-matched reuse fix + matched-rerun re-run — prerequisite for
-   any #4 movement.
+3. ~~Input-matched reuse fix + matched-rerun re-run~~ DONE
+   (`documents/matched-rerun-gated.md`): gate blocks all misfires (C
+   back to 5/8, D flips TRN-08 with zero hits) — but fires 0/32 on
+   novel inputs, so the fast-path route to #2/#3 is structurally
+   closed on held-out tasks. Needs repeated-input streams instead.
 4. Multi-timepoint reuse/growth series with consolidation on —
    measures #4/#6 instead of asserting them.

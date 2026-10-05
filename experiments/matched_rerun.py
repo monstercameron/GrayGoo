@@ -164,7 +164,8 @@ class FastPathAdapter(runner.ModelAdapter):
 
     def solve(self, task, check_index, check_input):
         task_id = task.get("id", "?")
-        patch = self.patch_mem.find_fast_path(task, history=self._fp_history)
+        patch = self.patch_mem.find_fast_path(
+            task, history=self._fp_history, check_input=check_input)
         if patch is not None:
             output = self.patch_mem.fast_path_output(patch)
             candidate = patch.get("candidate", {}) or {}
