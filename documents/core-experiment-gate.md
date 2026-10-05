@@ -16,7 +16,7 @@ Baseline A/BCD re-proofs.
 
 | # | Criterion | Old | New | Evidence |
 |---|---|---|---|---|
-| 1 | Held-out success stable/up | PASS (fragile) | PASS (replicated 1-task edge) | B/D 6/8 vs A 5/8; TRN-08 flip replicates 2/2 B-runs and survives the 256-token A re-check (`documents/b-rerun.md`). Still one task — needs more transfer tasks to fully settle. |
+| 1 | Held-out success stable/up | PASS (fragile) | PASS (1-task edge at n=16) | Transfer now 16 tasks: A 11/16, B/D 12/16, sole edge still TRN-08 (4× replicated); new set memory-invariant both ways, zero regressions (`documents/transfer2.md`). No second edge appeared. |
 | 2 | Calls/task decreases | FAIL | PASS (repeated streams) / FAIL (held-out) | Stream: 2.000 → 1.000 → 0.722, success held, replicated (`documents/repeat-stream.md`). Held-out: still flat — fast-path fires 0/32 on novel inputs. |
 | 3 | Tokens/task decreases | FAIL | PASS (repeated streams) / FAIL (held-out) | Stream: 273.5 → 120.7 → 88.5 vs 264.7 bar (`documents/repeat-stream.md`). Held-out: memory still strictly costs tokens (diet-B 342.7 + ADV-05 regression). |
 | 4 | Reuse increases | UNMEASURABLE | PASS (repeated streams) | Hit rate 0% → 50% → 64% across rounds, 35/35 helped (`documents/repeat-stream.md`). Held-out reuse growth still unproven (0/32 fires). |
