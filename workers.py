@@ -220,6 +220,7 @@ this driver path; candidate-initiated reads are the candidate's own."
   (let ((*standard-output* captured)
         (*error-output* captured)
         (*trace-output* captured)
+        (*terminal-io* captured)
         (*debug-io* captured))
     (handler-case
         (multiple-value-bind (pre-ok pre-payload pre-bt)
@@ -274,12 +275,18 @@ def _build_script(code, prelude, fingerprint):
 
 
 def _parse_envelope(stdout_text):
-    """Return the decoded envelope dict, or None when markers are absent."""
+    """Return the decoded envelope dict, or None when markers are absent.
+
+    Last complete pair wins (issues.md #56): the driver prints the
+    real envelope after all candidate code has run, so a pre-printed
+    forged envelope loses. A malformed last pair fails closed (no
+    fallback to earlier pairs).
+    """
     lines = stdout_text.splitlines()
-    try:
-        begin = lines.index(BEGIN_MARKER)
-    except ValueError:
+    begins = [i for i, line in enumerate(lines) if line == BEGIN_MARKER]
+    if not begins:
         return None
+    begin = begins[-1]
     try:
         end = lines.index(END_MARKER, begin + 1)
     except ValueError:

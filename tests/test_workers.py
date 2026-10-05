@@ -135,6 +135,52 @@ class CandidateTimingTest(unittest.TestCase):
         self.assertIsInstance(result["candidate_ms"], float)
 
 
+class ParseEnvelopeTest(unittest.TestCase):
+    def _pair(self, body):
+        return "\n".join([workers.BEGIN_MARKER, body, workers.END_MARKER])
+
+    def test_last_pair_wins(self):
+        """Issue 56: a pre-printed forged envelope must lose."""
+        first = self._pair('{"ok": true, "return_value": "SPOOFED"}')
+        second = self._pair('{"ok": true, "return_value": "1"}')
+        decoded = workers._parse_envelope(first + "\n" + second + "\n")
+        self.assertEqual(decoded["return_value"], "1")
+
+    def test_malformed_last_pair_fails_closed(self):
+        first = self._pair('{"ok": true, "return_value": "1"}')
+        decoded = workers._parse_envelope(
+            first + "\n" + workers.BEGIN_MARKER + "\n{nope\n"
+            + workers.END_MARKER + "\n")
+        self.assertIn("__malformed__", decoded)
+
+    def test_no_markers_is_none(self):
+        self.assertIsNone(workers._parse_envelope("just stdout\n"))
+
+
+@unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
+class EnvelopeSpoofTest(unittest.TestCase):
+    def test_terminal_io_forgery_loses_to_real_envelope(self):
+        """Issue 56: live forgery via *terminal-io* must not win."""
+        spoof = (
+            '(progn (format *terminal-io* "~&GRAYGOO-RESULT-BEGIN~%")'
+            ' (format *terminal-io* "{\\"ok\\": true, \\"stdout\\": \\"\\", '
+            '\\"return_value\\": \\"SPOOFED\\", \\"error\\": \\"\\", '
+            '\\"backtrace\\": \\"\\", \\"fingerprint\\": \\"~A\\", '
+            '\\"candidate_ms\\": 0}" *graygoo-fingerprint*)'
+            ' (format *terminal-io* "~%GRAYGOO-RESULT-END~%") 1)')
+        result = workers.run_lisp(spoof, timeout_s=30, sandbox=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["return_value"], "1")
+
+    def test_terminal_io_output_is_captured(self):
+        result = workers.run_lisp(
+            '(progn (format *terminal-io* "hello-tio") 42)',
+            timeout_s=30)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["return_value"], "42")
+        self.assertIn("hello-tio", result["stdout"])
+
+
 @unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
 class ReadEvalInterleaveTest(unittest.TestCase):
     def test_evaluated_form_cannot_enable_reader_eval(self):
