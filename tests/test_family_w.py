@@ -12,6 +12,7 @@ Mirrors tests/test_run_abcd.py on the API-workflow transfer split
        a searched 3-chain (paginate->normalize->dedup).
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -122,6 +123,49 @@ class FamilyWComparisonTest(unittest.TestCase):
         self.assertAlmostEqual(app["retrieval_precision"], 1.0)
         self.assertEqual(app["false_positive_tasks"], 0)
         self.assertEqual(app["false_negative_checks"], 0)
+
+
+class AdversarialPrecisionTest(unittest.TestCase):
+    """The uppercase trap must not reuse the lowercase normalizer."""
+
+    @classmethod
+    def setUpClass(cls):
+        import execaps as _execaps
+        import distill as _distill
+        cls.execaps = _execaps
+        cls.distill = _distill
+        with open(FAMILY_W / "exposure.json", encoding="utf-8") as fh:
+            cls.exposure = {t["id"]: t for t in json.load(fh)}
+        with open(FAMILY_W / "adversarial.json",
+                  encoding="utf-8") as fh:
+            cls.traps = [t for t in json.load(fh)]
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+
+    def _run_d(self, registry, tag):
+        return run_abcd.run_arm(
+            "d", self.traps,
+            lambda: run_abcd.CountingStub(RECORDED),
+            self.tmp.name + "-" + tag, tasks_dir=FAMILY_W,
+            registry=registry)
+
+    def test_uppercase_trap_misfires_without_veto(self):
+        payload = self._run_d(self.execaps.ExecRegistry(), "bare")
+        record = payload["records"][0]
+        self.assertEqual(record["outcome"], "REUSE")
+        self.assertFalse(record["passed"])
+
+    def test_mined_veto_routes_trap_to_adapt(self):
+        registry = self.execaps.ExecRegistry()
+        norm = registry.get("cap-normalize")
+        norm.veto_words = frozenset(self.distill.mine_vetoes(
+            norm, self.traps[0], [self.exposure["W-EXP-05"]]))
+        self.assertIn("uppercase", norm.veto_words)
+        payload = self._run_d(registry, "vetoed")
+        self.assertEqual(payload["tasks_passed"], "1/1")
+        record = payload["records"][0]
+        self.assertTrue(record["passed"])
+        self.assertNotIn(record["outcome"], ("REUSE", "COMPOSE"))
 
 
 if __name__ == "__main__":

@@ -89,8 +89,9 @@ def type_vocabulary():
 def gate_source(src, *, what="candidate"):
     """Reject model source outside the pure-transform subset.
 
-    Allows: two required functions (``solve``/``applies``, one arg
-    each) plus ``_``-prefixed helpers, stdlib imports from
+    Allows: two required functions (``applies`` one arg; ``solve``
+    one arg, or two when the second is a mode flag with a string
+    default) plus ``_``-prefixed helpers, stdlib imports from
     :data:`ALLOWED_IMPORTS`, and ordinary data-flow statements.
     Rejects: classes, async, globals, dunder/private attribute
     access, dangerous builtins, star imports, and anything that
@@ -141,11 +142,23 @@ def gate_source(src, *, what="candidate"):
         raise DistillError(
             "%s must define solve(text) and applies(text)" % what)
     for fn in top:
-        if fn.name in ("solve", "applies"):
+        if fn.name == "applies":
             args = fn.args
             if len(args.args) != 1 or args.vararg or args.kwarg:
                 raise DistillError(
-                    "%s.%s must take exactly one arg" % (what, fn.name))
+                    "%s.applies must take exactly one arg" % what)
+        elif fn.name == "solve":
+            args = fn.args
+            names_ = [a.arg for a in args.args]
+            if args.vararg or args.kwarg or len(names_) > 2:
+                raise DistillError(
+                    "%s.solve takes (text[, mode]) only" % what)
+            if len(names_) == 2 and (
+                    len(args.defaults) != 1
+                    or not isinstance(args.defaults[0], ast.Constant)
+                    or not isinstance(args.defaults[0].value, str)):
+                raise DistillError(
+                    "%s.solve mode arg needs a string default" % what)
         elif not fn.name.startswith("_"):
             raise DistillError(
                 "%s helper %r must be _-prefixed" % (what, fn.name))
@@ -328,6 +341,10 @@ _TYPES_LINE = re.compile(r"^#\s*TYPES:\s*in=([a-z0-9-]+)\s+out=([a-z0-9-]+)",
                          re.MULTILINE)
 _SIG_LINE = re.compile(r"^#\s*SIG:\s*([A-Za-z0-9 ]+)", re.MULTILINE)
 _SIG_WORD = re.compile(r"^[a-z0-9]{2,}$")
+_PARAMS_LINE = re.compile(
+    r"^#\s*PARAMS:\s*([a-z_][a-z0-9_]*)\s+default=([a-z0-9]+)"
+    r"\s+alt=([a-z0-9]+)",
+    re.MULTILINE)
 
 
 def parse_candidate(text, vocab):
@@ -390,6 +407,18 @@ def failure_feedback(task, failures):
         lines.append("- check %d: %s: %s" % (index, kind, detail))
     lines.append("Return the full corrected ```python block.")
     return "\n".join(lines)
+
+
+def bind_source(code, mode):
+    """Wrap 2-arg solve() fixating one mode (verification only).
+
+    Appends alias lines rebinding ``solve`` to a one-arg closure so
+    the unchanged rehearsal harness can trial each (task, mode)
+    pair. The wrapped text is NEVER persisted or re-gated: only
+    the original gated source ships.
+    """
+    return (code + "\n_solve_bound = solve\n"
+            "solve = lambda t: _solve_bound(t, %r)\n" % (mode,))
 
 
 def sig_prompt_overlap(sig, task):
@@ -474,7 +503,219 @@ def synthesize_one(task, generate, vocab=None, max_attempts=3,
         task["id"], max_attempts, last_error))
 
 
-def verify_code(code, task, negatives=None, gate=None):
+_MERGE_TEMPLATE = """\
+Two sibling tasks share one procedure but differ in one semantic flag:
+
+Task {task_a_id} ({value_a}): {prompt_a}
+
+Examples ({value_a}, {compare_a} comparison):
+{examples_a}
+
+Task {task_b_id} ({value_b}): {prompt_b}
+
+Examples ({value_b}, {compare_b} comparison):
+{examples_b}
+
+Write ONE parameterized solution as two pure functions plus three
+metadata comments:
+
+# TYPES: in={in_type} out={out_type}
+# SIG: <six distinct lowercase words shared by BOTH prompts>
+# PARAMS: {param} default={default} alt={alt}
+def solve(text, {param}="{default}"):
+    \"\"\"Transform one check input; {param} selects the sibling.\"\"\"
+    ...
+def applies(text):
+    \"\"\"True ONLY for inputs this procedure genuinely handles.\"\"\"
+    ...
+
+Rules:
+- ONE procedure with a flag: solve(text, "{value_a}") must reproduce
+  task {task_a_id} exactly; solve(text, "{value_b}") must reproduce
+  task {task_b_id} exactly. Never blend the two behaviors.
+- Allowed imports: json, re, csv, io, math. No I/O, no network, no
+  classes, no globals, no dunder access, no print(). Extra helpers
+  must be _-prefixed. applies() takes exactly one string arg and
+  must never raise. solve() takes exactly (text, {param}) with the
+  string default shown above.
+- applies() must return False for inputs outside the procedure
+  (wrong shape, unparsable, unsupported variants) AND for inputs
+  that do not need the procedure at all. When in doubt, abstain.
+- SIG words must be distinct lowercase alphanumerics (2+ chars) and
+  overlap BOTH task prompts (at least 3 of 6 in each).
+- TYPES and PARAMS lines must match this prompt exactly.
+{feedback}\
+"""
+
+
+def parse_merge_candidate(text, spec):
+    """Split merge output into (sig, code); validate against ``spec``.
+
+    ``spec`` is ``{"name", "default", "alt", "in_type",
+    "out_type"}``: the model's TYPES/PARAMS lines and solve()
+    signature must match it exactly. Raises :class:`DistillError`.
+    """
+    match = _CODE_FENCE.search(text)
+    code = match.group(1) if match else text
+    if "def solve" not in code or "def applies" not in code:
+        raise DistillError("no ```python block with solve/applies")
+    types = _TYPES_LINE.search(code)
+    if not types:
+        raise DistillError("missing '# TYPES: in=<t> out=<t>' line")
+    if ((types.group(1), types.group(2))
+            != (spec["in_type"], spec["out_type"])):
+        raise DistillError("TYPES %r/%r must be %r/%r" % (
+            types.group(1), types.group(2),
+            spec["in_type"], spec["out_type"]))
+    params = _PARAMS_LINE.search(code)
+    if not params:
+        raise DistillError("missing '# PARAMS: <name> default=<d> "
+                           "alt=<a>' line")
+    if ((params.group(1), params.group(2), params.group(3))
+            != (spec["name"], spec["default"], spec["alt"])):
+        raise DistillError("PARAMS must be '%s default=%s alt=%s'" % (
+            spec["name"], spec["default"], spec["alt"]))
+    tree = ast.parse(code)
+    sig = _SIG_LINE.search(code)
+    if not sig:
+        raise DistillError("missing '# SIG: <six words>' line")
+    words = tuple(sig.group(1).lower().split())
+    if (len(words) != 6 or len(set(words)) != 6
+            or not all(_SIG_WORD.match(w) for w in words)):
+        raise DistillError("SIG must be exactly six distinct words, "
+                           "got %r" % (sig.group(1),))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.FunctionDef)
+                and node.name == "solve"):
+            got = [a.arg for a in node.args.args]
+            if got != ["text", spec["name"]]:
+                raise DistillError(
+                    "solve() must be (text, %s)" % spec["name"])
+    return words, code
+
+
+def generalize_pair(cap_a, cap_b, task_a, task_b, spec, generate,
+                    vocab=None, max_attempts=4):
+    """Collapse two sibling capabilities into one parameterized cap.
+
+    ``spec`` is ``{"name", "default", "alt", "values":
+    {task_id: value}}``: the caller names the semantic flag (e.g.
+    empty-handling) and each sibling's value; Qwen writes the unified
+    procedure and distill verifies each (task, mode) pair through
+    rehearsal plus the repair loop. Triggers binding the alt value
+    are mined deterministically (words in the alt prompt absent from
+    the default prompt). Returns ``(cap, attempts, usage)``; raises
+    :class:`DistillError` when siblingship fails or all attempts do.
+    """
+    if task_a.get("category") != task_b.get("category"):
+        raise DistillError("merge needs one category, got %r/%r" % (
+            task_a.get("category"), task_b.get("category")))
+    types_a = (cap_a.descriptor.input_types,
+               cap_a.descriptor.output_types)
+    types_b = (cap_b.descriptor.input_types,
+               cap_b.descriptor.output_types)
+    if types_a != types_b:
+        raise DistillError("merge needs matching types, got %r/%r" % (
+            types_a, types_b))
+    full_spec = dict(spec, in_type=types_a[0][0],
+                     out_type=types_a[1][0])
+    values = spec["values"]
+    tasks = {task_a["id"]: task_a, task_b["id"]: task_b}
+    feedback = ""
+    usage_all = []
+    last_error = "no attempt"
+    temps = (0.2, 0.5, 0.7, 0.9)
+    pair_id = "%s+%s" % (task_a["id"], task_b["id"])
+    for _attempt in range(max_attempts):
+        prompt = _MERGE_TEMPLATE.format(
+            task_a_id=task_a["id"], value_a=values[task_a["id"]],
+            prompt_a=task_a.get("prompt", ""),
+            compare_a=task_a["checks"][0]["compare"],
+            examples_a=_examples_block(task_a),
+            task_b_id=task_b["id"], value_b=values[task_b["id"]],
+            prompt_b=task_b.get("prompt", ""),
+            compare_b=task_b["checks"][0]["compare"],
+            examples_b=_examples_block(task_b),
+            in_type=full_spec["in_type"], out_type=full_spec["out_type"],
+            param=spec["name"], default=spec["default"],
+            alt=spec["alt"], feedback=feedback)
+        temperature = temps[min(_attempt, len(temps) - 1)]
+        text, usage = generate(prompt, temperature=temperature)
+        usage_all.append(usage)
+        try:
+            sig, code = parse_merge_candidate(text, full_spec)
+            gate_source(code, what=pair_id)
+            for task in (task_a, task_b):
+                overlap = sig_prompt_overlap(sig, task)
+                if overlap < 0.5:
+                    raise DistillError(
+                        "SIG overlap %.2f < 0.50 on %s: at least 3 "
+                        "of 6 words must appear in EACH sibling "
+                        "prompt" % (overlap, task["id"]))
+            failures = []
+            for task_id, task in tasks.items():
+                mode = values[task_id]
+                for index, kind, detail in verify_code(
+                        code, task, mode=mode):
+                    failures.append((task_id, index, kind, detail))
+            if failures:
+                feedback = ("\nYour previous attempt FAILED. Fix it:"
+                            + "".join(
+                                "\n- %s check %d: %s: %s" % item
+                                for item in failures)
+                            + "\nReturn the full corrected "
+                              "```python block.")
+                last_error = "; ".join(
+                    "%s %s %s" % item[:3] for item in failures)
+                continue
+            cap = _merged_capability(
+                pair_id, code, sig, full_spec, tasks, values,
+                task_a, task_b, cap_a, cap_b)
+            return cap, _attempt + 1, usage_all
+        except DistillError as exc:
+            feedback = ("\nYour previous attempt FAILED: %s\nReturn the "
+                        "full corrected ```python block." % exc)
+            last_error = str(exc)
+    raise DistillError("%s: %d attempts failed (%s)" % (
+        pair_id, max_attempts, last_error))
+
+
+def _merged_capability(pair_id, code, sig, spec, tasks, values,
+                       task_a, task_b, cap_a, cap_b):
+    """Build the merged cap; mine triggers; prove the collapse."""
+    solve, applies = _exec_trusted(code, pair_id)
+    alt_task = next(t for tid, t in tasks.items()
+                    if values[tid] == spec["alt"])
+    default_task = next(t for tid, t in tasks.items()
+                        if values[tid] == spec["default"])
+    slug = "%s-%s" % (learned_cap_id(task_a["id"])[3:],
+                      learned_cap_id(task_b["id"])[3:])
+    cap = execaps.ExecCapability(
+        "lc-abs-" + slug,
+        "generalized from %s + %s" % (task_a["id"], task_b["id"]),
+        task_a.get("category"),
+        (spec["in_type"],), (spec["out_type"],),
+        solve, applies, sig, pair_id,
+        params={"name": spec["name"], "default": spec["default"],
+                "alt": spec["alt"], "alt_triggers": []})
+    cap.learned_source = code
+    triggers = mine_vetoes(cap, alt_task, [default_task])
+    if not triggers:
+        raise DistillError(
+            "%s: alt prompt has no discriminative triggers" % pair_id)
+    cap.params["alt_triggers"] = sorted(triggers)
+    for task_id, task in tasks.items():
+        covered, harmed = coverage_and_harm(cap, [task])
+        if task_id not in covered or harmed:
+            raise DistillError(
+                "%s: merged cap fails %s (covered=%s harmed=%s)" % (
+                    pair_id, task_id, sorted(covered),
+                    sorted(harmed)))
+    cap.absorbed = sorted({cap_a.id, cap_b.id})
+    return cap
+
+
+def verify_code(code, task, negatives=None, gate=None, mode=None):
     """Verify gated code against a task; return failure list.
 
     Each failure is ``(check_index, kind, detail)``. Empty list means
@@ -487,10 +728,14 @@ def verify_code(code, task, negatives=None, gate=None):
     flag)`` decides firing; default is the raw flag. Callers pass
     the full runtime gate (category + prompt + flag) so same-shape
     siblings that the prompt gate disambiguates do not count.
+    ``mode`` fixates a parameterized solve() to one value (sibling
+    merges verify each (task, mode) pair separately); None trials
+    the code as written.
     """
+    trial_code = bind_source(code, mode) if mode is not None else code
     inputs = [c["input"] for c in task.get("checks", [])]
     try:
-        outputs, flags, errors = rehearse(code, inputs)
+        outputs, flags, errors = rehearse(trial_code, inputs)
     except DistillError as exc:
         return [(0, "rehearsal", str(exc))]
     failures = []
@@ -523,7 +768,8 @@ def verify_code(code, task, negatives=None, gate=None):
     if not neg_inputs:
         return failures
     try:
-        neg_outputs, neg_flags, neg_errors = rehearse(code, neg_inputs)
+        neg_outputs, neg_flags, neg_errors = rehearse(
+            trial_code, neg_inputs)
     except DistillError as exc:
         return [(0, "rehearsal-negatives", str(exc))]
     for i, (flag, out, (neg_task, j, check)) in enumerate(zip(
@@ -606,7 +852,7 @@ def coverage_and_harm(cap, tasks):
             fired.append(bool(applies))
             if applies:
                 try:
-                    out = cap.execute(check["input"])
+                    out = cap.execute(check["input"], task)
                 except Exception:
                     solved.append(False)
                     continue
@@ -621,21 +867,93 @@ def coverage_and_harm(cap, tasks):
     return covered, harmed
 
 
+_MIN_VETO_LEN = 4
+
+# Function words veto-mining must never use: procedural glue ("then",
+# "with", "from") appears in legitimate prompts -- including compose
+# prompts that join procedures with "then" -- so vetoing on it would
+# trade one misfire for systematic misses. Vetoes must be content
+# words that name a different procedure ("null", "semicolon").
+_VETO_STOPWORDS = frozenset({
+    "then", "than", "with", "from", "that", "this", "into", "over",
+    "under", "between", "through", "during", "each", "every", "such",
+    "only", "also", "very", "more", "most", "other", "some", "such",
+    "have", "has", "had", "will", "would", "should", "could", "been",
+    "they", "them", "their", "there", "here", "where", "when",
+    "which", "while", "whom", "your", "ours", "ourselves",
+})
+
+
+def _task_words(task):
+    return set(re.findall(r"[a-z0-9]+",
+                          str(task.get("prompt", "")).lower()))
+
+
+def mine_vetoes(cap, harmed_task, safe_tasks):
+    """Discriminative veto words separating a harm pair.
+
+    Returns prompt words of ``harmed_task`` that stem-match nothing
+    in any safe task prompt (the capability's covered tasks plus its
+    source) and nothing in the capability's own signature: vocabulary
+    proving a different procedure is needed. Short words (< 4 chars)
+    are too generic to veto on. Empty means the pair is
+    indistinguishable at the prompt level -- the harm stands.
+    """
+    safe_words = set()
+    for task in safe_tasks:
+        safe_words.update(_task_words(task))
+    claimed = set(cap.prompt_keywords) | set(
+        getattr(cap, "veto_words", ()))
+    vetoes = set()
+    for word in sorted(_task_words(harmed_task)):
+        if len(word) < _MIN_VETO_LEN or word in _VETO_STOPWORDS:
+            continue
+        if execaps.sig_word_hits((word,), safe_words)[word] is not None:
+            continue
+        if execaps.sig_word_hits((word,), claimed)[word] is not None:
+            continue
+        vetoes.add(word)
+    return vetoes
+
+
 def consolidate(caps, tasks):
     """Greedy set-cover over covered tasks; quarantine harmers.
 
-    Drops candidates that harm any task (severe negative transfer
-    vetoes promotion, directive §9), then keeps the smallest subset
-    covering every coverable task -- the generalization mechanism:
-    one broad capability absorbs every task it behaviorally covers.
-    Returns ``(kept, dropped_redundant, quarantined, uncovered)``.
+    A capability that harms a task first gets a chance to redeem
+    itself: discriminative veto words are mined from each harm pair
+    and attached, and the harm/coverage measurement re-runs. Vetoes
+    that eliminate the harm with zero coverage loss keep the
+    capability (precision repair); otherwise -- or when the pair is
+    prompt-indistinguishable -- severe negative transfer vetoes
+    promotion and the capability quarantines (directive §9). The
+    survivors then go through greedy set-cover: one broad capability
+    absorbs every task it behaviorally covers. Returns
+    ``(kept, dropped_redundant, quarantined, uncovered)``; kept caps
+    carry their mined ``veto_words``.
     """
+    by_id = {c.id: c for c in caps}
+    tasks_by_id = {t["id"]: t for t in tasks}
     cover = {}
     harm = {}
     for cap in caps:
         covered, harmed = coverage_and_harm(cap, tasks)
         if harmed:
-            harm[cap.id] = sorted(harmed)
+            safe = [tasks_by_id[i] for i in covered
+                    if i in tasks_by_id]
+            source = tasks_by_id.get(cap.source_task)
+            if source is not None and source not in safe:
+                safe.append(source)
+            vetoes = set()
+            for hid in harmed:
+                vetoes.update(mine_vetoes(cap, tasks_by_id[hid], safe))
+            cap.veto_words = frozenset(vetoes)
+            recheck_covered, recheck_harmed = coverage_and_harm(
+                cap, tasks)
+            if recheck_harmed or recheck_covered != covered:
+                cap.veto_words = frozenset()
+                harm[cap.id] = sorted(harmed)
+            else:
+                cover[cap.id] = covered
         else:
             cover[cap.id] = covered
     safe = {cid: cov for cid, cov in cover.items()}
@@ -657,14 +975,13 @@ def consolidate(caps, tasks):
             break
         kept.append(best)
         remaining -= set(safe[best])
-    by_id = {c.id: c for c in caps}
     kept_caps = [by_id[cid] for cid in kept]
     dropped = sorted(set(safe) - set(kept))
     uncoverable = sorted({t["id"] for t in tasks} - set(uncovered))
     return kept_caps, dropped, harm, uncoverable
 
 
-LEARNED_FORMAT_VERSION = 1
+LEARNED_FORMAT_VERSION = 3
 
 
 def save_learned(path, caps, run_meta):
@@ -681,6 +998,10 @@ def save_learned(path, caps, run_meta):
             "prompt_keywords": sorted(cap.prompt_keywords),
             "source_task": cap.source_task,
             "code": cap.learned_source,
+            "veto_words": sorted(
+                getattr(cap, "veto_words", ())),
+            "params": getattr(cap, "params", None),
+            "absorbed": sorted(getattr(cap, "absorbed", ())),
         } for cap in caps],
     }
     Path(path).write_text(json.dumps(payload, indent=2) + "\n",
@@ -706,8 +1027,11 @@ def load_learned(path):
             entry["id"], entry["intent"], entry["category"],
             tuple(entry["input_types"]), tuple(entry["output_types"]),
             solve, applies, entry["prompt_keywords"],
-            entry["source_task"])
+            entry["source_task"],
+            veto_words=entry.get("veto_words", ()),
+            params=entry.get("params"))
         cap.learned_source = entry["code"]
+        cap.absorbed = list(entry.get("absorbed", ()))
         caps.append(cap)
     return caps, payload.get("run", {})
 

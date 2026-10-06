@@ -39,7 +39,10 @@ TOTAL_TASKS = 12
 
 
 def _run_arm(arm, tmp):
-    tasks = sorted(runner.load_tasks(FAMILY_R), key=lambda t: t["id"])
+    tasks = sorted(
+        (t for t in runner.load_tasks(FAMILY_R)
+         if t.get("split") == "transfer"),
+        key=lambda t: t["id"])
     self_check = runner.validate_tasks(tasks)
     assert not self_check, self_check
     return run_abcd.run_arm(
@@ -213,12 +216,61 @@ class CanonicalComparisonTest(unittest.TestCase):
         self.assertTrue(verdict["failed_section_15"])
 
 
+class AdversarialPrecisionTest(unittest.TestCase):
+    """Near-match traps must abstain from reuse, then adapt to pass."""
+
+    @classmethod
+    def setUpClass(cls):
+        import execaps as _execaps
+        import distill as _distill
+        cls.execaps = _execaps
+        cls.distill = _distill
+        fam_a = ROOT / "benchmarks" / "family-a"
+        with open(fam_a / "exposure.json", encoding="utf-8") as fh:
+            cls.exposure = {t["id"]: t for t in json.load(fh)}
+        with open(FAMILY_R / "adversarial.json",
+                  encoding="utf-8") as fh:
+            cls.traps = [t for t in json.load(fh)]
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+
+    def _run_d(self, registry, tag):
+        return run_abcd.run_arm(
+            "d", self.traps,
+            lambda: run_abcd.CountingStub(RECORDED),
+            self.tmp.name + "-" + tag, tasks_dir=FAMILY_R,
+            registry=registry)
+
+    def test_null_trap_misfires_without_veto(self):
+        payload = self._run_d(self.execaps.ExecRegistry(), "bare")
+        record = {r["id"]: r for r in payload["records"]}["R-ADV-02"]
+        # Authentic failure: the comma parser fires and emits "".
+        self.assertEqual(record["outcome"], "REUSE")
+        self.assertFalse(record["passed"])
+
+    def test_mined_vetoes_route_traps_to_adapt(self):
+        registry = self.execaps.ExecRegistry()
+        csv_cap = registry.get("cap-csv-parse")
+        vetoes = set()
+        for trap in self.traps:
+            vetoes.update(self.distill.mine_vetoes(
+                csv_cap, trap, [self.exposure["A-EXP-05"]]))
+        csv_cap.veto_words = frozenset(vetoes)
+        payload = self._run_d(registry, "vetoed")
+        self.assertEqual(payload["tasks_passed"], "2/2")
+        for record in payload["records"]:
+            with self.subTest(task=record["id"]):
+                self.assertTrue(record["passed"])
+                self.assertNotIn(record["outcome"],
+                                 ("REUSE", "COMPOSE"))
+
+
 class MultiOrderTest(unittest.TestCase):
     def test_three_orders_all_supported(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         code = run_abcd.main(
-            ["--adapter", "stub", "--arms", "ad",
+            ["--adapter", "stub", "--arms", "ad", "--split", "transfer",
              "--artifacts", tmp.name, "--orders", "3", "--seed", "7"])
         self.assertEqual(code, 0)
         with open(Path(tmp.name) / "comparison.json",

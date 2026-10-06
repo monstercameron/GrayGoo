@@ -179,7 +179,8 @@ class ExecAdapter(runner.ModelAdapter):
             comp = self.registry.find_composition(task, check_input)
             if comp is not None:
                 try:
-                    output = comp.execute(self.registry, check_input)
+                    output = comp.execute(self.registry, check_input,
+                                          task)
                 except Exception:
                     comp = None
                 else:
@@ -192,7 +193,7 @@ class ExecAdapter(runner.ModelAdapter):
         found = self.registry.find_for_task(task, check_input)
         if found:
             try:
-                output = found[0].execute(check_input)
+                output = found[0].execute(check_input, task)
             except Exception:
                 found = None
             else:
@@ -362,7 +363,7 @@ def applicability_metrics(tasks, records, registry, adapter):
                 if cap.category != task.get("category"):
                     continue
                 try:
-                    trial = cap.execute(check["input"])
+                    trial = cap.execute(check["input"], task)
                 except Exception:
                     continue
                 if execaps.compare(check["expected"], trial,
@@ -466,17 +467,21 @@ def thesis_verdict(payloads, reference="a", candidate="d",
 
 
 def run_arm(arm, tasks, make_inner, out_root, tasks_dir=None,
-            capabilities_path=None):
+            capabilities_path=None, registry=None):
     """Run one arm; write per-task files; return the summary dict.
 
     ``capabilities_path`` selects a learned registry (distill.py
     output) instead of the hand-written seeds -- the goal-4 rung:
     zero-LLM reuse from actually-synthesized capabilities.
+    ``registry`` injects a caller-built registry directly (tests);
+    it wins over both other sources.
     """
     out_dir = Path(out_root) / arm
     out_dir.mkdir(parents=True, exist_ok=True)
     inner = make_inner()
-    if capabilities_path:
+    if registry is not None:
+        registry_source = "injected"
+    elif capabilities_path:
         learned, _meta = distill.load_learned(capabilities_path)
         registry = execaps.ExecRegistry(capabilities=learned)
         registry_source = str(capabilities_path)

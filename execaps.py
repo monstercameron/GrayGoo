@@ -469,7 +469,8 @@ class ExecCapability:
     """One executable capability: descriptor + fn + fit checks."""
 
     def __init__(self, cap_id, intent, category, input_types, output_types,
-                 fn, precondition, prompt_keywords, source_task):
+                 fn, precondition, prompt_keywords, source_task,
+                 veto_words=(), params=None):
         self.descriptor = retrieve.Capability(
             id=cap_id, intent=intent, input_types=input_types,
             output_types=output_types, effects=(), family="A")
@@ -478,6 +479,18 @@ class ExecCapability:
         self.precondition = precondition
         self.prompt_keywords = frozenset(prompt_keywords)
         self.source_task = source_task
+        # Discriminative veto words (mined by distill.consolidate from
+        # harm pairs, never hand-written): prompt vocabulary that
+        # proves a DIFFERENT procedure is needed (e.g. "null" vetoes
+        # the empty-string csv parser). Veto overrides all positive
+        # evidence -- false-positive reuse is worse than a miss.
+        self.veto_words = frozenset(veto_words)
+        # Optional prompt-bound parameter (sibling-collapse
+        # abstractions): {"name", "default", "alt", "alt_triggers"}.
+        # When alt-trigger words appear in the task prompt the alt
+        # value binds, else the default. Unparameterized capabilities
+        # (params None) ignore binding entirely.
+        self.params = params
         # Reuse evidence (directive §1-2): positive/negative task ids
         # from trusted scoring, never from model claims. Updated by
         # the driver after verification, not by the capability itself.
@@ -492,9 +505,20 @@ class ExecCapability:
         """Fraction of signature keywords present in the task prompt."""
         return sig_overlap(self.prompt_keywords, _prompt_words(task))
 
+    def prompt_vetoed(self, task):
+        """True when veto vocabulary appears in the task prompt."""
+        if not self.veto_words:
+            return False
+        words = _prompt_words(task)
+        return any(
+            sig_word_hits((veto,), words)[veto] is not None
+            for veto in self.veto_words)
+
     def applies_to(self, task, check_input, min_overlap=0.5):
         """True only when category, prompt, AND input precondition agree."""
         if task.get("category") != self.category:
+            return False
+        if self.prompt_vetoed(task):
             return False
         if self.prompt_overlap(task) < min_overlap:
             return False
@@ -503,9 +527,35 @@ class ExecCapability:
         except Exception:
             return False
 
-    def execute(self, check_input):
-        """Run the capability (pure computation, never the model)."""
-        return self.fn(check_input)
+    def bind(self, task):
+        """Bind the prompt-bound parameter for a task (default: default).
+
+        Returns None for unparameterized capabilities. Binding is a
+        pure function of the task prompt -- no shared mutable state,
+        so the same capability serves both siblings interleaved.
+        """
+        if not self.params:
+            return None
+        triggers = self.params.get("alt_triggers", ())
+        if triggers:
+            words = _prompt_words(task)
+            hits = sig_word_hits(tuple(triggers), words)
+            if any(hit is not None for hit in hits.values()):
+                return self.params.get("alt")
+        return self.params.get("default")
+
+    def execute(self, check_input, task=None):
+        """Run the capability (pure computation, never the model).
+
+        Parameterized capabilities bind from ``task`` (default value
+        when no task is given, preserving every existing call site).
+        """
+        bound = self.bind(task) if task is not None else None
+        if bound is None and self.params:
+            bound = self.params.get("default")
+        if bound is None:
+            return self.fn(check_input)
+        return self.fn(check_input, bound)
 
     def record(self, task_id, helped):
         """Append trusted reuse evidence (driver calls post-scoring)."""
@@ -803,20 +853,26 @@ def _links_between(out_types, in_types):
             yield name
 
 
-def run_seq_plan(registry, pieces, check_input):
-    """Execute a SEQ plan: alternating cap ids and glue names."""
+def run_seq_plan(registry, pieces, check_input, task=None):
+    """Execute a SEQ plan: alternating cap ids and glue names.
+
+    Steps bind prompt-bound parameters from ``task`` (shared chain
+    prompt); None binds every step's default.
+    """
     value = check_input
     for piece in pieces:
         if piece in GLUE_SPECS:
             value = GLUE_SPECS[piece][2](value)
         else:
-            value = registry.get(piece).execute(value)
+            value = registry.get(piece).execute(value, task)
     return value
 
 
-def run_map_plan(registry, producer_id, field, element_id, check_input):
+def run_map_plan(registry, producer_id, field, element_id, check_input,
+                 task=None):
     """Execute a MAP plan: producer -> map element-cap over field."""
-    rows = json.loads(registry.get(producer_id).execute(check_input))
+    rows = json.loads(registry.get(producer_id).execute(
+        check_input, task))
     if not isinstance(rows, list) or not rows:
         raise ValueError("MAP producer must yield a non-empty JSON array")
     if not any(isinstance(row, dict) and field in row for row in rows):
@@ -826,7 +882,7 @@ def run_map_plan(registry, producer_id, field, element_id, check_input):
     for row in rows:
         row = dict(row)
         if field in row:
-            row[field] = element.execute(str(row[field]))
+            row[field] = element.execute(str(row[field]), task)
         out.append(row)
     return json.dumps(out)
 
@@ -864,9 +920,13 @@ class Composition:
     def prompt_overlap(self, task):
         return sig_overlap(self.prompt_keywords, _prompt_words(task))
 
-    def execute(self, registry, check_input):
-        """Run the plan (pure computation, never the model)."""
-        return self.run(registry, check_input)
+    def execute(self, registry, check_input, task=None):
+        """Run the plan (pure computation, never the model).
+
+        Steps bind prompt-bound parameters from ``task``; None
+        binds defaults (preserves every existing call site).
+        """
+        return self.run(registry, check_input, task)
 
     def record(self, task_id, helped):
         """Append trusted reuse evidence (driver calls post-scoring)."""
@@ -940,7 +1000,8 @@ def search_compositions(registry, task, check_input, max_plans=8):
     Enumerates SEQ chains (depth <= 3) and MAP plans, then applies
     the validation gates in order: effect compatibility (effectful
     plans need task-allowed effects), per-step prompt evidence (>=
-    0.2 each), joint coverage (>= 3 distinct procedure words --
+    0.2 each), veto clearance (no step may carry veto vocabulary
+    for this task), joint coverage (>= 3 distinct procedure words --
     steps resting on the same two generic words do not compose),
     output-type agreement with the prompt demand, trial
     execution on ``check_input``, and non-vacuity (the plan must
@@ -980,6 +1041,15 @@ def search_compositions(registry, task, check_input, max_plans=8):
         step_overlap[cap.id] = (
             sum(1 for hit in hits.values() if hit is not None)
             / len(cap.prompt_keywords)) if cap.prompt_keywords else 0.0
+    # Hierarchy level 1 (scaling): enumerate chains only over steps
+    # that clear the evidence floor and veto clearance. viable()
+    # would reject every other chain anyway, so this preserves
+    # results exactly while keeping enumeration proportional to
+    # survivors, not to registry size -- hundreds of distractor
+    # capabilities cost one overlap scan, not n^2 trials.
+    caps = [cap for cap in caps
+            if step_overlap[cap.id] >= _MIN_STEP_OVERLAP
+            and not cap.prompt_vetoed(task)]
     demanded = infer_output_types(task)
     allowed = task.get("allowed_effects")
 
@@ -993,16 +1063,16 @@ def search_compositions(registry, task, check_input, max_plans=8):
         single-capability task wearing a costume.
         """
         try:
-            out = plan.execute(registry, check_input)
+            out = plan.execute(registry, check_input, task)
         except Exception:
             return False
         try:
-            if out == by_id[uses[0]].execute(check_input):
+            if out == by_id[uses[0]].execute(check_input, task):
                 return False
         except Exception:
             pass
         try:
-            if out == by_id[uses[-1]].execute(check_input):
+            if out == by_id[uses[-1]].execute(check_input, task):
                 return False
         except Exception:
             pass
@@ -1016,6 +1086,8 @@ def search_compositions(registry, task, check_input, max_plans=8):
 
     def viable(uses):
         if any(step_overlap[u] < _MIN_STEP_OVERLAP for u in uses):
+            return None
+        if any(by_id[u].prompt_vetoed(task) for u in uses):
             return None
         effects = set()
         for u in uses:
@@ -1056,7 +1128,8 @@ def search_compositions(registry, task, check_input, max_plans=8):
             plan_id,
             " then ".join(by_id[u].descriptor.intent for u in steps),
             steps,
-            lambda reg, text, p=pieces: run_seq_plan(reg, p, text),
+            lambda reg, text, task, p=pieces: run_seq_plan(
+                reg, p, text, task),
             task.get("category"),
             tuple(sorted(keywords)),
             by_id[steps[0]].descriptor.input_types,
@@ -1085,8 +1158,8 @@ def search_compositions(registry, task, check_input, max_plans=8):
             % (by_id[producer].descriptor.intent,
                by_id[element].descriptor.intent, field),
             uses,
-            lambda reg, text, p=producer, f=field, e=element: (
-                run_map_plan(reg, p, f, e, text)),
+            lambda reg, text, task, p=producer, f=field, e=element: (
+                run_map_plan(reg, p, f, e, text, task)),
             task.get("category"),
             tuple(sorted(keywords)),
             by_id[producer].descriptor.input_types,
@@ -1183,7 +1256,7 @@ def verify_capability(cap, task):
     failed = []
     for j, check in enumerate(task.get("checks", [])):
         try:
-            actual = cap.execute(check["input"])
+            actual = cap.execute(check["input"], task)
         except Exception as exc:
             failed.append((j, "raised %r" % (exc,)))
             continue
@@ -1197,7 +1270,7 @@ def verify_composition(comp, registry, task):
     failed = []
     for j, check in enumerate(task.get("checks", [])):
         try:
-            actual = comp.execute(registry, check["input"])
+            actual = comp.execute(registry, check["input"], task)
         except Exception as exc:
             failed.append((j, "raised %r" % (exc,)))
             continue

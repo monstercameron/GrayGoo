@@ -351,6 +351,236 @@ class ConsolidateTest(unittest.TestCase):
         self.assertEqual(harmed, {"W-CMP-01"})
 
 
+class VetoTest(unittest.TestCase):
+    def _csv_pair(self):
+        fam_a = ROOT / "benchmarks" / "family-a"
+        with open(fam_a / "exposure.json", encoding="utf-8") as fh:
+            exposure = {t["id"]: t for t in json.load(fh)}
+        fam_r = ROOT / "benchmarks" / "family-r"
+        with open(fam_r / "adversarial.json", encoding="utf-8") as fh:
+            adv = {t["id"]: t for t in json.load(fh)}
+        cap = execaps.ExecRegistry().get("cap-csv-parse")
+        return cap, exposure["A-EXP-05"], adv["R-ADV-02"]
+
+    def test_mine_vetoes_finds_discriminators(self):
+        cap, safe, harmed = self._csv_pair()
+        vetoes = distill.mine_vetoes(cap, harmed, [safe])
+        # "null"/"empty" name the different procedure ...
+        self.assertIn("null", vetoes)
+        self.assertIn("empty", vetoes)
+        # ... while safe-prompt and signature words are excluded.
+        for word in ("parse", "header", "comma"):
+            self.assertNotIn(word, vetoes)
+        for word in cap.prompt_keywords:
+            self.assertNotIn(word, vetoes)
+
+    def test_mine_vetoes_skips_glue_and_short_words(self):
+        cap = execaps.ExecRegistry().get("cap-normalize")
+        safe = {"prompt": "Normalize each record."}
+        harmed = {"prompt": "Normalize each record, then uppercase it."}
+        vetoes = distill.mine_vetoes(cap, harmed, [safe])
+        self.assertIn("uppercase", vetoes)
+        self.assertNotIn("then", vetoes)
+
+    def test_consolidate_repairs_harm_with_vetoes(self):
+        cap, safe, harmed = self._csv_pair()
+        covered, harm = distill.coverage_and_harm(
+            cap, [safe, harmed])
+        self.assertIn(safe["id"], covered)
+        self.assertIn(harmed["id"], harm)
+        kept, _dropped, quarantined, _uncovered = distill.consolidate(
+            [cap], [safe, harmed])
+        # Precision repair: kept with vetoes, harm gone, coverage kept.
+        self.assertEqual(quarantined, {})
+        self.assertEqual([c.id for c in kept], [cap.id])
+        self.assertIn("null", kept[0].veto_words)
+        covered2, harm2 = distill.coverage_and_harm(
+            kept[0], [safe, harmed])
+        self.assertEqual(covered2, covered)
+        self.assertEqual(harm2, set())
+        self.assertFalse(kept[0].applies_to(
+            harmed, harmed["checks"][0]["input"]))
+
+    def test_indistinguishable_harm_still_quarantines(self):
+        cap = execaps.ExecCapability(
+            "cap-demo", "demo step", "demo",
+            ("text-a",), ("text-b",),
+            lambda text: "A", lambda text: True,
+            ("do", "thing", "alpha", "z1", "z2", "z3"),
+            "SYN-SAFE")
+        safe = {"id": "SYN-SAFE", "category": "demo",
+                "prompt": "Do the thing alpha.",
+                "checks": [{"input": "x", "expected": "A",
+                            "compare": "exact"}]}
+        harmed = {"id": "SYN-HARM", "category": "demo",
+                  "prompt": "Do the thing alpha.",
+                  "checks": [{"input": "x", "expected": "B",
+                              "compare": "exact"}]}
+        # Identical prompts: no discriminative word exists.
+        self.assertEqual(
+            distill.mine_vetoes(cap, harmed, [safe]), set())
+        kept, _dropped, quarantined, _uncovered = distill.consolidate(
+            [cap], [safe, harmed])
+        self.assertEqual(kept, [])
+        self.assertEqual(quarantined, {"cap-demo": ["SYN-HARM"]})
+
+    def test_veto_words_survive_roundtrip(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cap = execaps.ExecRegistry().get("cap-csv-parse")
+        cap.veto_words = frozenset({"null", "semicolon"})
+        cap.learned_source = (
+            "def solve(t): return t\ndef applies(t): return True\n")
+        path = str(Path(tmp.name) / "learned.json")
+        distill.save_learned(path, [cap], {})
+        loaded, _meta = distill.load_learned(path)
+        self.assertEqual(loaded[0].veto_words,
+                         frozenset({"null", "semicolon"}))
+
+
+MERGED_CSV_CODE = """\
+# TYPES: in=csv-text out=json-array
+# SIG: parse csv comma header row json
+# PARAMS: empty_mode default=string alt=null
+import csv
+import io
+import json
+
+
+def solve(text, empty_mode="string"):
+    rows = list(csv.reader(io.StringIO(text)))
+    header = rows[0]
+    out = []
+    for fields in rows[1:]:
+        obj = {}
+        for key, value in zip(header, fields):
+            if value == "" and empty_mode == "null":
+                value = None
+            obj[key] = value
+        out.append(obj)
+    return json.dumps(out)
+
+
+def applies(text):
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except Exception:
+        return False
+    return len(rows) >= 2 and all(
+        len(row) == len(rows[0]) for row in rows)
+"""
+
+
+class GeneralizeTest(unittest.TestCase):
+    def _siblings(self):
+        fam_a = ROOT / "benchmarks" / "family-a"
+        with open(fam_a / "exposure.json", encoding="utf-8") as fh:
+            exposure = {t["id"]: t for t in json.load(fh)}
+        cap_a = execaps.ExecCapability(
+            "lc-a-exp-05", "string csv", "csv",
+            ("csv-text",), ("json-array",),
+            lambda t: t, lambda t: True,
+            ("parse", "csv", "comma", "header", "row", "array"),
+            "A-EXP-05")
+        cap_b = execaps.ExecCapability(
+            "lc-a-exp-08", "null csv", "csv",
+            ("csv-text",), ("json-array",),
+            lambda t: t, lambda t: True,
+            ("parse", "csv", "empty", "null", "fields", "json"),
+            "A-EXP-08")
+        spec = {"name": "empty_mode", "default": "string",
+                "alt": "null",
+                "values": {"A-EXP-05": "string",
+                           "A-EXP-08": "null"}}
+        return cap_a, cap_b, exposure["A-EXP-05"], exposure["A-EXP-08"], \
+            spec
+
+    def test_collapse_two_siblings_into_one(self):
+        cap_a, cap_b, task_a, task_b, spec = self._siblings()
+        generate = lambda prompt, temperature=None: (  # noqa: E731
+            _resp(MERGED_CSV_CODE), {})
+        cap, attempts, _usage = distill.generalize_pair(
+            cap_a, cap_b, task_a, task_b, spec, generate)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(cap.id, "lc-abs-a-exp-05-a-exp-08")
+        self.assertEqual(cap.absorbed,
+                         ["lc-a-exp-05", "lc-a-exp-08"])
+        # Binding follows the prompt: default vs alt triggers.
+        self.assertEqual(cap.bind(task_a), "string")
+        self.assertEqual(cap.bind(task_b), "null")
+        self.assertIn("null", cap.params["alt_triggers"])
+        # Both siblings' checks solve under their bindings.
+        for task in (task_a, task_b):
+            for check in task["checks"]:
+                self.assertTrue(
+                    cap.applies_to(task, check["input"]))
+                self.assertTrue(execaps.compare(
+                    check["expected"],
+                    cap.execute(check["input"], task),
+                    check["compare"]))
+
+    def test_collapse_graduates_the_null_trap(self):
+        # R-ADV-02 (empty->null) was a veto trap for the narrow
+        # string parser; the abstraction REUSE-solves it at 0 calls.
+        cap_a, cap_b, task_a, task_b, spec = self._siblings()
+        generate = lambda prompt, temperature=None: (  # noqa: E731
+            _resp(MERGED_CSV_CODE), {})
+        cap, _, _ = distill.generalize_pair(
+            cap_a, cap_b, task_a, task_b, spec, generate)
+        fam_r = ROOT / "benchmarks" / "family-r"
+        with open(fam_r / "adversarial.json",
+                  encoding="utf-8") as fh:
+            adv = {t["id"]: t for t in json.load(fh)}
+        trap = adv["R-ADV-02"]
+        self.assertEqual(cap.bind(trap), "null")
+        for check in trap["checks"]:
+            self.assertTrue(cap.applies_to(trap, check["input"]))
+            self.assertTrue(execaps.compare(
+                check["expected"],
+                cap.execute(check["input"], trap),
+                check["compare"]))
+
+    def test_graduated_trap_routes_reuse_zero_calls(self):
+        # End-to-end: the merged abstraction REUSE-solves R-ADV-02
+        # through arm D at 0 model calls (narrow caps abstain).
+        from benchmarks import run_abcd, runner
+        cap_a, cap_b, task_a, task_b, spec = self._siblings()
+        generate = lambda prompt, temperature=None: (  # noqa: E731
+            _resp(MERGED_CSV_CODE), {})
+        cap, _, _ = distill.generalize_pair(
+            cap_a, cap_b, task_a, task_b, spec, generate)
+        fam_r = ROOT / "benchmarks" / "family-r"
+        with open(fam_r / "adversarial.json",
+                  encoding="utf-8") as fh:
+            adv = {t["id"]: t for t in json.load(fh)}
+        registry = execaps.ExecRegistry(capabilities=[cap])
+        adapter = run_abcd.ExecAdapter(
+            run_abcd.CountingStub(
+                fam_r / "recorded" / "stub_all_pass.json"),
+            registry, allow_compose=False,
+            adapt_memory=run_abcd.seed_b_memory(str(fam_r)))
+        summary = runner.run([adv["R-ADV-02"]], adapter,
+                             strip_fences=True)
+        self.assertTrue(summary["tasks"][0]["passed"])
+        key = ("R-ADV-02", 0)
+        self.assertEqual(adapter.checks[key]["executed"], 1)
+        self.assertFalse(adapter.checks[key]["retrieved"])
+        self.assertEqual(adapter.checks[key]["via"], cap.id)
+        self.assertEqual(
+            runner.aggregate_usage(
+                list(adapter.history or []))["calls"], 0)
+
+    def test_mismatched_siblings_rejected(self):
+        cap_a, cap_b, task_a, task_b, spec = self._siblings()
+        cap_b.descriptor = execaps.retrieve.Capability(
+            id=cap_b.id, intent="x", input_types=("date-text",),
+            output_types=("iso-date-text",), effects=(), family="A")
+        generate = lambda prompt, temperature=None: ("", {})  # noqa: E731
+        with self.assertRaises(distill.DistillError):
+            distill.generalize_pair(
+                cap_a, cap_b, task_a, task_b, spec, generate)
+
+
 class LearnedRegistryReuseTest(unittest.TestCase):
     """Zero-LLM reuse/composition from registered (fake) learned code."""
 

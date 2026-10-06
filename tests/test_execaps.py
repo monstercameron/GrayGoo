@@ -274,6 +274,56 @@ class CompositionTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(first)
 
+    def test_search_ignores_distractor_capabilities(self):
+        # Scaling: 100 distractor capabilities with realistic types
+        # and a plausible overlap mix (mostly none, some partial,
+        # a few at the evidence floor) must not change the winning
+        # plan -- the evidence pre-filter keeps enumeration
+        # proportional to survivors, not registry size. The driver
+        # only executes the winner (max_plans=1), so rank 0 is the
+        # behavior contract.
+        import random
+        rng = random.Random(1234)
+        gibberish = ["qux%d" % i for i in range(60)]
+        real = ["collect", "items", "pages", "dedup", "rows",
+                "normalize", "email", "paginate", "duplicate",
+                "flatten", "nested", "convert", "format"]
+        types = ["json-array", "paged-text", "flat-json-object",
+                 "csv-text", "date-text", "log-text"]
+        distractors = []
+        for i in range(100):
+            roll = rng.random()
+            if roll < 0.05:
+                words = tuple(rng.sample(real, 2)
+                              + rng.sample(gibberish, 4))
+            elif roll < 0.20:
+                words = tuple(rng.sample(real, 1)
+                              + rng.sample(gibberish, 5))
+            else:
+                words = tuple(rng.sample(gibberish, 6))
+            distractors.append(execaps.ExecCapability(
+                "dx-%03d" % i, "distractor",
+                rng.choice(["api", "csv", "dates", "records",
+                            "logs"]),
+                (rng.choice(types),), (rng.choice(types),),
+                lambda text: text, lambda text: False,
+                words, "SYNTHETIC"))
+        big = execaps.ExecRegistry(
+            capabilities=list(
+                self.registry._caps.values()) + distractors)
+        tasks = _load_w_tasks("compose.json")
+        for task_id in ("W-CMP-01", "W-CMP-02"):
+            task = tasks[task_id]
+            for check in task["checks"]:
+                with self.subTest(task=task_id):
+                    small = execaps.search_compositions(
+                        self.registry, task, check["input"],
+                        max_plans=1)
+                    large = execaps.search_compositions(
+                        big, task, check["input"], max_plans=1)
+                    self.assertTrue(small)
+                    self.assertEqual(large[0].id, small[0].id)
+
     def test_low_mean_chain_still_discovered(self):
         # Mean step overlap is a RANKING signal, never a gate: a chain
         # whose every step clears the per-step floor must be found

@@ -310,6 +310,11 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Rising tasks/capability at flat 13 artifacts (W 2.0→3.0, R 1.4→2.2) via --ids subset curves
   - [x] Live A/B/C/D both families: D beats A on success at 1/4–1/6 the calls; 15 zero-LLM solves
   - [x] Pinned-test expectations updated to extended transfer sets (all verified, suite green)
+  - [x] Precision: mined veto words + 3 adversarial traps (misfire→abstain→adapt, transfer unchanged)
+  - [x] Scaling: evidence pre-filter + distractor proof (identical routing at 513 caps, linear ms)
+  - [x] Compression: generalize_pair collapses csv siblings into 1 parameterized cap (14→13, trap graduates)
+  - [ ] Automatic sibling detection + flag-spec proposal (generalize_pair still takes a caller spec)
+  - [ ] N-way parameters (single alt value only today)
 
 - [ ] **Only after the core experiment succeeds**
   - [ ] Add shadow execution on real workloads
