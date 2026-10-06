@@ -297,6 +297,14 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Transfer-based promotion rule on evidence ledgers (§9) + failure criteria (§15)
   - [ ] Generalize seeds so artifact count stays flat as reuse tasks grow (close compression warning)
   - [ ] Contract-coverage applicability: single-cap abstains when prompt demands more than its contract
+  - [x] Synthesis learning: distill.py (Qwen synthesis → AST gate → rehearsal → verify → register → consolidate)
+  - [x] Learned registry replaces hand seeds: run_abcd --capabilities, 13/13 distilled live ($0.044)
+  - [x] Inflection-tolerant SIG matching shared by synthesis/reuse/compose gates + regression tests
+  - [x] Compose gate fix: mean-overlap gate removed (float lottery), joint-coverage floor (≥3 words) added
+  - [x] Learned transfer parity (SAME held-out tasks): stub W 6/6 + R 8/8; live W 6/6 + R 7/8 = hand
+  - [x] Zero-LLM REUSE/COMPOSE verified per-record (8 outcomes, 0 calls) + learning metrics tracked
+  - [ ] Compress across procedures: consolidation dropped 0, still one function per exposure task
+  - [ ] Separate prompt-distinguished semantic siblings (A-EXP-05/08 null-vs-empty; hand seeds share the flaw)
 
 - [ ] **Only after the core experiment succeeds**
   - [ ] Add shadow execution on real workloads

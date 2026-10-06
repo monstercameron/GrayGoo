@@ -490,11 +490,7 @@ class ExecCapability:
 
     def prompt_overlap(self, task):
         """Fraction of signature keywords present in the task prompt."""
-        words = set(re.findall(r"[a-z0-9]+",
-                               str(task.get("prompt", "")).lower()))
-        if not self.prompt_keywords:
-            return 0.0
-        return len(self.prompt_keywords & words) / len(self.prompt_keywords)
+        return sig_overlap(self.prompt_keywords, _prompt_words(task))
 
     def applies_to(self, task, check_input, min_overlap=0.5):
         """True only when category, prompt, AND input precondition agree."""
@@ -634,6 +630,22 @@ SYNTHETIC_CHECKS = {
     ],
 }
 
+# Full source task for distilling the table-csv inverse (distill.py
+# --include-synthetic-table). Prompt carries the signature words the
+# hand seed uses, so learned replacements stay behavior-compatible.
+TABLE_CSV_TASK = {
+    "id": "SYNTHETIC:table-csv",
+    "family": "A",
+    "split": "exposure",
+    "category": "csv",
+    "prompt": ("Serialize the input JSON array of objects as CSV text "
+               "(RFC 4180: comma delimiter, double-quote quoting, first "
+               "row is the header with the first object's keys; one row "
+               "per object, values in header order). Output only the CSV."),
+    "checks": SYNTHETIC_CHECKS["cap-table-csv"],
+    "notes": "Synthetic exposure contract for the table-csv inverse.",
+}
+
 
 # ---------------------------------------------------------------------------
 # Deterministic composition search (directive §3, order item 4)
@@ -679,6 +691,55 @@ _OUTPUT_KEYWORDS = {
 _JSON_FAMILY_WORDS = frozenset({"json", "array", "object", "objects"})
 
 _MIN_STEP_OVERLAP = 0.2
+
+# Minimum distinct procedure words a chain must explain. Two steps
+# resting on the SAME two generic words ("json"+"array" match any
+# JSON task) is not composition evidence -- without this floor the
+# csv-parse>table-csv roundtrip trial-passes on novelty prompts that
+# lack an "Output" demand clause (W-NOV-01 regression).
+_MIN_COVERAGE_WORDS = 3
+
+# Minimum stem length for inflection-tolerant signature matching:
+# shorter shared prefixes ("to"/"token", "in"/"input") are noise.
+_MIN_STEM_MATCH = 4
+
+
+def sig_word_hits(keywords, words):
+    """Map each signature keyword to its matched prompt word (or None).
+
+    Matching is inflection-tolerant: a keyword hits when it equals a
+    prompt word or shares a common stem of >= 4 chars via prefix
+    (``duplicates`` ~ ``duplicate``, ``dedupe`` ~ ``dedup``,
+    ``keeping`` ~ ``keep``). Learned signatures legitimately inflect
+    exposure wording, so exact-token matching would silently drop
+    transfer retrieval; the stem floor keeps short-word collisions
+    (``in``/``input``, ``to``/``token``) from counting as evidence.
+    """
+    words = set(words)
+    hits = {}
+    for keyword in keywords:
+        hit = None
+        if keyword in words:
+            hit = keyword
+        else:
+            for word in sorted(words):
+                short, long = ((keyword, word) if len(keyword) <= len(word)
+                               else (word, keyword))
+                if len(short) >= _MIN_STEM_MATCH and long.startswith(short):
+                    hit = word
+                    break
+        hits[keyword] = hit
+    return hits
+
+
+def sig_overlap(keywords, words):
+    """Fraction of signature keywords with a prompt-word hit."""
+    keywords = tuple(keywords)
+    if not keywords:
+        return 0.0
+    hits = sig_word_hits(keywords, words)
+    return sum(1 for keyword in keywords
+               if hits[keyword] is not None) / len(keywords)
 
 
 def _prompt_words(task):
@@ -801,11 +862,7 @@ class Composition:
         return len(self.uses)
 
     def prompt_overlap(self, task):
-        words = set(re.findall(r"[a-z0-9]+",
-                               str(task.get("prompt", "")).lower()))
-        if not self.prompt_keywords:
-            return 0.0
-        return len(self.prompt_keywords & words) / len(self.prompt_keywords)
+        return sig_overlap(self.prompt_keywords, _prompt_words(task))
 
     def execute(self, registry, check_input):
         """Run the plan (pure computation, never the model)."""
@@ -877,16 +934,20 @@ def _map_candidates(caps, fields):
                 yield (producer.id, field, element.id)
 
 
-def search_compositions(registry, task, check_input, min_overlap=0.5,
-                        max_plans=8):
+def search_compositions(registry, task, check_input, max_plans=8):
     """Deterministically discover composition plans for a task+input.
 
     Enumerates SEQ chains (depth <= 3) and MAP plans, then applies
     the validation gates in order: effect compatibility (effectful
     plans need task-allowed effects), per-step prompt evidence (>=
-    0.2 each), output-type agreement with the prompt demand, trial
+    0.2 each), joint coverage (>= 3 distinct procedure words --
+    steps resting on the same two generic words do not compose),
+    output-type agreement with the prompt demand, trial
     execution on ``check_input``, and non-vacuity (the plan must
-    compute something neither endpoint step computes alone).
+    compute something neither endpoint step computes alone). Mean
+    step overlap is a RANKING signal only, never a gate: a chain
+    whose every step is prompt-grounded must not die because one
+    step's signature carries exposure-specific filler words.
     Survivors rank by (type-match tier, mention-order inversions,
     -procedure coverage, steps, -mean step overlap, plan id); at most
     ``max_plans`` return. Mention order comes first among prompt
@@ -912,13 +973,13 @@ def search_compositions(registry, task, check_input, min_overlap=0.5,
     # prompt and spurious chains trial-pass on single-procedure
     # tasks (W-EXP-05 regression).
     step_overlap = {}
+    step_hits = {}
     for cap in caps:
-        if cap.prompt_keywords:
-            step_overlap[cap.id] = (
-                len(cap.prompt_keywords & procedure_words)
-                / len(cap.prompt_keywords))
-        else:
-            step_overlap[cap.id] = 0.0
+        hits = sig_word_hits(cap.prompt_keywords, procedure_words)
+        step_hits[cap.id] = hits
+        step_overlap[cap.id] = (
+            sum(1 for hit in hits.values() if hit is not None)
+            / len(cap.prompt_keywords)) if cap.prompt_keywords else 0.0
     demanded = infer_output_types(task)
     allowed = task.get("allowed_effects")
 
@@ -965,9 +1026,13 @@ def search_compositions(registry, task, check_input, min_overlap=0.5,
         mean = sum(step_overlap[u] for u in uses) / len(uses)
         covered = set()
         for u in uses:
-            covered.update(by_id[u].prompt_keywords & procedure_words)
-        positions = [min(first_mention[w]
-                         for w in by_id[u].prompt_keywords & words)
+            covered.update(hit for hit in step_hits[u].values()
+                           if hit is not None)
+        if len(covered) < _MIN_COVERAGE_WORDS:
+            return None
+        positions = [min(first_mention[hit]
+                         for hit in step_hits[u].values()
+                         if hit is not None)
                      for u in uses]
         inversions = sum(1 for i in range(len(positions))
                          for j in range(i + 1, len(positions))
@@ -977,7 +1042,7 @@ def search_compositions(registry, task, check_input, min_overlap=0.5,
     ranked = []
     for steps, pieces in _seq_candidates(caps):
         score = viable(steps)
-        if score is None or score[0] < min_overlap:
+        if score is None:
             continue
         mean, coverage, inversions = score
         final = by_id[steps[-1]].descriptor.output_types
@@ -1005,7 +1070,7 @@ def search_compositions(registry, task, check_input, min_overlap=0.5,
             caps, _prompt_fields(task)):
         uses = [producer, element]
         score = viable(uses)
-        if score is None or score[0] < min_overlap:
+        if score is None:
             continue
         mean, coverage, inversions = score
         final = by_id[producer].descriptor.output_types
@@ -1084,7 +1149,7 @@ class ExecRegistry:
         by_id = {cap.id: cap for cap in fitting}
         return [by_id[cap.id] for cap, _ in scored if cap.id in by_id]
 
-    def find_composition(self, task, check_input, min_overlap=0.5):
+    def find_composition(self, task, check_input):
         """Best searched plan for a task+input, memoized in the cache.
 
         Delegates to :func:`search_compositions` (type/effect/prompt/
@@ -1100,8 +1165,7 @@ class ExecRegistry:
         # subset of its steps applies. Winners memoize by plan id
         # for stable promotion evidence.
         plans = search_compositions(
-            self, task, check_input, min_overlap=min_overlap,
-            max_plans=1)
+            self, task, check_input, max_plans=1)
         if not plans:
             return None
         if plans[0].category != task.get("category"):

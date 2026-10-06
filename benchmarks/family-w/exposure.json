@@ -44,7 +44,7 @@
     "family": "W",
     "split": "exposure",
     "category": "api",
-    "prompt": "Enforce the ratelimit throttle window with a fixed quota: input holds the allowance limit, window seconds, and ascending hit timestamps. Output allow or deny per hit as a JSON array.",
+    "prompt": "Enforce the ratelimit throttle window with a fixed quota: windows anchor at the first hit, so hit t falls in window number (t - t0) // window with t0 the first hit; allow a hit while fewer than the allowance limit hit in its window, else deny. Input holds the limit, window seconds, and ascending hit timestamps. Output allow or deny per hit as a JSON array.",
     "checks": [
       {
         "input": "{\"limit\": 2, \"window_s\": 10, \"hits\": [0, 3, 9, 10, 21]}",

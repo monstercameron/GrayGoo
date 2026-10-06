@@ -108,6 +108,52 @@ class ApplicabilityTest(unittest.TestCase):
         self.assertEqual(found, [])
 
 
+class SigMatchTest(unittest.TestCase):
+    def test_exact_hits(self):
+        hits = execaps.sig_word_hits(
+            ("dedupe", "rows"), {"dedup", "duplicate", "rows"})
+        self.assertEqual(hits["rows"], "rows")
+
+    def test_inflection_hits(self):
+        # Learned signatures inflect exposure wording; retrieval must
+        # still fire on transfer phrasing (W-CMP-01 regression:
+        # 'dedupe'/'duplicates' vs prompt 'dedup'/'duplicate').
+        hits = execaps.sig_word_hits(
+            ("dedupe", "duplicates", "rows"),
+            {"dedup", "duplicate", "rows"})
+        self.assertEqual(hits["dedupe"], "dedup")
+        self.assertEqual(hits["duplicates"], "duplicate")
+        self.assertEqual(hits["rows"], "rows")
+
+    def test_short_stems_do_not_hit(self):
+        hits = execaps.sig_word_hits(
+            ("to", "token", "in", "input"), {"token", "input"})
+        self.assertEqual(hits["to"], None)
+        self.assertEqual(hits["in"], None)
+        self.assertEqual(hits["token"], "token")
+
+    def test_overlap_fraction(self):
+        self.assertAlmostEqual(
+            execaps.sig_overlap(
+                ("dedupe", "duplicates", "exact", "first", "keep",
+                 "rows"),
+                {"paginate", "collect", "dedup", "duplicate", "rows"}),
+            0.5)
+
+    def test_synthesis_gate_matches_runtime(self):
+        # distill's gate must score what the runtime scores, or caps
+        # pass synthesis yet never fire (or vice versa).
+        import distill
+        task = {"prompt": "Paginate across pages to collect items, "
+                          "then dedup duplicate rows. "
+                          "Output a JSON array."}
+        sig = ("dedupe", "duplicates", "exact", "first", "keep",
+               "rows")
+        self.assertAlmostEqual(
+            distill.sig_prompt_overlap(sig, task),
+            execaps.sig_overlap(sig, execaps._prompt_words(task)))
+
+
 class CompositionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -203,6 +249,17 @@ class CompositionTest(unittest.TestCase):
                     self.assertEqual(execaps.search_compositions(
                         registry, task, check["input"]), [])
 
+    def test_search_finds_no_plans_on_novelty_task(self):
+        # W-NOV-01 shares only generic words ("json", "array") with
+        # the csv roundtrip steps: joint coverage must reject the
+        # chain so the task routes to NOVEL instead of a spurious
+        # COMPOSE plan with an empty trial output.
+        task = _load_w_tasks("novel.json")["W-NOV-01"]
+        for check in task["checks"]:
+            with self.subTest(check=check["input"][:40]):
+                self.assertEqual(execaps.search_compositions(
+                    self.registry, task, check["input"]), [])
+
     def test_search_is_deterministic(self):
         task = {"id": "R-CMP-01", "family": "R", "split": "transfer",
                 "category": "csv",
@@ -216,6 +273,35 @@ class CompositionTest(unittest.TestCase):
             self.registry, task, check_input)]
         self.assertEqual(first, second)
         self.assertTrue(first)
+
+    def test_low_mean_chain_still_discovered(self):
+        # Mean step overlap is a RANKING signal, never a gate: a chain
+        # whose every step clears the per-step floor must be found
+        # even when the mean sits below the old 0.5 bar (learned-SIG
+        # regression: exposure filler words dilute transfer means).
+        first = execaps.ExecCapability(
+            "cap-alpha", "alpha step", "demo",
+            ("text-a",), ("text-b",),
+            lambda text: "mid:" + text, lambda text: True,
+            ("alpha", "gather", "filler", "words", "here", "now"),
+            "SYNTHETIC")
+        second = execaps.ExecCapability(
+            "cap-beta", "beta step", "demo",
+            ("text-b",), ("text-c",),
+            lambda text: "out:" + text, lambda text: True,
+            ("beta", "finish", "extra", "filler", "terms", "kept"),
+            "SYNTHETIC")
+        registry = execaps.ExecRegistry(
+            capabilities=[first, second])
+        task = {"id": "SYN-CMP", "family": "S", "split": "transfer",
+                "category": "demo",
+                "prompt": "Alpha gather the records, then beta finish "
+                          "them. Return the finished bundle."}
+        plans = execaps.search_compositions(registry, task, "raw")
+        self.assertEqual([p.id for p in plans],
+                         ["seq:cap-alpha>cap-beta"])
+        self.assertEqual(plans[0].execute(registry, "raw"),
+                         "out:mid:raw")
 
     def test_find_composition_memoizes_winner(self):
         registry = execaps.ExecRegistry()

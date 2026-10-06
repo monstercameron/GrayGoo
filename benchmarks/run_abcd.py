@@ -50,6 +50,7 @@ import runner  # noqa: E402
 import text_memory as text_mem_mod  # noqa: E402
 import execaps  # noqa: E402
 import outcomes  # noqa: E402
+import distill  # noqa: E402
 
 ARMS = ("a", "b", "c", "d")
 
@@ -464,12 +465,24 @@ def thesis_verdict(payloads, reference="a", candidate="d",
             "failed_section_15": failed_15}
 
 
-def run_arm(arm, tasks, make_inner, out_root, tasks_dir=None):
-    """Run one arm; write per-task files; return the summary dict."""
+def run_arm(arm, tasks, make_inner, out_root, tasks_dir=None,
+            capabilities_path=None):
+    """Run one arm; write per-task files; return the summary dict.
+
+    ``capabilities_path`` selects a learned registry (distill.py
+    output) instead of the hand-written seeds -- the goal-4 rung:
+    zero-LLM reuse from actually-synthesized capabilities.
+    """
     out_dir = Path(out_root) / arm
     out_dir.mkdir(parents=True, exist_ok=True)
     inner = make_inner()
-    registry = execaps.ExecRegistry()
+    if capabilities_path:
+        learned, _meta = distill.load_learned(capabilities_path)
+        registry = execaps.ExecRegistry(capabilities=learned)
+        registry_source = str(capabilities_path)
+    else:
+        registry = execaps.ExecRegistry()
+        registry_source = "seeds"
     if arm == "a":
         adapter = inner
     elif arm == "b":
@@ -508,6 +521,8 @@ def run_arm(arm, tasks, make_inner, out_root, tasks_dir=None):
     solved = sum(1 for r in records if r["passed"])
     payload = {"arm": arm,
                "tasks_passed": "%d/%d" % (solved, len(records)),
+               "registry": {"source": registry_source,
+                            "capabilities": len(registry._caps)},
                "aggregate": agg,
                "curves": outcomes.cumulative_curves(records),
                "compression": outcomes.compression(
@@ -546,6 +561,9 @@ def main(argv=None):
                         help="randomized task orders to run (directive §5)")
     parser.add_argument("--seed", type=int, default=0,
                         help="base seed for order shuffles")
+    parser.add_argument("--capabilities", default=None,
+                        help="learned registry JSON (distill.py output) "
+                             "instead of hand-written seeds")
     args = parser.parse_args(argv)
     if args.orders < 1:
         raise SystemExit("--orders must be >= 1")
@@ -586,7 +604,8 @@ def main(argv=None):
         payloads = {}
         for arm in arms:
             payload = run_arm(arm, ordered, make_inner, order_root,
-                              tasks_dir=Path(args.tasks))
+                              tasks_dir=Path(args.tasks),
+                              capabilities_path=args.capabilities)
             payload["order"] = order_ids
             with open(order_root / ("%s-summary.json" % arm), "w",
                       encoding="utf-8") as fh:
