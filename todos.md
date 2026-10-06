@@ -305,6 +305,11 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Zero-LLM REUSE/COMPOSE verified per-record (8 outcomes, 0 calls) + learning metrics tracked
   - [ ] Compress across procedures: consolidation dropped 0, still one function per exposure task
   - [ ] Separate prompt-distinguished semantic siblings (A-EXP-05/08 null-vs-empty; hand seeds share the flaw)
+  - [x] Decisive experiment: 7 held-out reuse tasks added (validated on hand + frozen learned registries)
+  - [x] Multi-order replication: stub A/B/C/D × 5 orders × 2 families, identical routing
+  - [x] Rising tasks/capability at flat 13 artifacts (W 2.0→3.0, R 1.4→2.2) via --ids subset curves
+  - [x] Live A/B/C/D both families: D beats A on success at 1/4–1/6 the calls; 15 zero-LLM solves
+  - [x] Pinned-test expectations updated to extended transfer sets (all verified, suite green)
 
 - [ ] **Only after the core experiment succeeds**
   - [ ] Add shadow execution on real workloads

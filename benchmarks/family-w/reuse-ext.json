@@ -1,0 +1,65 @@
+[
+  {
+    "checks": [
+      {
+        "compare": "json",
+        "expected": "[{\"id\": 1}, {\"id\": 2}, {\"id\": 3}]",
+        "input": "{\"items\": [{\"id\": 1}, {\"id\": 2}], \"next\": true}\n{\"items\": [], \"next\": true}\n{\"items\": [{\"id\": 3}], \"next\": false}"
+      },
+      {
+        "compare": "json",
+        "expected": "[\"a\", \"b\", \"c\"]",
+        "input": "{\"items\": [\"a\", \"b\"], \"next\": true}\n{\"items\": [\"c\"], \"next\": false}"
+      }
+    ],
+    "derived_from": "W-EXP-01",
+    "family": "W",
+    "id": "W-REU-03",
+    "notes": "Same-procedure reuse of W-EXP-01 with held-out inputs.",
+    "prompt": "Paginate to collect items across pages: each input line holds one page object with an items array with a next cursor flag. Concatenate every page's items in order. Output a JSON array.",
+    "split": "transfer",
+    "category": "api"
+  },
+  {
+    "checks": [
+      {
+        "compare": "json",
+        "expected": "[{\"email\": \"kay@mail.com\", \"city\": \"Oslo\"}]",
+        "input": "[{\"email\": \"  KAY@MAIL.COM \", \"city\": \"  Oslo \"}]"
+      },
+      {
+        "compare": "json",
+        "expected": "[{\"n\": \"42\", \"ok\": true, \"tag\": \"x\"}]",
+        "input": "[{\"n\": \" 42 \", \"ok\": true, \"tag\": \" x \"}]"
+      }
+    ],
+    "derived_from": "W-EXP-05",
+    "family": "W",
+    "id": "W-REU-04",
+    "notes": "Same-procedure reuse of W-EXP-05 with held-out inputs.",
+    "prompt": "Normalize each record to trim whitespace and lowercase email values: strip every string value. Output a JSON array.",
+    "split": "transfer",
+    "category": "api"
+  },
+  {
+    "checks": [
+      {
+        "compare": "json",
+        "expected": "[{\"k\": 1}, {\"k\": 2}, {\"k\": 3}]",
+        "input": "[{\"k\": 1}, {\"k\": 2}, {\"k\": 1}, {\"k\": 3}, {\"k\": 2}]"
+      },
+      {
+        "compare": "json",
+        "expected": "[\"a\", \"b\", \"c\"]",
+        "input": "[\"a\", \"b\", \"a\", \"a\", \"c\"]"
+      }
+    ],
+    "derived_from": "W-EXP-06",
+    "family": "W",
+    "id": "W-REU-05",
+    "notes": "Same-procedure reuse of W-EXP-06 with held-out inputs.",
+    "prompt": "Dedup rows by dropping exact duplicate whole rows, keeping the first identical occurrence. Output a JSON array.",
+    "split": "transfer",
+    "category": "api"
+  }
+]

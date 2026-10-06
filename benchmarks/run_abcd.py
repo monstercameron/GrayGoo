@@ -564,6 +564,9 @@ def main(argv=None):
     parser.add_argument("--capabilities", default=None,
                         help="learned registry JSON (distill.py output) "
                              "instead of hand-written seeds")
+    parser.add_argument("--ids", default=None,
+                        help="comma-separated task ids to run "
+                             "(subset curves keep the registry frozen)")
     args = parser.parse_args(argv)
     if args.orders < 1:
         raise SystemExit("--orders must be >= 1")
@@ -580,6 +583,11 @@ def main(argv=None):
         tasks = [t for t in tasks if t.get("split") == args.split]
         if not tasks:
             raise SystemExit("no tasks for split %r" % (args.split,))
+    if args.ids:
+        wanted = set(args.ids.split(","))
+        tasks = [t for t in tasks if t["id"] in wanted]
+        if not tasks:
+            raise SystemExit("no tasks match --ids %r" % (args.ids,))
 
     recorded = (Path(args.recorded) if args.recorded
                 else Path(args.tasks) / "recorded" / "stub_all_pass.json")

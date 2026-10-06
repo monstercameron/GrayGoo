@@ -1,0 +1,86 @@
+[
+  {
+    "checks": [
+      {
+        "compare": "json",
+        "expected": "[{\"sku\": \"A1\", \"price\": \"10\"}, {\"sku\": \"B2\", \"price\": \"20\"}]",
+        "input": "sku,price\nA1,10\nB2,20"
+      },
+      {
+        "compare": "json",
+        "expected": "[{\"name\": \"ann\", \"quote\": \"hi, there\"}, {\"name\": \"bob\", \"quote\": \"hey\"}]",
+        "input": "name,quote\nann,\"hi, there\"\nbob,hey"
+      }
+    ],
+    "derived_from": "A-EXP-05",
+    "family": "R",
+    "id": "R-REU-05",
+    "notes": "Same-procedure reuse of A-EXP-05 with held-out inputs.",
+    "prompt": "Parse the input as CSV (RFC 4180: comma delimiter, double-quote quoting, first row is the header). Output a JSON array of objects mapping header names to field values (all values strings, row order preserved). Output only the JSON.",
+    "split": "transfer",
+    "category": "csv"
+  },
+  {
+    "checks": [
+      {
+        "compare": "json",
+        "expected": "{\"a.b.c\": 1, \"d[0]\": 10, \"d[1]\": 20}",
+        "input": "{\"a\": {\"b\": {\"c\": 1}}, \"d\": [10, 20]}"
+      },
+      {
+        "compare": "json",
+        "expected": "{\"x\": [], \"y.z\": \"s\"}",
+        "input": "{\"x\": [], \"y\": {\"z\": \"s\"}}"
+      }
+    ],
+    "derived_from": "A-EXP-09",
+    "family": "R",
+    "id": "R-REU-06",
+    "notes": "Same-procedure reuse of A-EXP-09 with held-out inputs.",
+    "prompt": "The input is one JSON object. Flatten it: nested objects become dot-separated keys; array elements become key[i]; empty objects/arrays are preserved as values; scalars are unchanged. Output the flat JSON object. Output only the JSON.",
+    "split": "transfer",
+    "category": "records"
+  },
+  {
+    "checks": [
+      {
+        "compare": "exact",
+        "expected": "2023-01-07\n2022-12-25\n2021-03-04\n2020-05-04",
+        "input": "7 Jan 2023\nDecember 25, 2022\n2021/03/04\n04.05.2020"
+      },
+      {
+        "compare": "exact",
+        "expected": "2021-02-28\n2020-08-15",
+        "input": "Feb 28, 2021\n15 Aug 2020"
+      }
+    ],
+    "derived_from": "A-EXP-01",
+    "family": "R",
+    "id": "R-REU-07",
+    "notes": "Same-procedure reuse of A-EXP-01 with held-out inputs.",
+    "prompt": "Convert each date on its own input line to ISO format YYYY-MM-DD, one converted date per output line, in the same order. Supported input formats: 'D Mon YYYY' (full or abbreviated English month name, e.g. 5 Oct 2026), 'Mon D, YYYY', 'YYYY/MM/DD', 'DD.MM.YYYY'.",
+    "split": "transfer",
+    "category": "dates"
+  },
+  {
+    "checks": [
+      {
+        "compare": "json",
+        "expected": "{\"host\": \"10.0.0.1\", \"user\": \"joe\", \"time\": \"12/Dec/2024:10:11:12 +0000\", \"method\": \"POST\", \"path\": \"/api/x\", \"status\": 201, \"bytes\": 128}",
+        "input": "10.0.0.1 - joe [12/Dec/2024:10:11:12 +0000] \"POST /api/x HTTP/1.1\" 201 128"
+      },
+      {
+        "compare": "json",
+        "expected": "{\"host\": \"10.0.0.2\", \"user\": null, \"time\": \"13/Dec/2024:11:00:00 +0000\", \"method\": \"GET\", \"path\": \"/z\", \"status\": 404, \"bytes\": 0}",
+        "input": "10.0.0.2 - - [13/Dec/2024:11:00:00 +0000] \"GET /z HTTP/1.0\" 404 -"
+      }
+    ],
+    "derived_from": "A-EXP-13",
+    "family": "R",
+    "id": "R-REU-08",
+    "notes": "Same-procedure reuse of A-EXP-13 with held-out inputs.",
+    "prompt": "Parse one Common Log Format line: host ident user [time] \"METHOD path PROTO\" status bytes. Output JSON {\"host\":...,\"user\":...,\"time\":...,\"method\":...,\"path\":...,\"status\":N,\"bytes\":N} with time = bracket contents, user null when '-', bytes 0 when '-'. Output only the JSON.",
+    "split": "transfer",
+    "category": "logs"
+  }
+]
