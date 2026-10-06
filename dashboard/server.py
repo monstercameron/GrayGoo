@@ -10,7 +10,10 @@ Endpoints (JSON):
   POST /api/run             {job: smoke|tests|baseline-stub} -> {job_id} (409 if busy)
   GET  /api/jobs/{id}       {state, exit_code, tail, output}
   POST /api/jobs/{id}/stop  kill a running job
-  GET  /api/events          SSE job snapshots (optional; polling /api/jobs works too)
+  POST /api/agent/prompt    {prompt, mode: demo|live} -> {session_id} (409 if busy)
+  GET  /api/agent/sessions/{id}?since=N   incremental session events
+  GET  /api/agent/tools, /api/agent/history; POST /api/agent/reset
+  GET  /api/events         SSE job snapshots (optional; polling /api/jobs works too)
   GET  /, /index.html, /app.js, /styles.css   static frontend
 
 Secrets policy: values matching CEREBRAS_API_KEY / CEREBRAS patterns are
@@ -31,7 +34,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 DASH_DIR = Path(__file__).resolve().parent
@@ -411,6 +414,69 @@ def dispatch(method, path, body, ctx):
                          "running_id": manager.busy()}
         return 200, {"job_id": job_id}
 
+    agent = getattr(ctx, "agent", None)
+    if agent is not None and clean_path.startswith("/api/agent/"):
+        sub = clean_path[len("/api/agent/"):]
+        if method == "GET" and sub == "tools":
+            return 200, {"tools": agent.tools()}
+        if method == "GET" and sub == "config":
+            import agent_session
+            status = agent_session.live_status()
+            status["spent_usd"] = round(agent.live_spend, 5)
+            status["cap_usd"] = agent_session.LIVE_SPEND_CAP_USD
+            return 200, {"live": status}
+        if method == "GET" and sub == "snapshots":
+            return 200, {"snapshots": agent.snapshots()}
+        if method == "GET" and sub == "heldout":
+            import agent_session
+            return 200, {"tasks": agent_session.heldout_tasks()}
+        if method == "POST" and sub == "pin":
+            try:
+                payload = json.loads(body.decode("utf-8") if body else "{}")
+            except (ValueError, UnicodeDecodeError):
+                return 400, {"error": "invalid JSON body"}
+            slug, err = agent.pin(payload.get("label"))
+            if err:
+                return 400, {"error": err}
+            return 200, {"id": "pinned:" + slug}
+        if method == "GET" and sub == "history":
+            return 200, {"sessions": agent.history()}
+        if method == "POST" and sub == "call":
+            try:
+                payload = json.loads(body.decode("utf-8") if body else "{}")
+            except (ValueError, UnicodeDecodeError):
+                return 400, {"error": "invalid JSON body"}
+            return 200, agent.call_tool(payload.get("call"))
+        if method == "POST" and sub == "reset":
+            agent.registry.clear()
+            return 200, {"tools": []}
+        if method == "POST" and sub == "prompt":
+            try:
+                payload = json.loads(body.decode("utf-8") if body else "{}")
+            except (ValueError, UnicodeDecodeError):
+                return 400, {"error": "invalid JSON body"}
+            sid, err = agent.start(payload.get("prompt"),
+                                   payload.get("mode", "demo"),
+                                   bool(payload.get("compare")),
+                                   payload.get("expected"),
+                                   payload.get("oracle"))
+            if err == "busy":
+                return 409, {"error": "a session is already running"}
+            if err:
+                return 400, {"error": err}
+            return 200, {"session_id": sid}
+        if method == "GET" and sub.startswith("sessions/"):
+            qs = parse_qs(urlparse(path).query)
+            try:
+                since = int((qs.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0
+            snap = agent.get(sub[len("sessions/"):], max(0, since))
+            if snap is None:
+                return 404, {"error": "unknown session"}
+            return 200, snap
+        return 404, {"error": "unknown endpoint"}
+
     if clean_path.startswith("/api/jobs/"):
         rest = clean_path[len("/api/jobs/"):]
         job_id, _, action = rest.partition("/")
@@ -441,7 +507,7 @@ STATIC_TYPES = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
 }
-STATIC_FILES = {"index.html", "app.js", "styles.css"}
+STATIC_FILES = {"index.html", "app.js", "styles.css", "agent.js", "agent.css"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -516,7 +582,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(port, manager=None):
     manager = manager or JobManager(ROOT)
-    Handler.ctx = SimpleNamespace(root=ROOT, manager=manager)
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import agent_session
+    Handler.ctx = SimpleNamespace(root=ROOT, manager=manager,
+                                  agent=agent_session.SessionManager())
     server = ThreadingHTTPServer((HOST, port), Handler)
     return server
 

@@ -19,6 +19,28 @@ Custom port:
 python dashboard/server.py --port 8137
 ```
 
+## Agent tab (prompt the agent, watch it build tools)
+
+Start with `uv run python dashboard/server.py` (plain `python` lacks the
+Cerebras client dependencies, so Live mode would be unavailable).
+
+- Ask in plain English. The model writes a Lisp tool and tests; the tests run
+  in sandboxed SBCL; only passing tools are saved to `artifacts/agent/tools.json`.
+- Every prompt is also run against an empty registry (the no-memory arm), so
+  token savings and answer agreement are measured, not estimated.
+- Proof panel: net savings, cost once a tool exists, held-out correctness (answers
+  from independent Python), regression on known answers; per-prompt paired bars.
+- Tabs switch between your session, the shipped recorded live runs
+  (`dashboard/evidence/*.json`) and runs you pin.
+- Modes: **Demo** is a scripted offline model (free, estimated tokens, example chips
+  only). **Live** calls Cerebras Qwen (real tokens); a hard `$0.15` spend cap per
+  server process applies (`LIVE_SPEND_CAP_USD` in `agent_session.py`).
+- `python evidence_run.py --runs 3 --cap 0.14` repeats the live guided and held-out
+  runs and rewrites `dashboard/evidence/live-repeat-runs.json` (paid, capped).
+
+Agent API: `POST /api/agent/prompt`, `GET /api/agent/sessions/{id}?since=N`,
+`GET /api/agent/tools|history|config|snapshots|heldout`, `POST /api/agent/call|pin|reset`.
+
 ## Views
 
 - **Overview** — todo progress, Cerebras spend vs $50 budget, git log, system checks.

@@ -5,12 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GrayGoo Dashboard</title>
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="agent.css">
 </head>
 <body>
 <header>
   <h1>GrayGoo Dashboard</h1>
   <nav>
-    <button data-view="overview" class="active">Overview</button>
+    <button data-view="agent" class="active">Agent</button>
+    <button data-view="thesis">Thesis</button>
+    <button data-view="overview">Overview</button>
     <button data-view="pipeline">Pipeline</button>
     <button data-view="control">Control</button>
   </nav>
@@ -18,7 +21,278 @@
 </header>
 
 <main>
-  <section id="view-overview" class="view active">
+  <section id="view-thesis" class="view">
+    <article class="th">
+      <div class="th-hero card wide">
+        <p class="th-kicker">The thesis</p>
+        <h2>LLM reasoning can be crystallized into verified, reusable capabilities that cut inference on later related tasks, without cutting correctness.</h2>
+        <p class="th-lede">A model that solves the same kind of problem tomorrow should not pay full price to think it through again. GrayGoo turns each solved task into a <b>tested Lisp tool</b>. Later prompts reuse or combine those tools, so the next answer costs a fraction of the first, and often nothing.</p>
+        <div class="th-cta">
+          <button class="ag-primary" data-goto="agent" data-action="demo">&#9654; Watch it happen (guided demo)</button>
+          <button class="ag-send" data-goto="agent">Open the workspace</button>
+        </div>
+      </div>
+
+      <section class="card wide th-strip">
+        <h2>The evidence, from a real model</h2>
+        <div class="th-kpis">
+          <div class="kpi k2"><span class="kl">Net over all 7 prompts</span><b id="th-k2" class="good">&mdash;</b><i id="th-k2s">&nbsp;</i></div>
+        <div class="kpi k1"><span class="kl">Once a tool exists</span><b id="th-k1" class="good">&mdash;</b><i id="th-k1s">&nbsp;</i></div>
+        <div class="kpi k4"><span class="kl">Held-out vs independent oracle</span><b id="th-k4" class="good">&mdash;</b><i id="th-k4s">&nbsp;</i></div>
+        <div class="kpi k3"><span class="kl">Answers correct</span><b id="th-k3" class="good">&mdash;</b><i id="th-k3s">&nbsp;</i></div>
+      </div>
+        <p class="muted">Recorded live runs: Cerebras Qwen, 3 runs, each prompt also run with an empty registry. <button class="ag-chip" data-goto="agent">See the bars and the log</button></p>
+      </section>
+
+      <section class="card wide">
+        <h2>The problem</h2>
+        <p>Every prompt to a language model is billed as if it were the first. Ask for a palindrome checker on Monday and again on Friday and you pay for the same reasoning twice. Prompt caches only help when the text repeats exactly, and a cached <i>answer</i> goes stale; a cached <i>program</i> does not.</p>
+      </section>
+
+      <section class="card wide">
+        <h2>The idea, in one picture</h2>
+        <div class="th-lanes">
+          <div class="th-lane l-new">
+            <span class="th-tag">New task</span>
+            <ol>
+              <li>Model writes a Lisp tool <b>and its tests</b></li>
+              <li>Gates: parse, risk class (R0&ndash;R6), tests in a sandboxed SBCL REPL</li>
+              <li>Pass: saved to the registry. Fail: one repair with the actual-vs-expected values</li>
+            </ol>
+            <p class="th-cost">Costs full price, once.</p>
+          </div>
+          <div class="th-arrow" aria-hidden="true">&rarr;</div>
+          <div class="th-lane l-reuse">
+            <span class="th-tag">Related task</span>
+            <ol>
+              <li>Cheap local search finds a saved tool that looks relevant</li>
+              <li>A short question (about 100 tokens): &ldquo;does this tool answer the goal?&rdquo;</li>
+              <li>If yes, run it in the REPL. If not, fall back to a full build</li>
+            </ol>
+            <p class="th-cost">Costs a fraction.</p>
+          </div>
+          <div class="th-arrow" aria-hidden="true">&rarr;</div>
+          <div class="th-lane l-cache">
+            <span class="th-tag">Exact repeat</span>
+            <ol>
+              <li>The prompt was answered before</li>
+              <li>Re-run the saved call in the REPL</li>
+              <li>No model call at all</li>
+            </ol>
+            <p class="th-cost">Costs nothing.</p>
+          </div>
+        </div>
+        <p class="muted">Tools also compose: once <code>square</code> exists, <code>sum-of-squares</code> is built by calling it, then <code>mean-of-squares</code> by calling that. The tool graph on the Agent tab shows these dependencies.</p>
+      </section>
+
+      <section class="card wide">
+        <h2>Why reuse is trustworthy, not just cheap</h2>
+        <div class="th-grid">
+          <div class="th-card"><b>Tests gate every save</b><p>A tool enters the registry only after its tests pass in a fresh, sandboxed SBCL process. A wrong tool is rejected and repaired before anything can reuse it. In the live runs, this caught the model&rsquo;s own mistaken test expectations too.</p></div>
+          <div class="th-card"><b>Every prompt has a control</b><p>Each prompt is also answered by a model with an <i>empty</i> registry. That is the baseline in every chart: measured tokens, measured answers, not an estimate.</p></div>
+          <div class="th-card"><b>Known answers</b><p>The guided demo carries answers computed by hand (144, 50, 64, 30). A reused tool that drifted would show a red cross in the Prompt log.</p></div>
+          <div class="th-card"><b>Narrow execution</b><p>The &ldquo;call a saved tool&rdquo; box only evaluates calls of saved tools with plain data. There is no free-form Lisp input.</p></div>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>What we measured</h2>
+        <p>Three live runs on a real model (Cerebras Qwen, real token counts, temperature 0), each with the 7 guided prompts plus 10 held-out prompts, and every prompt also answered with an empty registry:</p>
+        <ul class="th-list">
+          <li><b>70% fewer tokens overall</b> (about 2.7k vs 8.9k per run of 7 prompts).</li>
+          <li><b>Reused tools cost 95% less</b> (274 vs 5.0k tokens on the reused and repeated prompts), and an exact repeat cost <b>0</b>.</li>
+          <li><b>21 of 21 guided answers correct</b>, and <b>27 of 30 held-out answers correct</b> against independent Python. With no memory the model also got 27 of 30, so reuse did not cost accuracy.</li>
+          <li>The no-memory run often <b>failed to produce a working tool</b> and still spent the tokens. The held-out misses (the same string-reversal prompt each time) were rejected by the tests, not saved.</li>
+        </ul>
+        <p class="muted">The three runs are nearly identical because the model is near-deterministic at temperature 0: repetition shows stability, not sampling variance. Your own numbers appear live on the Agent tab; the scripted Demo model shows the same mechanism for free, with estimated token counts.</p>
+      </section>
+
+      <section class="card wide">
+        <h2>How to read the Agent tab</h2>
+        <ol class="th-list">
+          <li><b>The proof panel</b> at the top: three headline numbers, then one pair of bars per prompt. Red dashed = no memory, coloured = with the learned tools. Prompts group into <i>learn</i>, <i>reuse</i>, <i>repeat</i>. &ldquo;Show the math&rdquo; opens the arithmetic.</li>
+          <li><b>Ask the agent</b>: type any request (Live) or click an example (Demo). &ldquo;Build, test and answer&rdquo; streams what the model decided, the tests, and the REPL transcript.</li>
+          <li><b>Prompt log</b>: per prompt, how it was answered, tokens used vs the no-memory run, and whether the answer is correct.</li>
+          <li><b>Tools</b>: everything the agent has taught itself, with source, passing tests, reuse counts, and a box to call a tool directly for 0 tokens.</li>
+        </ol>
+      </section>
+
+      <section class="card wide">
+        <h2>Simple and complex ideas to try</h2>
+        <div class="th-try">
+          <button class="ag-chip" data-goto="agent" data-p="write a function that computes the factorial of a number, then factorial of 6">factorial of 6 <span class="muted">simple</span></button>
+          <button class="ag-chip" data-goto="agent" data-p="write a function that checks for a palindrome, then check the word level">palindrome <span class="muted">simple</span></button>
+          <button class="ag-chip" data-goto="agent" data-p="count the even numbers in the list (1 2 3 4 6)">count evens <span class="muted">composes is-even</span></button>
+          <button class="ag-chip" data-goto="agent" data-p="mean of squares of the list (2 4 6 8)">mean of squares <span class="muted">composes two tools</span></button>
+        </div>
+        <p class="muted">In Live mode try something of your own with concrete data, e.g. &ldquo;write a function that run-length encodes a string, then encode aaabccdd&rdquo;, followed by &ldquo;now decode the result back&rdquo; to watch one tool build on another.</p>
+      </section>
+
+      <section class="card wide th-limits">
+        <h2>Honest limits</h2>
+        <ul class="th-list">
+          <li><b>Small samples.</b> Tiny functions, one run per prompt. Treat the percentages as a demonstration, not a benchmark.</li>
+          <li><b>Same model on both sides.</b> The control uses the same model at temperature 0 with an empty registry; it isolates the effect of memory, not of a better model.</li>
+          <li><b>Demo answers are hard-coded</b> for the guided prompts. Arbitrary Live prompts have tests but no independent ground truth.</li>
+          <li><b>The sandbox is process-level</b>, not a security boundary (see the adversarial report in the repo). Do not feed it untrusted prompts yet.</li>
+          <li><b>Reuse needs a good match.</b> A vague prompt (&ldquo;again&rdquo;, no data) gave the model nothing to call the tool with in early live runs; prompts with explicit inputs reused cleanly.</li>
+        </ul>
+      </section>
+    </article>
+  </section>
+
+  <section id="view-agent" class="view active">
+    <button id="ag-fab" class="ag-fab" aria-label="Ask your own prompt">Ask &darr;</button>
+    <div class="card wide ag-hero">
+      <h2>Pay for the model's reasoning once. Never again.</h2>
+      <p class="ag-sub-h">Every task the model solves becomes a tested, reusable tool. Watch the cost of the next prompt collapse.</p>
+      <div class="ag-cta">
+        <button id="ag-demo" class="ag-primary">&#9654; Run all 7 (guided demo)</button>
+        <button id="ag-jump" class="ag-send">Ask your own prompt &darr;</button>
+        <small id="ag-demo-cost" class="muted">Runs the scripted demo model: 7 prompts, about 1 min, free, estimated tokens</small>
+      </div>
+    </div>
+
+    <div class="card wide ag-proof">
+      <div class="ag-head"><h2>The model learns once, then stops paying</h2><span id="ag-overall" class="ag-overall">lower is better</span></div>
+      <div id="ag-evbanner" class="ag-evbanner demo"></div>
+      <p id="ag-evnote" class="muted ag-evnote" hidden></p>
+      <div class="ag-evtabs" id="ag-evtabs" role="tablist" aria-label="Which run to show"></div>
+      <div class="ag-kpis" aria-live="polite">
+        <div class="kpi k1"><span class="kl">Once a tool exists</span><b id="k-reuse">&mdash;</b><i id="k-reuse-sub">run the guided demo to see it</i></div>
+        <div class="kpi k2"><span class="kl">Net over every prompt</span><b id="k-saved">&mdash;</b><i id="k-saved-sub">&nbsp;</i></div>
+        <div class="kpi k3"><span class="kl" title="Known answers were computed by hand for the 7 guided prompts. They are checked against the tool's actual output.">Regression: known answers <span class="why">how verified?</span></span><b id="k-correct">&mdash;</b><i id="k-correct-sub">&nbsp;</i></div>
+        <div class="kpi k4"><span class="kl" title="Prompts that are not in the demo script. Expected answers are computed by independent Python (digit sums, gcd, string reversal, ...), never by the model.">Correct on held-out prompts <span class="why">how verified?</span></span><b id="k-held">&mdash;</b><i id="k-held-sub">not run yet</i></div>
+      </div>
+      <div id="ag-strength" class="ag-strength" aria-label="How strong this evidence is"></div>
+      <div class="ag-scroll">
+        <svg id="ag-pairs" viewBox="0 0 760 250" role="img"
+             aria-label="For each prompt, tokens used with no memory next to tokens used with the learned tools"></svg>
+      </div>
+      <div id="ag-barinfo" class="ag-barinfo" hidden></div>
+      <div class="ag-legend">
+        <span><i class="sw-nomem"></i>no memory: the same prompt on an empty tool registry</span>
+        <span><i style="background:#b18cff"></i>built a new tool</span>
+        <span><i style="background:#5ad1ff"></i>reused a saved tool</span>
+        <span><i style="background:#7bd88a"></i>exact repeat, no model call</span>
+        <span><i class="sw-fail"></i>no-memory run that failed (tokens wasted)</span>
+      </div>
+      <p class="muted ag-foot-note">Every prompt is also re-run against an empty tool registry, so the comparison is measured, not assumed. <span id="ag-hero-note"></span> <span id="ag-est-note" hidden>Token counts here are estimates (about 4 characters per token, scripted model); Live mode reports real usage.</span></p>
+    </div>
+
+    <details class="card wide ag-math">
+      <summary><h2>Show the math</h2></summary>
+      <div class="ag-evidence">
+        <div class="ag-tiles" aria-live="polite">
+          <div class="tile"><span class="tl">Reusing a saved tool: tokens vs a no-memory run</span><b id="t-reuse">&mdash;</b><i id="t-reuse-sub">run the guided demo</i></div>
+          <div class="tile"><span class="tl">Exact repeats: tokens vs a no-memory run</span><b id="t-zero">&mdash;</b><i id="t-zero-sub">&nbsp;</i></div>
+          <div class="tile"><span class="tl">Building a new tool: tokens vs a no-memory run</span><b id="t-saved">&mdash;</b><i id="t-saved-sub">&nbsp;</i></div>
+          <div class="tile"><span class="tl">Answers correct</span><b id="t-match">&mdash;</b><i id="t-match-sub">&nbsp;</i></div>
+        </div>
+        <div>
+          <svg id="ag-cum" viewBox="0 0 640 220" role="img"
+               aria-label="Cumulative tokens used with learned tools versus starting from scratch each time"></svg>
+        </div>
+      </div>
+      <div class="ag-legend">
+        <span><i style="background:#7bd88a"></i>with memory (this agent)</span>
+        <span><i style="background:#ff7a7a"></i>no-memory run: the same prompt re-run with an empty tool registry</span>
+        <span><i style="background:#7bd88a55"></i>gap = tokens saved</span>
+      </div>
+      <p class="ag-terms"><b>built</b> the model wrote a new tool &middot; <b>reused</b> a short check found a saved tool, then ran it &middot; <b>cached</b> exact repeat of an earlier prompt: no model call at all.</p>
+      <p id="ag-recon" class="muted ag-foot-note"></p>
+      <p class="muted ag-foot-note">Hatched baseline bars are no-memory runs that failed to produce an answer: their tokens were spent for nothing.</p>
+    </details>
+
+    <div class="ag-cols">
+      <div class="ag-left">
+        <div class="card">
+          <h2>Ask the agent</h2>
+          <div class="ag-bar-row">
+            <textarea id="ag-prompt" rows="2" aria-label="Prompt for the agent"
+              placeholder="e.g. write a function to square a number"></textarea>
+            <div class="ag-ctl">
+              <select id="ag-mode" aria-label="Model mode">
+                <option value="demo">Demo (free, chips only)</option>
+                <option value="live" id="ag-live-opt">Live (paid)</option>
+              </select>
+              <button id="ag-send" class="ag-send">Send prompt</button>
+            </div>
+          </div>
+          <label class="ag-check"><input type="checkbox" id="ag-compare" checked> Also run without memory (on Live this roughly doubles the tokens, about half a cent per prompt)</label>
+          <div class="ag-chips" aria-label="Example prompts">
+            <div class="ag-chiprow"><span class="muted">Simple</span>
+              <button class="ag-chip" data-p="write a function that squares a number, then square 12">square 12</button>
+              <button class="ag-chip" data-p="write a function that computes the factorial of a number, then factorial of 6">factorial 6</button>
+              <button class="ag-chip" data-p="write a function that checks for a palindrome, then check the word level">palindrome</button>
+              <button class="ag-chip" data-p="write a function for the largest number in a list, then use it on (4 17 8)">largest in a list</button>
+              <button class="ag-chip" data-p="write a function that checks if a number is even, then check 10">is 10 even</button>
+              <button class="ag-chip" data-p="reverse the words in the sentence one two three">reverse words</button>
+            </div>
+            <div class="ag-chiprow"><span class="muted">Builds on a tool</span>
+              <button class="ag-chip" data-p="sum of squares of the list (3 4 5)">sum of squares</button>
+              <button class="ag-chip" data-p="mean of squares of the list (2 4 6 8)">mean of squares</button>
+              <button class="ag-chip" data-p="count the even numbers in the list (1 2 3 4 6)">count evens</button>
+            </div>
+            <div class="ag-chiprow"><span class="muted">Reuse and failure</span>
+              <button class="ag-chip" data-p="sum of squares of the list (3 4 5), again">sum of squares, again</button>
+              <button class="ag-chip" data-p="write a function that cubes a number, then cube 4">cube (a wrong first try)</button>
+            </div>
+          </div>
+          <p id="ag-mode-note" class="muted"></p>
+        </div>
+        <div class="card">
+          <div class="ag-head"><h2>Build, test and answer</h2><span id="ag-compare-note" class="muted"></span></div>
+          <div id="ag-answer-box"><div id="ag-answer">&mdash;</div><div id="ag-answer-call">Run a prompt to see its Lisp, tests and REPL output here.</div></div>
+          <div id="ag-stages"></div>
+          <div id="ag-log"></div>
+          <div class="ag-sub">Lisp REPL (SBCL) <span class="muted">each eval is a fresh sandboxed process that reloads the saved tools</span></div>
+          <div id="ag-repl" role="log" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div class="ag-right">
+        <div class="card">
+          <div class="ag-head"><h2>Prompt log</h2><span class="muted">click a row to reuse its prompt</span></div>
+          <div id="ag-table"></div>
+          <p class="muted ag-foot-note">&#10003; = matches the known answer and the no-memory run. A brand-new tool costs about the same with or without memory; the savings come from reusing or combining tools that already exist.</p>
+        </div>
+    <div class="card">
+      <div class="ag-head"><h2>Tools the agent has taught itself</h2><span id="ag-count">0 tools</span></div>
+      <p class="muted ag-foot-note" style="margin:0 0 .6rem">Click a tool row or a graph node to see its Lisp source and the tests it passed before being saved.</p>
+      <div class="ag-tools-stack">
+        <div>
+          <div id="ag-tools"><p class="muted ag-pad">No tools yet. Ask for something and the model will write one.</p></div>
+          <div id="ag-detail" class="ag-detail" hidden></div>
+          <div class="ag-try">
+            <label for="ag-call" class="ag-sub">Call a saved tool yourself <span class="muted">no model, 0 tokens</span></label>
+            <div class="ag-try-row">
+              <input id="ag-call" type="text" spellcheck="false" placeholder="(sum-of-squares '(1 2 3))" aria-label="Lisp call of a saved tool">
+              <button id="ag-callbtn" class="ag-ghost">Run</button>
+            </div>
+            <div id="ag-call-ex" class="ag-callex"></div>
+            <div id="ag-callout" class="ag-callout" role="status"></div>
+          </div>
+          <div class="ag-foot"><button id="ag-reset" class="ag-ghost">Forget all tools</button></div>
+        </div>
+        <div>
+          <svg id="ag-graph" viewBox="0 0 640 340" role="img"
+               aria-label="Graph of saved tools; a purple edge means one tool calls another"></svg>
+          <div class="ag-legend">
+            <span><i style="background:#5ad1ff"></i>saved tool (click for source and tests)</span>
+            <span><i style="background:#ffb454"></i>candidate being tested</span>
+            <span><i style="background:#7bd88a"></i>just saved</span>
+            <span><i style="background:#b18cff"></i>purple edge: one tool calls another</span>
+          </div>
+        </div>
+      </div>
+    </div>
+      </div>
+    </div>
+
+  </section>
+
+  <section id="view-overview" class="view">
     <div class="cards">
       <div class="card">
         <h2>Todos</h2>
@@ -79,5 +353,6 @@
 </p>
 
 <script src="app.js"></script>
+<script src="agent.js"></script>
 </body>
 </html>

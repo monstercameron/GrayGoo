@@ -316,6 +316,18 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] Automatic sibling detection + flag-spec proposal (generalize_pair still takes a caller spec)
   - [ ] N-way parameters (single alt value only today)
 
+- [x] **Interactive agent dashboard (2026-10-06)**
+  - [x] Prompt -> model-written Lisp tool + tests -> SBCL REPL -> saved registry (`agent_session.py`, `dashboard/agent.js`)
+  - [x] Every prompt also answered with an empty registry (measured no-memory baseline)
+  - [x] Zero-token exact-repeat cache, short quick-reuse prompt, allow-listed "call a saved tool" box
+  - [x] Harness hardening from real live failures (auto-quoted list literals, paren completion, answer-call repair, actual-vs-expected repair feedback)
+  - [x] Held-out prompts scored by an independent Python oracle (10 prompts)
+  - [x] Recorded live evidence shipped in `dashboard/evidence/`; capped repeat runner `evidence_run.py`
+  - [x] Thesis tab explaining the idea, the tool and its limits
+  - [ ] Typed-Lisp REPL input (needs a real sandbox; see Harden worker sandbox above)
+  - [ ] Larger held-out set and confidence intervals (current: 10 prompts, a few runs)
+  - [ ] Persistent REPL image instead of one SBCL process per eval
+
 - [ ] **Only after the core experiment succeeds**
   - [ ] Add shadow execution on real workloads
   - [ ] Add canary promotion
