@@ -324,6 +324,14 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Held-out prompts scored by an independent Python oracle (10 prompts)
   - [x] Recorded live evidence shipped in `dashboard/evidence/`; capped repeat runner `evidence_run.py`
   - [x] Thesis tab explaining the idea, the tool and its limits
+  - [x] Independent reference oracle (FNV-1a 32/64, CRC32, Adler-32, MD5, SHA-1/256): guessed hash vectors are overruled by Python, with provenance (`oracle.py`)
+  - [x] Frozen oracle: expectations that passed or came from a reference cannot change; contradictory tests are rejected (SPEC_INCONSISTENT)
+  - [x] Failure classes (COMPILER_ERROR, RUNTIME_ERROR, IMPLEMENTATION_WRONG, TEST_WRONG, AMBIGUOUS, REPEATED_CANDIDATE) and oracle confidence; mutation stops when the oracle is suspect (property-test rescue)
+  - [x] Recurring Lisp slips persisted as lessons and injected into later prompts; syntax-only repair for compile errors; identical failed candidates skipped, not re-run
+  - [x] Repair-efficiency metrics (repeated errors, wasted tokens) and a per-failure postmortem JSON in `artifacts/agent/postmortems/`
+  - [ ] Reference oracles beyond hashes (parsers, date math, number formatting) so more exact vectors can be machine-checked
+  - [ ] Promote validated sub-facts (e.g. FNV offset basis and prime) into reusable knowledge instead of rediscovering them per run
+  - [ ] Semantic task check: a "hash-password" request that yields a fast non-cryptographic hash should be flagged as unsafe for password storage
   - [ ] Typed-Lisp REPL input (needs a real sandbox; see Harden worker sandbox above)
   - [ ] Larger held-out set and confidence intervals (current: 10 prompts, a few runs)
   - [ ] Persistent REPL image instead of one SBCL process per eval

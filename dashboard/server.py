@@ -418,7 +418,9 @@ def dispatch(method, path, body, ctx):
     if agent is not None and clean_path.startswith("/api/agent/"):
         sub = clean_path[len("/api/agent/"):]
         if method == "GET" and sub == "tools":
-            return 200, {"tools": agent.tools()}
+            qs = parse_qs(urlparse(path).query)
+            mode = (qs.get("mode") or [None])[0]
+            return 200, {"tools": agent.tools(mode if mode in ("demo", "live") else None)}
         if method == "GET" and sub == "config":
             import agent_session
             status = agent_session.live_status()
@@ -446,7 +448,9 @@ def dispatch(method, path, body, ctx):
                 payload = json.loads(body.decode("utf-8") if body else "{}")
             except (ValueError, UnicodeDecodeError):
                 return 400, {"error": "invalid JSON body"}
-            return 200, agent.call_tool(payload.get("call"))
+            mode = payload.get("mode")
+            return 200, agent.call_tool(payload.get("call"),
+                                        mode if mode in ("demo", "live") else None)
         if method == "POST" and sub == "reset":
             agent.registry.clear()
             return 200, {"tools": []}

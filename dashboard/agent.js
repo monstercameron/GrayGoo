@@ -12,6 +12,7 @@
     tools: [], sel: null, ghost: null, hot: null,
     session: null, next: 0, timer: null,
     history: [], mode: "demo",
+    vp: { x: 0, y: 0, k: 1 }, vpTouched: false, vpMoved: false, gdims: { w: 640, h: 340 },
     snapshots: [], view: "session", liveOk: false, busy: false, picked: false, rows: [], pick: null
   };
   function curHistory() {
@@ -783,7 +784,11 @@
     var maxD = nodes.reduce(function (a, n) { return Math.max(a, n.depth); }, 0);
     var cols = {};
     nodes.forEach(function (n) { (cols[n.depth] = cols[n.depth] || []).push(n); });
-    var W = 640, H = 340, x0 = 170, x1 = W - 80;
+    var maxRows = Object.keys(cols).reduce(function (a, k) { return Math.max(a, cols[k].length); }, 1);
+    var W = 640, x0 = 170, x1 = Math.max(W - 80, x0 + 170 * maxD);
+    var H = Math.max(340, maxRows * 118 + 90);
+    W = x1 + 100;
+    state.gdims = { w: W, h: H };
     Object.keys(cols).forEach(function (k) {
       var col = cols[k], c = +k;
       col.forEach(function (n, i) {
@@ -792,6 +797,100 @@
       });
     });
     return nodes;
+  }
+
+  // -------------------------------------------------- graph pan and zoom
+  var VP_MIN = 0.3, VP_MAX = 4;
+  function applyVp() {
+    var g = document.getElementById("agVp");
+    if (g) g.setAttribute("transform", "translate(" + state.vp.x.toFixed(1) + " " + state.vp.y.toFixed(1) + ") scale(" + state.vp.k.toFixed(3) + ")");
+  }
+  function svgPoint(svg, cx, cy) {
+    var m = svg.getScreenCTM();
+    if (!m) return { x: 0, y: 0 };
+    var p = svg.createSVGPoint(); p.x = cx; p.y = cy;
+    var q = p.matrixTransform(m.inverse());
+    return { x: q.x, y: q.y };
+  }
+  function zoomAt(px, py, factor) {
+    var k0 = state.vp.k, k1 = Math.min(VP_MAX, Math.max(VP_MIN, k0 * factor));
+    if (k1 === k0) return;
+    state.vp.x = px - (px - state.vp.x) * (k1 / k0);
+    state.vp.y = py - (py - state.vp.y) * (k1 / k0);
+    state.vp.k = k1; state.vpTouched = true; applyVp();
+  }
+  function fitView(auto) {
+    var d = state.gdims, pad = 28;
+    // content bounds = the laid-out nodes plus the model core on the left
+    var k = Math.min(VP_MAX, Math.max(VP_MIN, Math.min((d.w - pad * 2) / d.w, (d.h - pad * 2) / d.h) * 1.0));
+    state.vp = { k: k, x: (d.w - d.w * k) / 2, y: (d.h - d.h * k) / 2 };
+    if (!auto) state.vpTouched = false;
+    applyVp();
+  }
+  function initGraphView() {
+    var svg = $("ag-graph");
+    if (!svg || svg._pz) return;
+    svg._pz = true;
+    var ptrs = {}, drag = null, pinch = null;
+    svg.addEventListener("wheel", function (e) {
+      e.preventDefault();
+      var p = svgPoint(svg, e.clientX, e.clientY);
+      zoomAt(p.x, p.y, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0018)));
+    }, { passive: false });
+    svg.addEventListener("pointerdown", function (e) {
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      svg.setPointerCapture && svg.setPointerCapture(e.pointerId);
+      var ids = Object.keys(ptrs);
+      state.vpMoved = false;
+      if (ids.length === 1) drag = { x: e.clientX, y: e.clientY, vx: state.vp.x, vy: state.vp.y };
+      if (ids.length === 2) {
+        var a = ptrs[ids[0]], b = ptrs[ids[1]];
+        pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), k: state.vp.k };
+        drag = null;
+      }
+      svg.classList.add("grabbing");
+    });
+    svg.addEventListener("pointermove", function (e) {
+      if (!ptrs[e.pointerId]) return;
+      ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+      var ids = Object.keys(ptrs);
+      if (ids.length === 2 && pinch) {
+        var a = ptrs[ids[0]], b = ptrs[ids[1]];
+        var d = Math.hypot(a.x - b.x, a.y - b.y);
+        var mid = svgPoint(svg, (a.x + b.x) / 2, (a.y + b.y) / 2);
+        zoomAt(mid.x, mid.y, (pinch.k * d / (pinch.d || 1)) / state.vp.k);
+        state.vpMoved = true;
+      } else if (drag) {
+        var m = svg.getScreenCTM(); if (!m) return;
+        var dx = (e.clientX - drag.x) / m.a, dy = (e.clientY - drag.y) / m.d;
+        if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) state.vpMoved = true;
+        state.vp.x = drag.vx + dx; state.vp.y = drag.vy + dy;
+        state.vpTouched = true; applyVp();
+      }
+    });
+    function end(e) {
+      delete ptrs[e.pointerId]; pinch = null;
+      if (!Object.keys(ptrs).length) { drag = null; svg.classList.remove("grabbing"); setTimeout(function () { state.vpMoved = false; }, 0); }
+    }
+    svg.addEventListener("pointerup", end);
+    svg.addEventListener("pointercancel", end);
+    svg.addEventListener("dblclick", function (e) { e.preventDefault(); fitView(false); });
+    svg.addEventListener("keydown", function (e) {
+      var d = state.gdims, step = 40, c = { x: d.w / 2, y: d.h / 2 };
+      if (e.key === "+" || e.key === "=") zoomAt(c.x, c.y, 1.2);
+      else if (e.key === "-" || e.key === "_") zoomAt(c.x, c.y, 1 / 1.2);
+      else if (e.key === "0") fitView(false);
+      else if (e.key === "ArrowLeft") { state.vp.x += step; state.vpTouched = true; applyVp(); }
+      else if (e.key === "ArrowRight") { state.vp.x -= step; state.vpTouched = true; applyVp(); }
+      else if (e.key === "ArrowUp") { state.vp.y += step; state.vpTouched = true; applyVp(); }
+      else if (e.key === "ArrowDown") { state.vp.y -= step; state.vpTouched = true; applyVp(); }
+      else return;
+      e.preventDefault();
+    });
+    function center() { var d = state.gdims; return { x: d.w / 2, y: d.h / 2 }; }
+    $("ag-zin").addEventListener("click", function () { var c = center(); zoomAt(c.x, c.y, 1.3); });
+    $("ag-zout").addEventListener("click", function () { var c = center(); zoomAt(c.x, c.y, 1 / 1.3); });
+    $("ag-zfit").addEventListener("click", function () { fitView(false); });
   }
 
   function drawGraph() {
@@ -810,14 +909,17 @@
     flt.appendChild(mrg);
     defs.appendChild(flt);
     svg.appendChild(defs);
-    for (var gx = 20; gx < 640; gx += 32)
-      for (var gy = 20; gy < 340; gy += 32)
-        svg.appendChild(el("circle", { cx: gx, cy: gy, r: 1, fill: "#2b3040" }));
-
+    var vp = el("g", { id: "agVp" });
+    svg.appendChild(vp);
     var nodes = layout(state.tools, state.ghost);
+    var gd = state.gdims;
+    svg.setAttribute("viewBox", "0 0 " + gd.w + " " + gd.h);
+    for (var gx = 20; gx < gd.w; gx += 32)
+      for (var gy = 20; gy < gd.h; gy += 32)
+        vp.appendChild(el("circle", { cx: gx, cy: gy, r: 1, fill: "#2b3040" }));
     var by = {};
     nodes.forEach(function (n) { by[n.name] = n; });
-    var core = { x: 62, y: 170 };
+    var core = { x: 62, y: gd.h / 2 };
     function curve(a, b, cls, w) {
       var mx = (a.x + b.x) / 2;
       return el("path", {
@@ -826,14 +928,14 @@
       });
     }
     nodes.forEach(function (n) {
-      if (!n.deps.length) svg.appendChild(curve(core, n, "ag-edge root" + (n.ghost ? " ghost" : "")));
+      if (!n.deps.length) vp.appendChild(curve(core, n, "ag-edge root" + (n.ghost ? " ghost" : "")));
       n.deps.forEach(function (dn) {
-        if (by[dn]) svg.appendChild(curve(by[dn], n, "ag-edge dep" + (n.ghost ? " ghost" : ""), 2.5));
+        if (by[dn]) vp.appendChild(curve(by[dn], n, "ag-edge dep" + (n.ghost ? " ghost" : ""), 2.5));
       });
     });
-    svg.appendChild(el("circle", { cx: core.x, cy: core.y, r: 32, fill: "url(#agCore)", filter: "url(#agGlow)", "class": "ag-core" }));
-    svg.appendChild(el("text", { x: core.x, y: core.y + 4, "class": "ag-core-t" }, "model"));
-    svg.appendChild(el("text", { x: core.x, y: core.y + 54, "class": "ag-note" }, "writes tools"));
+    vp.appendChild(el("circle", { cx: core.x, cy: core.y, r: 32, fill: "url(#agCore)", filter: "url(#agGlow)", "class": "ag-core" }));
+    vp.appendChild(el("text", { x: core.x, y: core.y + 4, "class": "ag-core-t" }, "model"));
+    vp.appendChild(el("text", { x: core.x, y: core.y + 54, "class": "ag-note" }, "writes tools"));
 
     nodes.forEach(function (n, i) {
       var g = el("g", { "class": "ag-node" + (n.ghost ? " ghost" : "") + (state.hot === n.name ? " hot" : "") + (state.sel === n.name ? " sel" : ""), transform: "translate(" + n.x + "," + n.y + ")" });
@@ -846,15 +948,16 @@
       g.appendChild(el("title", {}, n.desc || n.name));
       if (!n.ghost) {
         g.style.cursor = "pointer";
-        g.addEventListener("click", function () { state.sel = n.name; drawGraph(); showDetail(); });
+        g.addEventListener("click", function () { if (state.vpMoved) return; state.sel = n.name; drawGraph(); showDetail(); });
       }
-      svg.appendChild(g);
+      vp.appendChild(g);
     });
     if (!nodes.length) {
-      svg.appendChild(el("text", { x: 360, y: 166, "class": "ag-empty" }, "No tools yet."));
-      svg.appendChild(el("text", { x: 360, y: 190, "class": "ag-empty sub" }, "Ask for something and the model will write one."));
+      vp.appendChild(el("text", { x: 360, y: 166, "class": "ag-empty" }, "No tools yet."));
+      vp.appendChild(el("text", { x: 360, y: 190, "class": "ag-empty sub" }, "Ask for something and the model will write one."));
     }
     $("ag-count").textContent = state.tools.length + (state.tools.length === 1 ? " tool" : " tools");
+    if (!state.vpTouched && nodes.length > 4) fitView(true); else applyVp();
     drawToolTable();
     var ex = $("ag-call-ex");
     clear(ex);
@@ -923,12 +1026,84 @@
     var d = h("div", "ag-say " + (cls || ""), text);
     $("ag-log").appendChild(d);
     $("ag-log").scrollTop = $("ag-log").scrollHeight;
+    return d;
   }
+
+  // "Asking the model" lines show a live elapsed counter so long calls never look frozen.
+  function startWait(text) {
+    stopWait();
+    state.waitEl = say(text + " (0s)", "model");
+    state.waitText = text; state.waitT0 = Date.now();
+  }
+  function stopWait() { state.waitEl = null; }
+  function tickWait() {
+    if (!state.waitEl) return;
+    var sec = Math.round((Date.now() - state.waitT0) / 1000);
+    state.waitEl.textContent = state.waitText + " (" + sec + "s" + (sec > 25 ? ", still working: hard retries think longer" : "") + ")";
+  }
+
+  // The clean end-of-run card: what happened, what was built, what it cost.
+  function renderSummary(m) {
+    var box = $("ag-summary");
+    clear(box);
+    box.hidden = false;
+    box.className = "ag-sumcard " + (m.outcome === "success" ? "ok" : "bad");
+    var title;
+    if (m.outcome === "success") {
+      title = m.flow === "cache" ? "\u2713 Answered instantly from a saved tool"
+        : m.flow === "reuse" ? "\u2713 Answered by a tool you already had"
+        : m.flow === "plan" ? "\u2713 Done: built " + m.built.length + " tools and put them together"
+        : m.flow === "build" ? "\u2713 Built and verified a new tool" : "\u2713 Done";
+    } else if (m.outcome === "error") {
+      title = "\u2717 Stopped by an error";
+    } else {
+      title = "\u2717 Couldn\u2019t finish this one";
+    }
+    box.appendChild(h("div", "sum-t", title));
+    if (m.outcome === "success" && m.answer && m.answer.ok) {
+      var v = String(m.answer.value == null ? "" : m.answer.value);
+      var oneLine = v.indexOf("\n") < 0;
+      box.appendChild(h("div", "sum-l", oneLine ? "Answer: " + v.slice(0, 80) + "  (from " + (m.answer.call || "") + ")"
+                                              : "The result is shown above (from " + (m.answer.call || "") + ")."));
+    }
+    if (m.outcome !== "success") {
+      if (m.built.length) box.appendChild(h("div", "sum-l", "Saved before stopping (still available): " + m.built.map(function (b) { return b.name; }).join(", ") +
+        (m.planned ? " \u2014 " + m.built.length + " of " + m.planned + " planned tools" : "") + "."));
+      if (m.stopped && m.stopped.detail) box.appendChild(h("div", "sum-l", "Where it stopped: " + String(m.stopped.detail).split("; ")[0].slice(0, 200)));
+      if (m.stopped && m.stopped.hint) box.appendChild(h("div", "sum-l", "Likely cause: " + m.stopped.hint));
+      if (m.error) box.appendChild(h("div", "sum-l", /429|rate|traffic|queue/i.test(m.error)
+        ? "The model API is rate-limited right now, not a problem with your prompt. Try again in a minute."
+        : m.error.slice(0, 200)));
+      box.appendChild(h("div", "sum-l muted", "Try a smaller, more specific prompt, or ask for one piece at a time."));
+    }
+    var chips = h("div", "sum-chips");
+    function chip(t, c) { chips.appendChild(h("span", "sc " + (c || ""), t)); }
+    if (m.built.length) chip(m.built.length + " tool" + (m.built.length === 1 ? "" : "s") + " saved: " + m.built.map(function (b) { return b.name; }).join(", "), m.outcome === "success" ? "ok" : "");
+    if (m.tests_passed) chip(m.tests_passed + " tests passed", "ok");
+    if (m.repairs) chip(m.repairs + " repair" + (m.repairs === 1 ? "" : "s"));
+    if (m.splits) chip(m.splits + " split into smaller tools");
+    if (m.oracle_fixes) chip(m.oracle_fixes + " expected value(s) checked by an independent reference", "ok");
+    if (m.efficiency && m.efficiency.repeated_errors) chip(m.efficiency.repeated_errors + " repeated error(s), about " + fmt(m.efficiency.wasted_tokens) + " tokens wasted");
+    chip(m.model_calls + " model call" + (m.model_calls === 1 ? "" : "s"));
+    chip(fmt(m.tokens) + " tokens" + (m.cost_usd ? " \u00b7 $" + m.cost_usd.toFixed(4) : ""));
+    chip(m.seconds + " s");
+    box.appendChild(chips);
+  }
+
+  var CLASS_TEXT = {
+    COMPILER_ERROR: "the code does not compile",
+    RUNTIME_ERROR: "the code crashed",
+    IMPLEMENTATION_WRONG: "the code gives a different value",
+    TEST_WRONG: "the expected value looks like a guess",
+    AMBIGUOUS: "expected values keep changing",
+    SPEC_INCONSISTENT: "the tests contradict each other",
+    REPEATED_CANDIDATE: "same code as a failed attempt"
+  };
 
   function onEvent(ev) {
     switch (ev.kind) {
       case "goal":
-        clear(repl); clear($("ag-log")); clear($("ag-stages"));
+        clear(repl); clear($("ag-log")); clear($("ag-stages")); $("ag-summary").hidden = true;
         $("ag-answer").textContent = "…"; $("ag-answer-call").textContent = "working";
         say("Goal: " + ev.prompt, "goal");
         replLine("c", ";; session " + (state.session || "") + " — " + ev.mode + " model");
@@ -943,9 +1118,16 @@
         say("Reuse check said no. Falling back to the full build prompt.", "model");
         break;
       case "model_call":
-        say("Asking the model…", "model");
+        startWait("Asking the model" + (ev.label ? " [" + ev.label + "]" : "") + "…");
+        break;
+      case "model_wait":
+        say(ev.message, "fail");
+        break;
+      case "summary":
+        renderSummary(ev);
         break;
       case "model_reply":
+        stopWait();
         say("Model replied · " + ((ev.input_tokens || 0) + (ev.output_tokens || 0)) + " tokens" +
           (ev.estimated ? " (estimated)" : "") + (ev.cost_usd ? " · $" + ev.cost_usd.toFixed(5) : ""), "model");
         break;
@@ -968,7 +1150,35 @@
         break;
       case "verdict":
         if (ev.stages) setStages(ev.stages);
+        if (!ev.ok && ev.detail) say("Why" + (ev.class ? " [" + (CLASS_TEXT[ev.class] || ev.class) + "]" : "") + ": " + ev.detail, "fail");
         say((ev.ok ? "All tests passed" : "Tests FAILED") + (ev.risk ? " · risk " + ev.risk : "") + (ev.ok ? "" : " — " + ev.reason), ev.ok ? "pass" : "fail");
+        break;
+      case "plan":
+        say("Plan: " + ev.steps.length + " small tools, built in order: " + ev.steps.map(function (x) { return x.name || "?"; }).join(" → "), "build");
+        break;
+      case "step":
+        say("Step " + ev.i + " of " + ev.n + ": " + (ev.name || "tool") + " — " + ev.spec, "build");
+        replLine("c", ";; step " + ev.i + "/" + ev.n + ": " + (ev.name || ""));
+        break;
+      case "oracle_corrected":
+        say("Independent check: for " + ev.call + " the model expected " + ev.was + ", but the " + ev.algo + " reference says " + ev.expected + ", which is exactly what the code returns. The test was wrong, not the code.", "pass");
+        break;
+      case "oracle_reference":
+        say("Independent check: the " + ev.algo + " reference says " + ev.call + " is " + ev.expected + " but the code returned " + ev.got + ". The code is wrong here.", "fail");
+        break;
+      case "repeat_candidate":
+        say("The model sent the same code as a failed attempt; skipping it instead of re-running.", "fail");
+        break;
+      case "rescue":
+        say("Stopping code changes: " + (ev.reason || "the tests look wrong") + ". Keeping the code and switching to property tests.", "build");
+        break;
+      case "replan":
+        say("This step kept failing its tests. Asking the model to split it into smaller tools...", "fail");
+        break;
+      case "gave_up":
+        say("Gave up after " + ev.attempts + " attempts. Nothing was saved: the tool never passed its own tests. " +
+          (ev.hint ? "Likely cause: " + ev.hint + " " : "") +
+          "Try a smaller, more specific prompt (for example one function with concrete inputs); big tasks work better as small tools built one at a time.", "fail");
         break;
       case "repair":
         say("Repair round " + ev.attempt + ": " + ev.reason, "fail");
@@ -976,15 +1186,20 @@
       case "promoted":
         say("Saved “" + ev.name + "” to the tool registry", "pass");
         state.ghost = null; state.hot = ev.name;
-        api("GET", "/api/agent/tools").then(function (r) { state.tools = r.data.tools || []; drawGraph(); });
+        api("GET", "/api/agent/tools?mode=" + state.mode).then(function (r) { state.tools = r.data.tools || []; drawGraph(); });
         break;
       case "result":
         say("Answer: " + (ev.ok ? ev.value : "failed — " + ev.error), ev.ok ? "answer" : "fail");
-        $("ag-answer").textContent = ev.ok ? ev.value : "—";
+        var av = ev.ok ? String(ev.value) : "—";
+        if (av.charAt(0) === '"' && av.indexOf("\n") >= 0)                        // multi-line string result: show it as text art
+          av = av.slice(1, av.charAt(av.length - 1) === '"' ? -1 : undefined).replace(/^\n/, "");
+        $("ag-answer").textContent = av;
+        $("ag-answer").className = av.indexOf("\n") >= 0 ? "multi" : "";
         $("ag-answer-call").textContent = ev.call;
         break;
       case "error":
-        say("Error: " + ev.message, "fail");
+        stopWait();
+        say("Error: " + (/429|rate|traffic|queue/i.test(ev.message || "") ? "the model API is rate-limited right now (not a problem with your prompt). " : "") + ev.message, "fail");
         if (/demo model only knows/i.test(ev.message || "") && state.liveOk) {
           var sw = h("button", "ag-chip", "Switch to Live and send it again");
           sw.addEventListener("click", function () { $("ag-mode").value = "live"; setModeNote(); send(); });
@@ -993,6 +1208,7 @@
         $("ag-answer").textContent = "—"; $("ag-answer-call").textContent = "no answer";
         break;
       case "done":
+        stopWait();
         state.ghost = null;
         say("Finished (" + ev.state + ") · " + ev.model_calls + " model call(s) · " +
           ((ev.input_tokens || 0) + (ev.output_tokens || 0)) + " tokens", "done");
@@ -1013,6 +1229,7 @@
       if (r.status !== 200) return;
       var s = r.data;
       s.events.forEach(onEvent);
+      tickWait();
       state.next = s.next;
       if (s.state !== "running") {
         if (s.compare !== "running") {
@@ -1027,7 +1244,7 @@
   }
 
   function refresh() {
-    var a = api("GET", "/api/agent/tools").then(function (r) { state.tools = r.data.tools || []; drawGraph(); showDetail(); });
+    var a = api("GET", "/api/agent/tools?mode=" + state.mode).then(function (r) { state.tools = r.data.tools || []; drawGraph(); showDetail(); });
     var b = api("GET", "/api/agent/history").then(function (r) { state.history = r.data.sessions || []; });
     return Promise.all([a, b]).then(function () {
       redrawEvidence(); $("ag-compare-note").textContent = "";
@@ -1106,6 +1323,7 @@
       ? "Runs the scripted demo model: 7 prompts, about 1 min, free, estimated tokens"
       : "Runs the live model: 7 prompts, about 2 min, roughly 1 cent of real tokens";
     $("ag-compare").checked = m === "demo";
+    if (state.snapshots) refresh();
     $("ag-send").textContent = m === "live" ? "Send prompt (about \u00bd\u00a2)" : "Send prompt";
     paintBadge();
   }
@@ -1139,7 +1357,7 @@
     var out = $("ag-callout");
     if (!text) { $("ag-call").focus(); return; }
     out.className = "ag-callout"; out.textContent = "running…";
-    api("POST", "/api/agent/call", { call: text }).then(function (r) {
+    api("POST", "/api/agent/call", { call: text, mode: state.mode }).then(function (r) {
       var d = r.data || {};
       out.className = "ag-callout " + (d.ok ? "ok" : "bad");
       out.textContent = d.ok ? "=> " + d.value + "   (0 tokens, " + Math.round(d.elapsed_ms || 0) + " ms)" : (d.error || "failed");
@@ -1194,6 +1412,7 @@
     });
   });
 
+  initGraphView();
   drawGraph(); redrawEvidence();
   replLine("c", ";; REPL output appears here when you send a prompt or run the demo.");
   if (window.location.protocol !== "file:") { refresh(); loadConfig(); loadSnapshots(); }

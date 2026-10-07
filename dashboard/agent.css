@@ -346,3 +346,27 @@ details.ag-math[open] > summary { margin-bottom: .6rem; }
 .kpi b.neutral { color: #e6e8ee; }
 .ag-evtoggle { background: transparent; border: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; font-weight: 600; padding: 0; margin-left: .3rem; }
 .ag-evnote { font-size: .8rem; margin: -.3rem 0 .6rem; }
+
+#ag-answer { white-space: pre-wrap; }
+#ag-answer.multi { font-size: .9rem; line-height: 1.05; letter-spacing: .12em; max-height: 14rem; overflow: auto; }
+
+/* graph pan/zoom */
+.ag-gwrap { position: relative; }
+#ag-graph { cursor: grab; touch-action: none; user-select: none; outline: none; }
+#ag-graph.grabbing { cursor: grabbing; }
+#ag-graph:focus-visible { outline: 2px solid var(--ag-cyan); outline-offset: 2px; }
+.ag-gctl { position: absolute; top: .5rem; right: .5rem; display: flex; gap: .3rem; }
+.ag-gctl button { min-width: 2rem; height: 2rem; background: #232838cc; color: #e6e8ee; border: 1px solid #3a4260; border-radius: 6px; cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 .5rem; backdrop-filter: blur(4px); }
+.ag-gctl button:hover { border-color: var(--ag-cyan); }
+.ag-ghint { position: absolute; left: .6rem; bottom: .5rem; font-size: .72rem; color: #8b93a8; pointer-events: none; }
+
+/* end-of-run summary card */
+.ag-sumcard { margin: 0 0 .7rem; padding: .7rem .9rem; border-radius: 8px; border: 1px solid #343b50; background: #12141b; }
+.ag-sumcard.ok { background: #10261c; border-color: #1f5a3d; }
+.ag-sumcard.bad { background: #2a1818; border-color: #6a2f2f; }
+.sum-t { font-weight: 700; font-size: 1rem; color: #fff; margin-bottom: .25rem; }
+.ag-sumcard.ok .sum-t { color: var(--ag-green); } .ag-sumcard.bad .sum-t { color: var(--ag-red); }
+.sum-l { font-size: .86rem; color: #d6dcec; margin: .15rem 0; word-break: break-word; }
+.sum-chips { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .45rem; }
+.sum-chips .sc { font-size: .75rem; padding: .15rem .55rem; border-radius: 999px; background: #232838; color: #cfd6e8; border: 1px solid #343b50; }
+.sum-chips .sc.ok { background: #12301f; color: #9fe3ab; border-color: #1f5a3d; }

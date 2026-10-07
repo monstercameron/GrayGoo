@@ -229,6 +229,9 @@
               <button class="ag-chip" data-p="write a function that checks if a number is even, then check 10">is 10 even</button>
               <button class="ag-chip" data-p="reverse the words in the sentence one two three">reverse words</button>
             </div>
+            <div class="ag-chiprow"><span class="muted">Big goal (plans small tools)</span>
+              <button class="ag-chip" data-p="write a ray tracer">write a ray tracer</button>
+            </div>
             <div class="ag-chiprow"><span class="muted">Builds on a tool</span>
               <button class="ag-chip" data-p="sum of squares of the list (3 4 5)">sum of squares</button>
               <button class="ag-chip" data-p="mean of squares of the list (2 4 6 8)">mean of squares</button>
@@ -244,6 +247,7 @@
         <div class="card">
           <div class="ag-head"><h2>Build, test and answer</h2><span id="ag-compare-note" class="muted"></span></div>
           <div id="ag-answer-box"><div id="ag-answer">&mdash;</div><div id="ag-answer-call">Run a prompt to see its Lisp, tests and REPL output here.</div></div>
+          <div id="ag-summary" class="ag-sumcard" hidden></div>
           <div id="ag-stages"></div>
           <div id="ag-log"></div>
           <div class="ag-sub">Lisp REPL (SBCL) <span class="muted">each eval is a fresh sandboxed process that reloads the saved tools</span></div>
@@ -276,8 +280,16 @@
           <div class="ag-foot"><button id="ag-reset" class="ag-ghost">Forget all tools</button></div>
         </div>
         <div>
-          <svg id="ag-graph" viewBox="0 0 640 340" role="img"
+          <div class="ag-gwrap">
+          <svg id="ag-graph" tabindex="0" viewBox="0 0 640 340" role="img"
                aria-label="Graph of saved tools; a purple edge means one tool calls another"></svg>
+          <div class="ag-gctl" role="group" aria-label="Graph view controls">
+            <button type="button" id="ag-zin" title="Zoom in" aria-label="Zoom in">+</button>
+            <button type="button" id="ag-zout" title="Zoom out" aria-label="Zoom out">&minus;</button>
+            <button type="button" id="ag-zfit" title="Fit all tools in view" aria-label="Fit all tools in view">Fit</button>
+          </div>
+          <div class="ag-ghint">scroll to zoom &middot; drag to pan &middot; double-click to fit</div>
+        </div>
           <div class="ag-legend">
             <span><i style="background:#5ad1ff"></i>saved tool (click for source and tests)</span>
             <span><i style="background:#ffb454"></i>candidate being tested</span>

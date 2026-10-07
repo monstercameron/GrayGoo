@@ -32,12 +32,28 @@ from pathlib import Path
 import pipeline
 import risk
 import s_expr
+import oracle as orc
 import workers
 
 ROOT = Path(__file__).resolve().parent
 AGENT_DIR = ROOT / "artifacts" / "agent"
 MAX_MODEL_CALLS = 5          # per session: quick check + plan + repairs
-MAX_REPAIRS = 2
+MAX_REPAIRS = 3
+REWRITE_TEMPERATURE = 0.8    # fresh-rewrite repairs sample for a different idea
+MAX_PLAN_STEPS = 6
+MAX_MODEL_CALLS_PLAN = 34    # when a goal is split into small tools
+MAX_DEEP_CALLS = 5           # per session: costly "thinking" rewrites
+MAX_SPLIT_DEPTH = 1         # a failed step may be split once into smaller tools
+
+# Tolerant test comparison, defined in every rehearsal: numbers compare within
+# a relative 1e-4 (so 0.6 equals 3/5), lists elementwise, everything else EQUAL.
+GG_CHECK = (
+    "(proclaim '(sb-ext:muffle-conditions style-warning sb-ext:compiler-note))\n"
+    "(defun gg-near (a b) (cond ((and (realp a) (realp b)) "
+    "(<= (abs (- a b)) (* 1d-4 (max 1 (abs a) (abs b))))) "
+    "((and (consp a) (consp b)) (and (gg-near (car a) (car b)) "
+    "(gg-near (cdr a) (cdr b)))) (t (equal a b))))\n"
+    "(defun gg-check (got want) (if (gg-near got want) t (list :got got)))")
 LIVE_SPEND_CAP_USD = 0.15   # per server process; live sessions refuse past it
 WORKER_TIMEOUT_S = 15.0
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
@@ -52,10 +68,10 @@ SYSTEM_PROMPT = (
     '"tests":[{"call":"(kebab-name ...)","expect":"printed result"}],'
     '"call":"(kebab-name ...)"}\n'
     "Rules: pure ANSI Common Lisp only (no I/O, files, network, processes, "
-    "reader eval). Existing tools are already loaded and may be called by "
+    "reader eval). Keep each tool small and single-purpose; for a big task, build small helper tools one at a time and compose them. In LET, bindings cannot see each other: use LET* when a binding uses an earlier one. If the goal clearly needs several functions (for example a ray tracer, a parser, a simulation), do NOT build it in one go: reply with a PLAN instead: {\"action\":\"plan\",\"steps\":[{\"name\":\"vec-dot\",\"spec\":\"one function, exact name and arguments, with a concrete example and its result\"}]} of at most 6 small single-function steps in dependency order; the last step is the top-level function. Represent vectors, points, colors and records as plain quoted lists like '(0 0 -5); never use #( ) vector literals, structs or hash tables, so tools fit together. NEVER invent expected values you cannot compute by hand (hash outputs, random numbers, timestamps, crypto, floating-point digits). For those, write PROPERTY tests whose expect is T, e.g. call (let ((h (my-hash \"abc\"))) (and (integerp h) (= h (my-hash \"abc\")) (/= h (my-hash \"abd\")))) with expect T; only use an exact value when you are certain of it (a published test vector or simple arithmetic). SETF takes flat place/value pairs, (setf a 1 b 2), with no parentheses around a pair; a later pair must not be wrapped like (b 2). Existing tools are already loaded and may be called by "
     "new tools. 'expect' is the PRIN1 text of the result, e.g. \"25\" or "
     "\"\\\"abc\\\"\" or \"(1 2 3)\". Give 2-4 tests on inputs whose results you can compute exactly by hand "
-    "(Lisp prints exact rationals like 14/3, and integers without .0). 'call' answers the "
+    "(numbers are compared with a small tolerance, so 0.6 matches 3/5). 'call' answers the "
     "user's request using the literal data from the goal; quote list "
     "literals, e.g. '(1 2 3)."
 )
@@ -111,43 +127,68 @@ def signature(definition):
     return "(%s %s)" % (m.group(1), m.group(2)) if m else "(?)"
 
 class ToolRegistry:
-    """Persistent store of promoted Lisp tools (JSON file)."""
+    """Persistent store of promoted Lisp tools (JSON file).
 
-    def __init__(self, path=None):
+    With ``mode`` set (``demo`` or ``live``) only tools built in that mode are
+    visible, so scripted demo tools can never answer a live prompt (or the
+    other way round). Tools without a recorded mode count as ``demo``.
+    """
+
+    def __init__(self, path=None, mode=None):
         self.path = Path(path) if path else AGENT_DIR / "tools.json"
+        self.mode = mode
         self._lock = threading.Lock()
 
-    def load(self):
+    def for_mode(self, mode):
+        clone = ToolRegistry(self.path, mode)
+        clone._lock = self._lock
+        return clone
+
+    @staticmethod
+    def _mode_of(tool):
+        return tool.get("mode") or "demo"
+
+    def _raw(self):
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
         return data if isinstance(data, list) else []
 
+    def _write(self, tools):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(tools, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def _mine(self, tool):
+        return not self.mode or self._mode_of(tool) == self.mode
+
+    def load(self):
+        return [t for t in self._raw() if self._mine(t)]
+
     def add(self, tool):
         with self._lock:
-            tools = [t for t in self.load() if t.get("name") != tool["name"]]
+            tool = dict(tool)
+            if self.mode:
+                tool["mode"] = self.mode
+            tools = [t for t in self._raw()
+                     if not (t.get("name") == tool["name"] and self._mine(t))]
             tools.append(tool)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(tools, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
+            self._write(tools)
 
     def note_use(self, name, prompt, call):
         """Remember that PROMPT was answered by CALL on tool NAME."""
         with self._lock:
-            tools = self.load()
+            tools = self._raw()
             for t in tools:
-                if t.get("name") == name:
+                if t.get("name") == name and self._mine(t):
                     if prompt and call:
                         t["prompts"] = sorted(set(t.get("prompts", []))
                                               | {normalize_prompt(prompt)})
                         t["call"] = call
                     t["uses"] = t.get("uses", 0) + 1
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(tools, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
+            self._write(tools)
 
     def find_cached(self, prompt):
         key = normalize_prompt(prompt)
@@ -174,7 +215,7 @@ class ToolRegistry:
             self._epoch_path().write_text(str(time.time()))
 
     def prelude(self):
-        """Lisp source that defines every registered tool, in order."""
+        """Lisp source that defines every visible tool, in order."""
         return "\n".join(t["definition"] for t in self.load())
 
 
@@ -211,19 +252,105 @@ def live_status():
     return {"available": True, "reason": "", "model": "qwen-3.8-27b (Cerebras)"}
 
 
+_TEMP = threading.local()     # per-thread sampling temperature override
+_RETRY_WAITS = (3, 8, 20)    # seconds between retries of transient API errors
+
+
+def _with_retry(fn):
+    """Call FN, retrying rate limits / overload / timeouts with visible progress."""
+    for i in range(len(_RETRY_WAITS) + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - classify by message
+            text = str(exc).lower()
+            transient = any(x in text for x in (
+                "429", "rate", "too_many", "traffic", "queue", "timed out",
+                "timeout", "503", "502", "overloaded", "connection"))
+            if not transient or i == len(_RETRY_WAITS):
+                raise
+            note = getattr(_TEMP, "notify", None)
+            if note:
+                note("The model API is busy (%s). Retrying in %ds (attempt %d of %d)..."
+                     % (text.split(":")[0][:40] or "temporary error",
+                        _RETRY_WAITS[i], i + 2, len(_RETRY_WAITS) + 1))
+            time.sleep(_RETRY_WAITS[i])
+
+
+
 def live_generate(system, user):
     status = live_status()
     if not status["available"]:
         raise RuntimeError("live mode unavailable: " + status["reason"])
     import cerebras_client
-    return cerebras_client.generate(user, system=system, max_tokens=1200,
-                                    temperature=0.0, reasoning_effort="none")
+    deep = getattr(_TEMP, "deep", False)       # hard retries: let the model think
+    temp = getattr(_TEMP, "value", 0.0)
+    if not deep:
+        return _with_retry(lambda: cerebras_client.generate(
+            user, system=system, max_tokens=getattr(_TEMP, "max_tokens", 2200),
+            temperature=temp, reasoning_effort="none"))
+    res = _with_retry(lambda: cerebras_client.generate(
+        user, system=system, max_tokens=8000, temperature=temp,
+        reasoning_effort="medium", timeout=120.0))
+    if not (res.get("text") or "").strip():       # thinking ate the budget
+        res2 = _with_retry(lambda: cerebras_client.generate(
+            user, system=system, max_tokens=8000, temperature=temp,
+            reasoning_effort="low", timeout=120.0))
+        res2["input_tokens"] = (res2.get("input_tokens") or 0) + (res.get("input_tokens") or 0)
+        res2["output_tokens"] = (res2.get("output_tokens") or 0) + (res.get("output_tokens") or 0)
+        res2["cost_usd"] = (res2.get("cost_usd") or 0) + (res.get("cost_usd") or 0)
+        return res2
+    return res
 
 
 # Extra scripted examples for the demo model. Each entry fires when ALL
 # `words` appear in the goal and none of `not_words` do; `needs` names a
 # saved tool it can compose (else a standalone `alt` definition is built).
+def _sphere_hits(n):
+    """Independent count of grid points inside the unit disc (exact)."""
+    from fractions import Fraction as F
+    c = 0
+    for j in range(n):
+        for i in range(n):
+            x = F(3 * i, n - 1) - F(3, 2)
+            y = F(3 * j, n - 1) - F(3, 2)
+            if x * x + y * y <= 1:
+                c += 1
+    return c
+
+
 DEMO_TOOLS = [
+    {"name": "vec-dot", "words": ["vec-dot"], "not_words": [],
+     "desc": "Dot product of two number lists",
+     "definition": "(defun vec-dot (a b) (reduce #'+ (mapcar #'* a b)))",
+     "tests": [("(vec-dot '(1 2 3) '(4 5 6))", "32"), ("(vec-dot '(1 0 0) '(0 1 0))", "0")],
+     "call": "(vec-dot '(1 2 3) '(4 5 6))"},
+    {"name": "vec-sub", "words": ["vec-sub"], "not_words": [],
+     "desc": "Elementwise difference of two number lists",
+     "definition": "(defun vec-sub (a b) (mapcar #'- a b))",
+     "tests": [("(vec-sub '(5 7 9) '(1 2 3))", "(4 5 6)")],
+     "call": "(vec-sub '(5 7 9) '(1 2 3))"},
+    {"name": "ray-hits-sphere-p", "words": ["ray-hits-sphere-p"], "not_words": [],
+     "desc": "True when a ray hits a sphere",
+     "definition": ("(defun ray-hits-sphere-p (origin dir center radius) "
+                    "(let* ((oc (vec-sub origin center)) (a (vec-dot dir dir)) "
+                    "(b (* 2 (vec-dot oc dir))) "
+                    "(c (- (vec-dot oc oc) (* radius radius)))) "
+                    "(>= (- (* b b) (* 4 a c)) 0)))"),
+     "tests": [("(ray-hits-sphere-p '(0 0 -5) '(0 0 1) '(0 0 0) 1)", "T"),
+               ("(ray-hits-sphere-p '(0 3 -5) '(0 0 1) '(0 0 0) 1)", "NIL")],
+     "call": "(ray-hits-sphere-p '(0 0 -5) '(0 0 1) '(0 0 0) 1)"},
+    {"name": "render-sphere-ascii", "words": ["render-sphere-ascii"], "not_words": [],
+     "desc": "ASCII picture of a unit sphere traced with ray-hits-sphere-p",
+     "definition": ("(defun render-sphere-ascii (n) (let ((rows nil)) "
+                    "(dotimes (j n) (let ((line (make-string n :initial-element #\\.))) "
+                    "(dotimes (i n) (let ((x (- (* 3 (/ i (- n 1))) 3/2)) "
+                    "(y (- (* 3 (/ j (- n 1))) 3/2))) "
+                    "(when (ray-hits-sphere-p (list x y -5) '(0 0 1) '(0 0 0) 1) "
+                    "(setf (char line i) #\\#)))) (push line rows))) "
+                    "(format nil \"~{~a~^~%~}\" (nreverse rows))))"),
+     "tests": [("(count #\\# (render-sphere-ascii 9))", str(_sphere_hits(9))),
+               ("(length (render-sphere-ascii 9))", str(9 * 9 + 8))],
+     "call": "(render-sphere-ascii 9)"},
     {"name": "factorial", "words": ["factorial"], "not_words": [],
      "desc": "Factorial of a non-negative integer",
      "definition": "(defun factorial (n) (if (<= n 1) 1 (* n (factorial (- n 1)))))",
@@ -305,6 +432,17 @@ def demo_generate(system, user):
             return _fake({"action": "use", "call": call}, user, system)
         return _fake({"action": "none"}, user, system)
     build = {"action": "build"}
+    if "all planned helper tools are built" in user.lower() \
+            and "render-sphere-ascii" in have:
+        return _fake({"action": "use", "call": "(render-sphere-ascii 9)",
+                      "why": "the ray tracer's top-level tool is ready"}, user)
+    if ("ray tracer" in goal or "raytracer" in goal) \
+            and "render-sphere-ascii" not in have:
+        return _fake({"action": "plan", "steps": [
+            {"name": "vec-dot", "spec": "vec-dot (a b): dot product of two number lists, e.g. (vec-dot '(1 2 3) '(4 5 6)) is 32"},
+            {"name": "vec-sub", "spec": "vec-sub (a b): elementwise difference of two number lists"},
+            {"name": "ray-hits-sphere-p", "spec": "ray-hits-sphere-p (origin dir center radius): true when the ray hits the sphere"},
+            {"name": "render-sphere-ascii", "spec": "render-sphere-ascii (n): n by n picture of a unit sphere, one ray per cell"}]}, user)
     if "square" in goal and "sum" in goal:
         if "square" in have and "sum-of-squares" not in have:
             build.update(
@@ -440,6 +578,9 @@ def quote_literals(text):
             out.append(text[i:j + 1])
             i = j + 1
             continue
+        if c == "'" and qdepth is not None and text[i + 1:i + 2] == "(":
+            i += 1                 # nested quote inside quoted data: (a '(b)) -> (a (b))
+            continue
         if c == "(":
             rest = text[i + 1:].lstrip()
             if out and out[-1].endswith("'") and qdepth is None:
@@ -490,10 +631,93 @@ def complete_parens(text, max_missing=3):
     return text
 
 
+def lisp_hint(detail):
+    """Targeted advice for common Lisp slips, from the failing-test detail."""
+    return " ".join(adv for _, adv in orc.lisp_hints(detail))
+
+
+def _split_top(inner):
+    """Split the inside of a Lisp form into its top-level argument strings."""
+    args, depth, i, start, n = [], 0, 0, None, len(inner)
+    while i < n:
+        c = inner[i]
+        if c.isspace() and depth == 0:
+            if start is not None:
+                args.append(inner[start:i]); start = None
+            i += 1
+            continue
+        if start is None:
+            start = i
+        if c == '"':
+            i += 1
+            while i < n and inner[i] != '"':
+                i += 2 if inner[i] == "\\" else 1
+        elif c == "#" and inner[i + 1:i + 2] == "\\":
+            i += 2
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        i += 1
+    if start is not None:
+        args.append(inner[start:])
+    return args
+
+
+def _form_end(text, open_idx):
+    """Index of the ``)`` matching the ``(`` at OPEN_IDX, or -1."""
+    depth, i, n = 0, open_idx, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c == "#" and text[i + 1:i + 2] == "\\":
+            i += 2
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def fix_setf(text):
+    """Flatten the SETF slip ``(setf a X (b Y))`` into ``(setf a X b Y)``.
+
+    A SETF with an odd number of arguments whose last argument is a two-element
+    list headed by a symbol is the model wrapping a place/value pair in
+    parentheses; flattening it keeps the intended sequential assignment.
+    """
+    out, i = [], 0
+    for m in re.finditer(r"\(setf\s", text, re.I):
+        if m.start() < i:
+            continue                      # inside a form already rewritten
+        end = _form_end(text, m.start())
+        if end < 0:
+            continue
+        inner = text[m.start() + len("(setf "):end]
+        args = _split_top(inner)
+        if len(args) % 2 == 1 and len(args) >= 3 and args[-1].startswith("("):
+            last_end = _form_end(args[-1], 0)
+            parts = _split_top(args[-1][1:last_end]) if last_end > 0 else []
+            if last_end == len(args[-1]) - 1 and len(parts) == 2 and \
+                    re.match(r"^[A-Za-z*+%-][\w*+%-]*$", parts[0]):
+                args = args[:-1] + parts
+                out.append((m.start(), end, "(setf " + " ".join(args) + ")"))
+                i = end + 1
+    for start, end, repl in reversed(out):
+        text = text[:start] + repl + text[end + 1:]
+    return text
+
+
 def normalize_plan(plan):
     """Apply quote_literals to every call in a build/use plan, in place."""
     if isinstance(plan.get("definition"), str):
-        plan["definition"] = complete_parens(plan["definition"])
+        plan["definition"] = fix_setf(complete_parens(plan["definition"]))
     if isinstance(plan.get("call"), str):
         plan["call"] = quote_literals(plan["call"])
     for t in plan.get("tests") or []:
@@ -530,7 +754,7 @@ def extract_json(text):
     raise ValueError("unterminated JSON object")
 
 
-def validate_build(plan):
+def validate_build(plan, frozen=None):
     """Return an error string for a malformed build plan, else None."""
     name = plan.get("name")
     if not isinstance(name, str) or not _NAME_RE.match(name):
@@ -545,6 +769,20 @@ def validate_build(plan):
         if not (isinstance(t, dict) and isinstance(t.get("call"), str)
                 and isinstance(t.get("expect"), str)):
             return "each test needs string 'call' and 'expect'"
+    seen = {}
+    for t in tests:
+        prev = seen.setdefault(t["call"], t["expect"])
+        if prev != t["expect"]:
+            return ("SPEC_INCONSISTENT: the same call %s has two different "
+                    "expected values (%s and %s)" % (t["call"], prev, t["expect"]))
+        if frozen and t["call"] in frozen and frozen[t["call"]] != t["expect"]:
+            return ("SPEC_INCONSISTENT: the expected value for %s is frozen as "
+                    "%s (verified earlier); do not change it"
+                    % (t["call"], frozen[t["call"]]))
+    for t in tests:
+        if "#" in t["expect"]:
+            return ("expected values cannot contain '#': write plain lists like "
+                    "(0 0 -5), not #(0 0 -5) vectors or other reader syntax")
     if not isinstance(plan.get("call"), str):
         return "call missing"
     try:
@@ -566,11 +804,12 @@ class Session:
 
     def __init__(self, prompt, generate, registry=None, worker_fn=None,
                  risk_fn=None, session_id=None, mode="demo", log_path=None,
-                 arm="main", pair=None, expected=None, oracle=None):
+                 arm="main", pair=None, expected=None, oracle=None,
+                 lessons=None, postmortem_dir=None):
         self.id = session_id or uuid.uuid4().hex[:10]
         self.prompt = prompt
         self.generate = generate
-        self.registry = registry or ToolRegistry()
+        self.registry = (registry or ToolRegistry()).for_mode(mode)
         self.worker_fn = worker_fn or _worker_fn
         self.risk_fn = risk_fn or _risk_fn
         self.mode = mode
@@ -585,6 +824,17 @@ class Session:
         self.cost_usd = 0.0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.max_calls = MAX_MODEL_CALLS
+        self._deep_calls = 0
+        self._built = []        # tools saved by this session: (name, tests)
+        self._t0 = time.time()
+        self._in_step = False
+        self._shown = {}
+        self.lessons = lessons
+        self.postmortem_dir = postmortem_dir
+        self._frozen = {}           # call -> expected value, verified or reference-derived
+        self._seen_expect = {}      # call -> every expected value ever proposed
+        self._fails = []            # one record per failed rehearsal
         self._lock = threading.Lock()
         self._log_path = Path(log_path) if log_path else \
             AGENT_DIR / "sessions" / ("%s.jsonl" % self.id)
@@ -614,13 +864,29 @@ class Session:
                     "events": self.events[since:], "next": len(self.events)}
 
     # -- model ----------------------------------------------------------
-    def _ask(self, user_text, label, system=None):
-        if self.model_calls >= MAX_MODEL_CALLS:
+    def _ask(self, user_text, label, system=None, temperature=None):
+        if self.model_calls >= self.max_calls:
             raise RuntimeError("model call budget (%d) exhausted"
-                               % MAX_MODEL_CALLS)
+                               % self.max_calls)
         self.model_calls += 1
         self.emit("model_call", label=label, prompt=user_text)
-        res = self.generate(system or SYSTEM_PROMPT, user_text)
+        if temperature is not None:
+            # "thinking" retries are the expensive part: bound them per session
+            if self._deep_calls >= MAX_DEEP_CALLS:
+                temperature = None
+            else:
+                self._deep_calls += 1
+        if temperature is not None:
+            _TEMP.value = temperature
+            _TEMP.deep = True
+        _TEMP.notify = lambda msg: self.emit("model_wait", message=msg)
+        try:
+            res = self.generate(system or SYSTEM_PROMPT, user_text)
+        finally:
+            _TEMP.notify = None
+            if temperature is not None:
+                _TEMP.value = 0.0
+                _TEMP.deep = False
         self.cost_usd += res.get("cost_usd") or 0.0
         self.input_tokens += res.get("input_tokens") or 0
         self.output_tokens += res.get("output_tokens") or 0
@@ -631,16 +897,50 @@ class Session:
                   estimated=bool(res.get("estimated")),
                   cost_usd=res.get("cost_usd"),
                   latency_ms=res.get("latency_ms"))
-        return normalize_plan(extract_json(res.get("text")))
+        try:
+            return normalize_plan(extract_json(res.get("text")))
+        except ValueError as exc:
+            # cut off or malformed JSON: retry once, bigger budget, compact reply
+            if self.model_calls >= self.max_calls:
+                raise
+            self.emit("json_retry", reason=str(exc))
+            self.model_calls += 1
+            self.emit("model_call", label=label + " (retry: invalid JSON)",
+                      prompt=user_text)
+            _TEMP.max_tokens = 5000
+            try:
+                res = self.generate(
+                    system or SYSTEM_PROMPT,
+                    user_text + "\nYOUR PREVIOUS REPLY WAS CUT OFF OR NOT VALID "
+                    "JSON. Reply with ONE complete JSON object only, and keep "
+                    "the Lisp definition compact.")
+            finally:
+                _TEMP.max_tokens = 2200
+            self.cost_usd += res.get("cost_usd") or 0.0
+            self.input_tokens += res.get("input_tokens") or 0
+            self.output_tokens += res.get("output_tokens") or 0
+            self.emit("model_reply", text=res.get("text"),
+                      model=res.get("model"),
+                      input_tokens=res.get("input_tokens"),
+                      output_tokens=res.get("output_tokens"),
+                      estimated=bool(res.get("estimated")),
+                      cost_usd=res.get("cost_usd"),
+                      latency_ms=res.get("latency_ms"))
+            return normalize_plan(extract_json(res.get("text")))
 
-    def _user_prompt(self, extra=""):
+    def _user_prompt(self, extra="", goal=None):
         lines = []
         for t in self.registry.load():
             lines.append("TOOL %s %s: %s" % (t["name"],
                          signature(t["definition"]).split(" ", 1)[1][:-1],
                          t.get("description", "")))
         reg = "\n".join(lines) or "(no tools yet)"
-        return "REGISTRY:\n%s\nGOAL: %s\n%s" % (reg, self.prompt, extra)
+        text = "REGISTRY:\n%s\nGOAL: %s\n%s" % (reg, goal or self.prompt, extra)
+        if self.lessons is not None:
+            advice = self.lessons.advice()
+            if advice:
+                text += "\n" + advice
+        return text
 
     # -- REPL -----------------------------------------------------------
     def _repl(self, code, label):
@@ -661,10 +961,97 @@ class Session:
         else:
             if self.state == "running":
                 self.state = "done"
+        self.emit("summary", **self._summary())
+        if self.state != "done" and self.postmortem_dir:
+            try:
+                orc.write_postmortem(self.postmortem_dir, self.id, self._postmortem())
+            except OSError:
+                pass
         self.emit("done", state=self.state, model_calls=self.model_calls,
                   input_tokens=self.input_tokens,
                   output_tokens=self.output_tokens,
                   cost_usd=round(self.cost_usd, 6))
+
+    def _efficiency(self):
+        """How much of the effort was repeated failure."""
+        sigs = [f["sig"] for f in self._fails]
+        wasted, prev = 0, 0
+        for f in self._fails:
+            if f["repeated"]:
+                wasted += max(0, f["tokens"] - prev)   # the call that re-made the error
+            prev = f["tokens"]
+        return {"failed_attempts": len(self._fails),
+                "unique_errors": len(set(sigs)),
+                "repeated_errors": len(sigs) - len(set(sigs)),
+                "wasted_tokens": wasted}
+
+    def _postmortem(self):
+        classes = [f["class"] for f in self._fails if f.get("class")]
+        root = max(set(classes), key=classes.count) if classes else "UNKNOWN"
+        orc_events = [{k: e[k] for k in ("kind", "call", "expected", "algo", "was", "got")
+                       if k in e} for e in self.events
+                      if e["kind"] in ("oracle_corrected", "oracle_reference")]
+        drift = sorted(c for c, vals in self._seen_expect.items() if len(vals) > 1)
+        fixes = []
+        if "TEST_WRONG" in classes or drift:
+            fixes.append("verify the expected values with an independent reference "
+                         "or use property tests: " + ", ".join(drift[:3] or ["see failures"]))
+        return {
+            "prompt": self.prompt, "mode": self.mode, "outcome": self.state,
+            "root_cause": root,
+            "root_cause_meaning": orc.CLASS_LABELS.get(root, root),
+            "failures": self._fails,
+            "oracle_events": orc_events,
+            "expected_value_drift": drift,
+            "repeated_mistakes": [f["sig"] for f in self._fails if f["repeated"]],
+            "lessons_counts": self.lessons.counts() if self.lessons else {},
+            "tools_saved_before_stopping": [n for n, _ in self._built],
+            "benchmark_fixes_required": fixes,
+            "efficiency": self._efficiency()}
+
+    def _summary(self):
+        """Plain-data account of what this session did, for the UI card."""
+        ev = list(self.events)
+        count = lambda k: sum(1 for e in ev if e["kind"] == k)  # noqa: E731
+        results = [e for e in ev if e["kind"] == "result"]
+        last = results[-1] if results else None
+        gave = [e for e in ev if e["kind"] == "gave_up"]
+        errs = [e for e in ev if e["kind"] == "error"]
+        decisions = [e.get("action") for e in ev if e["kind"] == "decision"]
+        if "cache" in decisions:
+            kind = "cache"
+        elif "plan" in decisions:
+            kind = "plan"
+        elif "build" in decisions:
+            kind = "build"
+        elif "use" in decisions:
+            kind = "reuse"
+        else:
+            kind = "other"
+        planned = next((len(e["steps"]) for e in ev
+                        if e["kind"] == "plan" and not e.get("sub")), 0)
+        outcome = ("success" if self.state == "done" else
+                   "error" if self.state == "error" else "failed")
+        m = re.match(r"\s*\(\s*(\S+)", (last or {}).get("call") or "")
+        return {
+            "outcome": outcome, "flow": kind,
+            "built": [{"name": n, "tests": t} for n, t in self._built],
+            "planned": planned,
+            "tests_passed": sum(t for _, t in self._built),
+            "repairs": count("repair"), "splits": count("replan"),
+            "model_calls": self.model_calls,
+            "tokens": self.input_tokens + self.output_tokens,
+            "cost_usd": round(self.cost_usd, 6),
+            "seconds": round(time.time() - self._t0, 1),
+            "answer": ({"call": last.get("call"), "value": last.get("value"),
+                        "ok": last.get("ok"), "tool": m.group(1) if m else None}
+                       if last else None),
+            "efficiency": self._efficiency(),
+            "oracle_fixes": count("oracle_corrected") + count("oracle_reference"),
+            "stopped": ({"detail": gave[-1].get("detail"),
+                         "hint": gave[-1].get("hint")} if gave else None),
+            "error": errs[-1].get("message") if errs else None,
+        }
 
     def _run(self):
         tools = self.registry.load()
@@ -702,6 +1089,14 @@ class Session:
                 return
             self.emit("retrieval_miss", tools=[t["name"] for t in hits])
         plan = self._ask(self._user_prompt(), "plan")
+        if plan.get("action") == "plan":
+            if not self._run_steps(plan):
+                return
+            plan = self._ask(self._user_prompt(
+                "All planned helper tools are built and saved. Now finish the "
+                "original goal: reply with action use and a call of the "
+                "top-level tool using literal data from the goal, or build "
+                "one last small tool that composes them."), "final")
         prelude = self.registry.prelude()
         action = plan.get("action")
         self.emit("decision", action=action, plan=plan)
@@ -713,87 +1108,389 @@ class Session:
             return
         if action != "build":
             raise ValueError("model returned unknown action %r" % (action,))
+        self._build_loop(plan, prelude)
+
+    # -- planner: a big goal becomes a few small, individually tested tools ---
+    def _run_steps(self, plan):
+        steps = plan.get("steps")
+        ok = isinstance(steps, list) and 1 <= len(steps) <= MAX_PLAN_STEPS and \
+            all(isinstance(x, dict) and isinstance(x.get("spec"), str) for x in steps)
+        if not ok:
+            self.state = "failed"
+            self.emit("gave_up", detail="the plan was malformed or had more "
+                      "than %d steps" % MAX_PLAN_STEPS, hint="", attempts=1)
+            return False
+        self.max_calls = MAX_MODEL_CALLS_PLAN
+        self.emit("decision", action="plan", plan={
+            "why": "this goal needs several functions: building %d small "
+                   "tools in order" % len(steps)})
+        self.emit("plan", steps=[{"name": x.get("name", ""), "spec": x["spec"]}
+                                 for x in steps])
+        self._in_step = True
+        try:
+            for i, step in enumerate(steps, 1):
+                self.emit("step", i=i, n=len(steps), name=step.get("name", ""),
+                          spec=step["spec"])
+                if not self._build_step(step, 0):
+                    self.state = "failed"
+                    fail = getattr(self, "_last_failure", {}) or {}
+                    self.emit("gave_up", detail=fail.get("detail", ""),
+                              hint=fail.get("hint", ""),
+                              attempts=fail.get("attempts", 0), step=True)
+                    return False
+        finally:
+            self._in_step = False
+        return True
+
+    def _build_step(self, step, depth):
+        """Build one planned tool; on failure split it once into smaller tools."""
+        spec = step["spec"]
+        first = self._ask(self._user_prompt(
+            "BUILD exactly this one small tool now (action build). "
+            "Use LET* when a binding uses an earlier one. Vectors and "
+            "points are plain lists like '(0 0 -5), never #( ) arrays; "
+            "reuse the helper tools already in the registry.", goal=spec),
+            "step" if depth == 0 else "sub-step")
+        self.emit("decision", action=first.get("action"), plan=first)
+        if first.get("action") != "build":
+            return True               # the model says it already exists
+        if self._build_loop(first, self.registry.prelude(), goal=spec, quiet=True):
+            return True
+        if depth >= MAX_SPLIT_DEPTH:
+            return False
+        fail = self._last_failure
+        self.emit("replan", spec=spec, detail=fail.get("detail", ""))
+        sp = self._ask(self._user_prompt(
+            "The tool for this step kept failing its tests: %s\nLast "
+            "failures: %s\nSplit it into at most 3 SMALLER single-function "
+            "tools that it can then call (reply with action plan and steps, "
+            "each with name and spec, in dependency order)."
+            % (spec, fail.get("detail", "")[:400]), goal=spec), "split")
+        subs = sp.get("steps") if sp.get("action") == "plan" else None
+        if not (isinstance(subs, list) and 1 <= len(subs) <= 3 and all(
+                isinstance(x, dict) and isinstance(x.get("spec"), str)
+                for x in subs)):
+            return False
+        self.emit("plan", steps=[{"name": x.get("name", ""), "spec": x["spec"]}
+                                 for x in subs], sub=True)
+        for j, sub in enumerate(subs, 1):
+            self.emit("step", i=j, n=len(subs), name=sub.get("name", ""),
+                      spec=sub["spec"], sub=True)
+            if not self._build_step(sub, depth + 1):
+                return False
+        again = self._ask(self._user_prompt(
+            "Now build the ORIGINAL step again, calling the new helper tools: "
+            "%s" % spec, goal=spec), "retry step")
+        self.emit("decision", action=again.get("action"), plan=again)
+        if again.get("action") != "build":
+            return True
+        return self._build_loop(again, self.registry.prelude(), goal=spec,
+                                quiet=True)
+
+    @staticmethod
+    def _failure_text(verdict):
+        """Detail plus the full error text: what hints and lessons search."""
+        return "%s %s" % (verdict.get("detail") or "", verdict.get("error_text") or "")
+
+    def _note_failure(self, verdict, attempt):
+        """Fingerprint a failed rehearsal and feed recurring slips to lessons."""
+        detail = verdict.get("detail") or verdict.get("reason") or ""
+        sig = orc.error_signature(detail)
+        tokens = self.input_tokens + self.output_tokens
+        self._fails.append({
+            "attempt": attempt, "class": verdict.get("class"), "sig": sig,
+            "tokens": tokens, "detail": detail[:300],
+            "repeated": any(f["sig"] == sig for f in self._fails)})
+        if self.lessons is not None:
+            self.lessons.note([k for k, _ in orc.lisp_hints(self._failure_text(verdict))])
+
+    def _build_loop(self, plan, prelude, goal=None, quiet=False):
+        """Rehearse PLAN, repairing up to MAX_REPAIRS times. True if saved."""
+        prev_got, defs_seen, rescued = {}, set(), False
+        self._last_stuck = False
         for attempt in range(MAX_REPAIRS + 1):
-            problem = validate_build(plan)
+            problem = validate_build(plan, self._frozen)
+            ndef = (orc.norm_definition(plan.get("definition")),
+                    tuple((t.get("call"), t.get("expect"))
+                          for t in (plan.get("tests") or [])
+                          if isinstance(t, dict)))
             if problem:
-                verdict = {"ok": False, "reason": problem, "stage": "schema"}
+                verdict = {"ok": False, "reason": problem, "stage": "schema",
+                           "detail": problem, "got_map": {},
+                           "class": ("SPEC_INCONSISTENT"
+                                     if problem.startswith("SPEC_INCONSISTENT")
+                                     else "SCHEMA")}
+                self.emit("verdict", **verdict)
+            elif ndef in defs_seen:
+                # never re-run code that already failed: it would fail the same way
+                verdict = {"ok": False, "stage": "repeat", "got_map": {},
+                           "reason": "identical to an earlier failed attempt",
+                           "detail": "the new definition is identical to a "
+                                     "previous failed one",
+                           "class": "REPEATED_CANDIDATE"}
+                self.emit("repeat_candidate", name=plan.get("name"))
                 self.emit("verdict", **verdict)
             else:
-                verdict = self._rehearse(plan, prelude)
+                defs_seen.add(ndef)
+                verdict = self._rehearse(plan, self.registry.prelude())
             if verdict["ok"]:
-                self.registry.add({
-                    "name": plan["name"],
-                    "description": plan.get("description", ""),
-                    "definition": plan["definition"],
-                    "tests": plan["tests"], "session": self.id,
-                    "prompts": [normalize_prompt(self.prompt)],
-                    "call": plan["call"],
-                    "created": round(time.time(), 3)})
-                for dep in self.registry.load():
-                    if dep["name"] != plan["name"] and re.search(
-                            r"[\s(']%s[\s)]" % re.escape(dep["name"]),
-                            plan["definition"]):
-                        self.registry.note_use(dep["name"], "", "")
-                self.emit("promoted", name=plan["name"],
-                          tools=[t["name"] for t in self.registry.load()])
-                self._finish_call(plan["call"],
-                                  self.registry.prelude())
-                return
+                return self._promote(plan)
+            self._note_failure(verdict, attempt)
+            # identical code AND identical tests after a value mismatch: the
+            # model is stuck defending an expectation, so blame the test
+            repeat_stuck = verdict.get("class") == "REPEATED_CANDIDATE" and \
+                bool(prev_got)
+            test_wrong = verdict.get("class") == "TEST_WRONG" or \
+                bool(verdict.get("drift")) or repeat_stuck
+            if test_wrong:
+                self._last_stuck = True
+            if not rescued and (test_wrong or (attempt >= MAX_REPAIRS
+                                               and self._last_stuck)):
+                # The evidence points at the TEST, not the code: stop mutating the
+                # code. Keep it as is and swap guessed values for property tests.
+                rescued = True
+                self.emit("rescue", reason=orc.CLASS_LABELS.get(
+                    verdict.get("class"), "expected values look guessed"))
+                saved = plan
+                plan = self._ask(self._user_prompt(
+                    "Your code returned the same results across attempts, so "
+                    "the exact expected values in your tests were probably "
+                    "guesses. Return build JSON with the definition EXACTLY "
+                    "unchanged:\n%s\nbut replace every exact-value test you "
+                    "cannot verify by hand with PROPERTY tests whose expect "
+                    "is T (determinism, type, range, length, different "
+                    "inputs give different results). Keep exact values only "
+                    "for results you are certain of." % saved["definition"],
+                    goal=goal), "property-tests")
+                self.emit("decision", action=plan.get("action"), plan=plan)
+                if plan.get("action") == "build" and \
+                        plan.get("definition") == saved["definition"] and \
+                        not validate_build(plan, self._frozen):
+                    verdict = self._rehearse(plan, self.registry.prelude())
+                    if verdict["ok"]:
+                        return self._promote(plan)
+                    self._note_failure(verdict, attempt)
             if attempt >= MAX_REPAIRS:
-                self.state = "failed"
-                return
-            self.emit("repair", attempt=attempt + 1, reason=verdict["reason"])
-            plan = self._ask(self._user_prompt(
-                "PREVIOUS ATTEMPT FAILED (%s): %s\nFailing tests: %s\n"
-                "Either the code or the expected value may be wrong: "
-                "recompute by hand before deciding. Lisp prints exact "
-                "rationals (14/3) and integers without .0.\n"
-                "Previous JSON: %s\nReturn corrected build JSON."
-                % (verdict.get("stage"), verdict["reason"],
-                   verdict.get("detail") or "n/a",
-                   json.dumps(plan))), "repair")
+                self._last_failure = {
+                    "detail": verdict.get("detail") or verdict.get("reason") or "",
+                    "hint": (lisp_hint(self._failure_text(verdict)) or (
+                        "the tests expected exact values the model could not "
+                        "have computed (for example hash outputs), while the "
+                        "code returned the same result every time. Ask for "
+                        "property checks instead of exact values."
+                        if self._last_stuck else "")),
+                    "cls": verdict.get("class"),
+                    "attempts": attempt + 1}
+                if not quiet:
+                    self.state = "failed"
+                    self.emit("gave_up", step=bool(self._in_step),
+                              **self._last_failure)
+                return False
+            self.emit("repair", attempt=attempt + 1, reason=verdict["reason"],
+                      cls=verdict.get("class"))
+            hint = lisp_hint(self._failure_text(verdict))
+            stuck = [c for c, g in (verdict.get("got_map") or {}).items()
+                     if prev_got.get(c) == g]
+            prev_got = dict(verdict.get("got_map") or {})
+            if stuck:
+                hint = ((hint + " ") if hint else "") + (
+                    "YOUR CODE RETURNED THE SAME VALUE FOR %s in two different "
+                    "attempts, but the expected value never matched. That "
+                    "strongly suggests the EXPECTED value is a guess you cannot "
+                    "compute by hand (hashes, random, crypto). Replace those "
+                    "exact-value tests with PROPERTY tests that evaluate to T "
+                    "(determinism, type, range, length, different inputs give "
+                    "different results), or delete them."
+                    % ", ".join(stuck[:2]))
+                self._last_stuck = True
+            head = ("PREVIOUS ATTEMPT FAILED (%s, %s): %s\nFailing tests: %s\n"
+                    % (verdict.get("stage"), verdict.get("class") or "?",
+                       verdict["reason"], verdict.get("detail") or "n/a"))
+            temp = None
+            if verdict.get("class") == "COMPILER_ERROR":
+                # syntax first: a narrow repair, not a rewrite of the algorithm
+                body = ("The code does not COMPILE. Fix ONLY the compile "
+                        "error(s) shown: keep the algorithm and the tests "
+                        "exactly as they are and change as little as "
+                        "possible.\n%sPrevious JSON: %s\nReturn corrected "
+                        "build JSON." % (hint + "\n" if hint else "",
+                                         json.dumps(plan)))
+            elif verdict.get("class") == "REPEATED_CANDIDATE":
+                body = ("Your last candidate was IDENTICAL to an earlier failed "
+                        "one. Change the approach: restructure the code and "
+                        "re-derive the formula before answering.\n%sReturn "
+                        "build JSON." % (hint + "\n" if hint else ""))
+                temp = REWRITE_TEMPERATURE
+            elif attempt == 0:
+                body = ("Either the code or the expected value may be wrong. "
+                        "Trace the FIRST failing test through your code by "
+                        "hand, line by line, find the line whose result "
+                        "differs from what the test expects, and fix that "
+                        "line. Numbers compare with a small tolerance, so 0.6 "
+                        "equals 3/5. Do not change the expected value of a "
+                        "test unless you can prove it wrong by hand.\n"
+                        "%sPrevious JSON: %s\nReturn corrected build JSON."
+                        % (hint + "\n" if hint else "", json.dumps(plan)))
+            else:
+                body = ("Your previous attempts failed the same way, so do "
+                        "NOT patch them. Rewrite the tool from scratch with a "
+                        "different structure: first re-derive the algorithm "
+                        "and any formula from its definition (check signs and "
+                        "operator order), then hand-trace the first failing "
+                        "test through the NEW code before answering. Keep it "
+                        "small; helper tools in the registry may be used.\n"
+                        "%sReturn build JSON." % (hint + "\n" if hint else ""))
+                temp = REWRITE_TEMPERATURE
+            plan = self._ask(self._user_prompt(head + body, goal=goal),
+                             "repair" if attempt == 0 else "rewrite",
+                             temperature=temp)
             self.emit("decision", action=plan.get("action"), plan=plan)
             if plan.get("action") != "build":
-                self.state = "failed"
-                return
+                self._last_failure = {"detail": "the model stopped building",
+                                      "hint": "", "attempts": attempt + 1}
+                if not quiet:
+                    self.state = "failed"
+                return False
+        return False
+
+    def _promote(self, plan):
+        """Save a tool whose tests passed and, at top level, answer with it."""
+        tests = []
+        for t in plan["tests"]:
+            tests.append({
+                "call": t["call"], "expect": t["expect"],
+                "confidence": orc.oracle_confidence(t["call"], t["expect"]),
+                "source": t.get("source") or (
+                    "property test (model-written)"
+                    if t["expect"].strip().upper() == "T"
+                    else "model-written, matched by the code")})
+        self.registry.add({
+            "name": plan["name"],
+            "description": plan.get("description", ""),
+            "definition": plan["definition"],
+            "tests": tests, "session": self.id,
+            "prompts": ([] if self._in_step
+                        else [normalize_prompt(self.prompt)]),
+            "call": plan["call"],
+            "created": round(time.time(), 3)})
+        for dep in self.registry.load():
+            if dep["name"] != plan["name"] and re.search(
+                    r"[\s(']%s[\s)]" % re.escape(dep["name"]),
+                    plan["definition"]):
+                self.registry.note_use(dep["name"], "", "")
+        self._built.append((plan["name"], len(plan.get("tests") or [])))
+        self.emit("promoted", name=plan["name"],
+                  tools=[t["name"] for t in self.registry.load()])
+        if not self._in_step:
+            self._finish_call(plan["call"], self.registry.prelude())
+        return True
 
     def _rehearse(self, plan, prelude):
+        """Run the tests; then let an independent reference overrule bad vectors."""
+        out = self._rehearse_once(plan, prelude)
+        if not out["ok"]:
+            fixes = self._reference_pass(plan, out)
+            if fixes["corrected"]:
+                out = self._rehearse_once(plan, prelude)   # same code, true vectors
+            if fixes["reference"]:
+                note = "; ".join(
+                    "the independent %s reference says %s for %s" % (a, v, c)
+                    for c, v, a in fixes["reference"])
+                out["detail"] = (out["detail"] + "; " if out["detail"] else "") + note
+            out["oracle"] = {"corrected": [c for c, _, _ in fixes["corrected"]],
+                             "reference": [c for c, _, _ in fixes["reference"]]}
+        public = {k: v for k, v in out.items() if k not in ("infos", "error_text")}
+        self.emit("verdict", **public)
+        return out
+
+    def _reference_pass(self, plan, out):
+        """Replace guessed hash/checksum vectors by Python's reference values."""
+        res = {"corrected": [], "reference": []}
+        algo = orc.detect_algo(plan.get("name"), plan.get("description"), self.prompt)
+        if not algo:
+            return res
+        for info in out.get("infos", []):
+            idx = info["index"]
+            if not (isinstance(idx, int) and 0 <= idx < len(plan["tests"])):
+                continue
+            t = plan["tests"][idx]
+            arg = orc.single_string_arg(t["call"])
+            if arg is None or info.get("got") is None:
+                continue
+            ref = orc.reference_value(algo, arg)
+            refs = orc.format_reference(ref)
+            if t["expect"].strip() == refs:
+                continue
+            was = t["expect"]
+            t["expect"] = refs
+            t["source"] = "independent reference: %s" % algo
+            self._frozen[t["call"]] = refs
+            if orc.matches_reference(info["got"], ref):
+                res["corrected"].append((t["call"], refs, algo))
+                self.emit("oracle_corrected", call=t["call"], expected=refs,
+                          algo=algo, was=was)
+            else:
+                res["reference"].append((t["call"], refs, algo))
+                self.emit("oracle_reference", call=t["call"], expected=refs,
+                          algo=algo, got=info["got"])
+        return res
+
+    def _rehearse_once(self, plan, prelude):
         direct = []
         for t in plan["tests"]:
-            code = "%s\n%s\n%s" % (prelude, plan["definition"], t["call"])
-            direct.append({"code": code, "expect": t["expect"]})
+            self._seen_expect.setdefault(t["call"], set()).add(t["expect"])
+            code = "%s\n%s\n%s\n(gg-check %s '%s)" % (
+                GG_CHECK, prelude, plan["definition"], t["call"], t["expect"])
+            self._shown[code] = "%s   ;; expect %s" % (t["call"], t["expect"])
+            direct.append({"code": code, "expect": "T"})
         res = pipeline.run_candidate(
             candidate_text(plan), tests={"direct": direct},
             worker_fn=self._recording_worker(plan, prelude),
             risk_fn=self.risk_fn)
         stage_names = [(s["name"], s["status"]) for s in res.get("stages", [])]
         v = res.get("verdict", {})
-        detail = []
         items = ((res.get("evidence") or {}).get("direct") or {}).get("items") or []
+        infos, detail, got_map = [], [], {}
         for item in items:
-            if isinstance(item, dict) and not item.get("pass", True):
-                idx = item.get("index")
-                call = plan["tests"][idx]["call"] if isinstance(idx, int) \
-                    and 0 <= idx < len(plan["tests"]) else "?"
-                got = item.get("return_value")
-                msg = ("got %s, expected %s" % (got, plan["tests"][idx]["expect"])
-                       if got not in (None, "") and isinstance(idx, int)
-                       else (item.get("error") or "failed")[:120])
-                detail.append("%s: %s" % (call, msg))
-        out = {"ok": bool(res.get("ok")), "reason": v.get("reason"),
-               "detail": "; ".join(detail[:4]),
-               "tests": len(plan["tests"]),
-               "stage": v.get("failed_stage"),
-               "risk": (res.get("risk") or {}).get("level"),
-               "stages": stage_names}
-        self.emit("verdict", **out)
-        return out
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            ok_idx = isinstance(idx, int) and 0 <= idx < len(plan["tests"])
+            if item.get("pass", True):
+                if ok_idx:                     # passed: this expectation is verified
+                    self._frozen.setdefault(plan["tests"][idx]["call"],
+                                            plan["tests"][idx]["expect"])
+                continue
+            t = plan["tests"][idx] if ok_idx else {"call": "?", "expect": ""}
+            rv = (item.get("return_value") or "").strip()
+            got = rv[6:-1] if rv.upper().startswith("(:GOT ") and ok_idx else None
+            err = (item.get("error") or "")
+            infos.append({"index": idx, "call": t["call"], "expected": t["expect"],
+                          "got": got, "error": err,
+                          "confidence": orc.oracle_confidence(t["call"], t["expect"])})
+            if got is not None:
+                got_map[t["call"]] = got
+                detail.append("%s: got %s, expected %s" % (t["call"], got, t["expect"]))
+            else:
+                detail.append("%s: %s" % (t["call"], " ".join((err or "failed").split(
+                    "--- backtrace ---")[0].split())[:200]))
+        drift = [i["call"] for i in infos
+                 if len(self._seen_expect.get(i["call"], ())) > 1]
+        ok = bool(res.get("ok"))
+        return {"ok": ok, "reason": v.get("reason"), "got_map": got_map,
+                "detail": "; ".join(detail[:4]), "tests": len(plan["tests"]),
+                "stage": v.get("failed_stage"),
+                "risk": (res.get("risk") or {}).get("level"),
+                "stages": stage_names, "infos": infos, "drift": drift,
+                "error_text": " ".join(" ".join((i["error"] or "").split())
+                                       for i in infos)[:2500],
+                "class": None if ok else orc.failure_class(infos, drift)}
 
     def _recording_worker(self, plan, prelude):
         """Worker wrapper that logs each rehearsal eval as a REPL line."""
         def run(code):
             env = self.worker_fn(code)
-            shown = code
+            shown = self._shown.get(code) or code
             if prelude and shown.startswith(prelude):
                 shown = shown[len(prelude):].lstrip("\n")
             self.emit("repl", label="rehearse", code=shown, ok=env.get("ok"),
@@ -821,12 +1518,12 @@ class Session:
                              "answer")
         self.emit("result", call=call, ok=env.get("ok"),
                   value=env.get("return_value"),
-                  expected_ok=(None if self.expected is None else
-                               env.get("return_value") == self.expected),
+                  expected_ok=(None if self.expected is None or self._in_step
+                               else env.get("return_value") == self.expected),
                   error=(env.get("error") or "")[:600])
         if env.get("ok"):
             return call
-        if retry and self.model_calls < MAX_MODEL_CALLS:
+        if retry and self.model_calls < self.max_calls:
             reason = (env.get("error") or "call failed").split("\n")[0]
             self.emit("repair", attempt=1, reason="answer call failed: %s"
                       % reason[:160])
@@ -1000,6 +1697,7 @@ class SessionManager:
                                          "live": live_generate}
         self._sessions = {}
         self._busy = False
+        self.lessons = orc.LessonStore(AGENT_DIR / "lessons.json")
         self.live_spend = 0.0
         self._lock = threading.Lock()
 
@@ -1026,7 +1724,9 @@ class SessionManager:
             self._busy = True
             sess = Session(prompt.strip(), self.generators[mode],
                            registry=self.registry, mode=mode,
-                           expected=expected, oracle=oracle)
+                           expected=expected, oracle=oracle,
+                           lessons=self.lessons,
+                           postmortem_dir=AGENT_DIR / "postmortems")
             sess.compare = "running" if compare else None
             self._sessions[sess.id] = sess
         threading.Thread(target=self._chain, args=(sess, compare),
@@ -1045,7 +1745,9 @@ class SessionManager:
                         sess.prompt, sess.generate,
                         registry=ToolRegistry(Path(scratch) / "tools.json"),
                         mode=sess.mode, arm="nomem", pair=sess.id,
-                        expected=sess.expected, oracle=sess.oracle)
+                        expected=sess.expected, oracle=sess.oracle,
+                        lessons=self.lessons,
+                        postmortem_dir=AGENT_DIR / "postmortems")
                     twin.run()
                     self.live_spend += twin.cost_usd if sess.mode == "live" else 0.0
                 finally:
@@ -1094,14 +1796,15 @@ class SessionManager:
         sess = self._sessions.get(session_id)
         return sess.snapshot(since) if sess else None
 
-    def call_tool(self, text):
+    def call_tool(self, text, mode=None):
         """Run one allow-listed call of a saved tool. Zero model tokens."""
-        names = {t["name"] for t in self.registry.load()}
+        reg = self.registry.for_mode(mode) if mode else self.registry
+        names = {t["name"] for t in reg.load()}
         text = quote_literals(text) if isinstance(text, str) else text
         problem = safe_call_check(text, names)
         if problem:
             return {"ok": False, "error": problem, "tokens": 0}
-        prelude = self.registry.prelude()
+        prelude = reg.prelude()
         env = _worker_fn("%s\n%s" % (prelude, text))
         return {"ok": bool(env.get("ok")), "value": env.get("return_value"),
                 "error": (env.get("error") or "")[:300],
@@ -1118,10 +1821,12 @@ class SessionManager:
                 out.append(row)
         return out
 
-    def tools(self):
+    def tools(self, mode=None):
+        reg = self.registry.for_mode(mode) if mode else self.registry
         return [{"name": t.get("name"), "description": t.get("description"),
                  "definition": t.get("definition"), "session": t.get("session"),
                  "created": t.get("created"), "uses": t.get("uses", 0),
                  "tests": t.get("tests", []),
-                 "prompts": len(t.get("prompts", []))}
-                for t in self.registry.load()]
+                 "prompts": len(t.get("prompts", [])),
+                 "mode": t.get("mode") or "demo"}
+                for t in reg.load()]
