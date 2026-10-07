@@ -91,7 +91,7 @@
           <div class="th-card"><b>Tests gate every save</b><p>A tool enters the registry only after its tests pass in a fresh, sandboxed SBCL process. A wrong tool is rejected and repaired before anything can reuse it. In the live runs, this caught the model&rsquo;s own mistaken test expectations too.</p></div>
           <div class="th-card"><b>Every prompt has a control</b><p>Each prompt is also answered by a model with an <i>empty</i> registry. That is the baseline in every chart: measured tokens, measured answers, not an estimate.</p></div>
           <div class="th-card"><b>Known answers</b><p>The guided demo carries answers computed by hand (144, 50, 64, 30). A reused tool that drifted would show a red cross in the Prompt log.</p></div>
-          <div class="th-card"><b>Narrow execution</b><p>The &ldquo;call a saved tool&rdquo; box only evaluates calls of saved tools with plain data. There is no free-form Lisp input.</p></div>
+          <div class="th-card"><b>Narrow execution</b><p>You can type Lisp into the REPL box, but only a safe subset runs: your saved tools plus math, list and string functions, <code>lambda</code>, <code>let</code> and <code>if</code>. File, network, <code>eval</code> and <code>funcall</code> style access is rejected before anything executes, and the worker keeps its time and memory limits.</p></div>
         </div>
       </section>
 
@@ -134,7 +134,7 @@
           <li><b>Small samples.</b> Tiny functions, one run per prompt. Treat the percentages as a demonstration, not a benchmark.</li>
           <li><b>Same model on both sides.</b> The control uses the same model at temperature 0 with an empty registry; it isolates the effect of memory, not of a better model.</li>
           <li><b>Demo answers are hard-coded</b> for the guided prompts. Arbitrary Live prompts have tests but no independent ground truth.</li>
-          <li><b>The sandbox is process-level</b>, not a security boundary (see the adversarial report in the repo). Do not feed it untrusted prompts yet.</li>
+          <li><b>The sandbox is process-level</b>, not a security boundary (see the adversarial report in the repo). The typed REPL is allow-listed, but model-written tools still run in that worker, so do not feed it untrusted prompts yet.</li>
           <li><b>Reuse needs a good match.</b> A vague prompt (&ldquo;again&rdquo;, no data) gave the model nothing to call the tool with in early live runs; prompts with explicit inputs reused cleanly.</li>
         </ul>
       </section>
@@ -269,9 +269,9 @@
           <div id="ag-tools"><p class="muted ag-pad">No tools yet. Ask for something and the model will write one.</p></div>
           <div id="ag-detail" class="ag-detail" hidden></div>
           <div class="ag-try">
-            <label for="ag-call" class="ag-sub">Call a saved tool yourself <span class="muted">no model, 0 tokens</span></label>
+            <label for="ag-call" class="ag-sub">Type Lisp <span class="muted">safe subset: your saved tools plus math, lists, lambda, let, if. No model, 0 tokens.</span></label>
             <div class="ag-try-row">
-              <input id="ag-call" type="text" spellcheck="false" placeholder="(sum-of-squares '(1 2 3))" aria-label="Lisp call of a saved tool">
+              <input id="ag-call" type="text" spellcheck="false" placeholder="(mapcar #'square '(1 2 3))" aria-label="Lisp expression using your saved tools">
               <button id="ag-callbtn" class="ag-ghost">Run</button>
             </div>
             <div id="ag-call-ex" class="ag-callex"></div>

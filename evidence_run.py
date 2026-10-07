@@ -55,16 +55,27 @@ def one(prompt, expected, oracle, registry, logdir, arm="main", pair=None):
     return sess
 
 
+TEMPERATURE = 0.0
+HELD = 10
+
+
 def write(runs, partial, spent, label_runs):
+    sampled = TEMPERATURE > 0
+    temp_note = (
+        "Temperature %.1f, so runs genuinely differ: the ranges are real "
+        "run-to-run sampling variance." % TEMPERATURE if sampled else
+        "Temperature 0, so runs are near-identical: repetition shows stability, "
+        "not sampling variance.")
     snap = {
-        "label": "Repeated live runs (%d×, real tokens)" % label_runs,
+        "label": "Repeated live runs (%d×%s, real tokens)" % (
+            label_runs, ", T=%.1f" % TEMPERATURE if sampled else ""),
         "note": ("Cerebras Qwen 3.8 27B, %s: %d independent runs of the 7 guided "
-                 "prompts plus 10 held-out prompts (answers from independent "
+                 "prompts plus %d held-out prompts (answers from independent "
                  "Python). Every prompt, including the held-out ones, is also "
-                 "answered with an empty registry. Temperature 0, so runs are near-identical: repetition shows "
-                 "stability, not sampling variance. Measured spend $%.3f." % (time.strftime("%Y-%m-%d"),
-                                                    label_runs, spent)),
+                 "answered with an empty registry. %s Measured spend $%.3f."
+                 % (time.strftime("%Y-%m-%d"), label_runs, HELD, temp_note, spent)),
         "mode": "live", "estimated": False, "partial": partial,
+        "temperature": TEMPERATURE,
         "rows": runs[0]["rows"] if runs else [],
         "runs": runs,
     }
@@ -78,6 +89,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--cap", type=float, default=0.14, help="stop at this USD spend")
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="sampling temperature for ordinary calls (0 = near-identical runs; "
+                         "use 0.7 to measure real run-to-run variance)")
+    ap.add_argument("--held", type=int, default=10, help="held-out prompts per run (max 20)")
+    ap.add_argument("--out", default=None, help="output JSON name inside dashboard/evidence/")
     args = ap.parse_args(argv)
     if WORK.exists():
         shutil.rmtree(WORK)
@@ -88,7 +104,12 @@ def main(argv=None):
         return 2
     progress = open(WORK / "progress.log", "w", encoding="utf-8")
     spent, runs, stopped = 0.0, [], False
-    held = ag.heldout_tasks()
+    ag.BASE_TEMPERATURE = args.temperature
+    held = ag.heldout_tasks(args.held)
+    global OUT, TEMPERATURE, HELD
+    TEMPERATURE, HELD = args.temperature, args.held
+    if args.out:
+        OUT = ROOT / "dashboard" / "evidence" / args.out
     for r in range(1, args.runs + 1):
         logdir = WORK / ("run%d" % r)
         logdir.mkdir()

@@ -253,6 +253,7 @@ def live_status():
 
 
 _TEMP = threading.local()     # per-thread sampling temperature override
+BASE_TEMPERATURE = 0.0        # evidence_run --temperature sets this
 _RETRY_WAITS = (3, 8, 20)    # seconds between retries of transient API errors
 
 
@@ -283,7 +284,8 @@ def live_generate(system, user):
         raise RuntimeError("live mode unavailable: " + status["reason"])
     import cerebras_client
     deep = getattr(_TEMP, "deep", False)       # hard retries: let the model think
-    temp = getattr(_TEMP, "value", 0.0)
+    temp = getattr(_TEMP, "value", None)
+    temp = BASE_TEMPERATURE if temp is None else temp
     if not deep:
         return _with_retry(lambda: cerebras_client.generate(
             user, system=system, max_tokens=getattr(_TEMP, "max_tokens", 2200),
@@ -885,7 +887,7 @@ class Session:
         finally:
             _TEMP.notify = None
             if temperature is not None:
-                _TEMP.value = 0.0
+                _TEMP.value = None
                 _TEMP.deep = False
         self.cost_usd += res.get("cost_usd") or 0.0
         self.input_tokens += res.get("input_tokens") or 0
@@ -1538,7 +1540,7 @@ class Session:
         self.state = "failed"
 
 
-def heldout_tasks():
+def _heldout_all():
     """Prompts that are NOT in the guided demo, with answers computed by
     independent Python (not the model, not the demo script)."""
     import math
@@ -1592,7 +1594,86 @@ def heldout_tasks():
                    "in a list, then use it on (%s)" % " ".join(map(str, evens)),
          "expected": str(sum(v for v in evens if v % 2 == 0)),
          "oracle": "python: filtered sum"},
+    ] + _harder_heldout()
+
+
+def _harder_heldout():
+    """Ten more held-out prompts, every answer computed by independent Python."""
+    def is_prime(n):
+        return n > 1 and all(n % d for d in range(2, int(n ** 0.5) + 1))
+
+    def roman(n):
+        out = ""
+        for v, sym in ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"),
+                       (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"),
+                       (5, "V"), (4, "IV"), (1, "I")):
+            while n >= v:
+                out += sym
+                n -= v
+        return out
+
+    def fib(n):
+        a, b = 0, 1
+        for _ in range(n):
+            a, b = b, a + b
+        return a
+
+    import math
+    dedupe, seen = [], set()
+    for v in (3, 1, 3, 2, 1):
+        if v not in seen:
+            seen.add(v)
+            dedupe.append(v)
+    zeros = sum(100 // 5 ** k for k in range(1, 4))
+    med = sorted((7, 1, 5, 3, 9))[2]
+    return [
+        {"prompt": "write a function that counts the prime numbers up to n, then "
+                   "count them up to 50",
+         "expected": str(sum(is_prime(n) for n in range(2, 51))),
+         "oracle": "python: trial-division prime count"},
+        {"prompt": "write a function that converts a non-negative integer to a "
+                   "binary string, then convert 37",
+         "expected": '"%s"' % format(37, "b"),
+         "oracle": "python: format(n, 'b')"},
+        {"prompt": "write a function for the least common multiple of two "
+                   "numbers, then compute it for 12 and 18",
+         "expected": str(12 * 18 // math.gcd(12, 18)),
+         "oracle": "python: lcm via gcd"},
+        {"prompt": "write a function that converts an integer to a Roman "
+                   "numeral string, then convert 1994",
+         "expected": '"%s"' % roman(1994),
+         "oracle": "python: greedy roman numerals"},
+        {"prompt": "write a function that checks whether two words are "
+                   "anagrams, then check listen and silent",
+         "expected": "T" if sorted("listen") == sorted("silent") else "NIL",
+         "oracle": "python: sorted letters"},
+        {"prompt": "write a function for the sum of the first n square "
+                   "numbers, then compute it for n = 10",
+         "expected": str(sum(k * k for k in range(1, 11))),
+         "oracle": "python: sum of squares"},
+        {"prompt": "write a function that counts the trailing zeros of n "
+                   "factorial, then compute it for n = 100",
+         "expected": str(zeros),
+         "oracle": "python: Legendre formula"},
+        {"prompt": "write a function for the n-th Fibonacci number "
+                   "(0-indexed), then compute it for n = 15",
+         "expected": str(fib(15)),
+         "oracle": "python: iterative Fibonacci"},
+        {"prompt": "write a function that removes duplicates from a list "
+                   "keeping first occurrences, then use it on (3 1 3 2 1)",
+         "expected": "(%s)" % " ".join(map(str, dedupe)),
+         "oracle": "python: ordered dedupe"},
+        {"prompt": "write a function for the median of a list of an odd "
+                   "number of numbers, then use it on (7 1 5 3 9)",
+         "expected": str(med),
+         "oracle": "python: sorted()[len//2]"},
     ]
+
+
+def heldout_tasks(n=10):
+    """The first N held-out prompts (default 10, at most 20), oracle-checked."""
+    tasks = _heldout_all()
+    return tasks[:max(1, min(int(n), len(tasks)))]
 
 
 _CALL_OK_HEADS = {"quote", "list", "+", "-", "*", "/", "length", "reverse"}
@@ -1686,6 +1767,185 @@ def row_from_log(path):
         elif k == "done":
             row["state"] = ev.get("state")
     return row
+
+
+# --------------------------------------------------------------------------
+# Safe typed REPL: a strict allow-list over what a user may evaluate.
+# Not an OS sandbox: it narrows WHAT can run (pure data transformation plus the
+# saved tools); the worker's timeout and memory limits still bound HOW MUCH.
+# --------------------------------------------------------------------------
+_REPL_FUNCS = {
+    # numbers
+    "+", "-", "*", "/", "1+", "1-", "mod", "rem", "abs", "min", "max", "floor",
+    "ceiling", "round", "truncate", "sqrt", "isqrt", "expt", "exp", "log", "sin",
+    "cos", "tan", "gcd", "lcm", "evenp", "oddp", "zerop", "plusp", "minusp",
+    "numberp", "integerp", "rationalp", "float", "=", "/=", "<", ">", "<=", ">=",
+    "logand", "logior", "logxor", "ash",
+    # lists and sequences
+    "list", "cons", "car", "cdr", "cadr", "cddr", "caddr", "first", "second",
+    "third", "rest", "last", "nth", "nthcdr", "append", "reverse", "length",
+    "member", "assoc", "subseq", "remove", "remove-if", "remove-if-not",
+    "remove-duplicates", "mapcar", "mapc", "reduce", "count", "count-if", "find",
+    "find-if", "position", "position-if", "some", "every", "sort", "null",
+    "listp", "consp", "atom", "iota", "make-list", "copy-list", "butlast",
+    # strings and characters
+    "string=", "string<", "string>", "string-upcase", "string-downcase",
+    "char", "char-code", "code-char", "stringp", "concatenate", "string",
+    "princ-to-string", "prin1-to-string", "parse-integer", "char=", "upper-case-p",
+    "lower-case-p", "alpha-char-p", "digit-char-p",
+    # logic and comparison
+    "equal", "eql", "equalp", "not", "identity",
+}
+_REPL_SPECIAL = {"quote", "function", "lambda", "let", "let*", "if", "when",
+                 "unless", "cond", "and", "or", "progn", "dolist", "dotimes"}
+#: higher-order functions: which argument is the function designator
+_REPL_HOF = {"mapcar": 0, "mapc": 0, "reduce": 0, "remove-if": 0,
+             "remove-if-not": 0, "count-if": 0, "find-if": 0, "position-if": 0,
+             "some": 0, "every": 0, "sort": 1}
+_REPL_KEYWORDS = {":key", ":test", ":initial-value", ":from-end", ":start", ":end"}
+_REPL_VARS = {"t", "nil", "pi"}
+
+
+def safe_expr_check(text, tool_names):
+    """Return an error string if TEXT is outside the safe typed-REPL subset.
+
+    Allowed: numbers, strings, quoted data, the vocabulary above, lambda, LET,
+    IF/COND/AND/OR, DOLIST/DOTIMES and calls of saved tools. Everything that
+    does I/O, reads or evals, builds symbols, reaches into packages, or could
+    call a function by name is rejected, and a function passed to a
+    higher-order operation must be a LAMBDA or (FUNCTION allowed-name), never a
+    quoted symbol (``(mapcar 'run-program ...)`` would otherwise slip through).
+    """
+    if not isinstance(text, str) or not text.strip() or len(text) > 600:
+        return "type one Lisp expression (up to 600 characters)"
+    text = re.sub(r"#'([^\s()'#]+)", r"(function \1)", text)
+    if "#" in text or "|" in text or "\\" in text or "`" in text or "," in text:
+        return "reader syntax is not allowed here (#, |, backslash, backquote, comma)"
+    try:
+        form = s_expr.parse(text)
+    except s_expr.SExprError as exc:
+        return "could not parse: %s" % exc
+    funcs = _REPL_FUNCS | {n.lower() for n in tool_names}
+
+    def err(msg):
+        return msg
+
+    def designator(node):
+        if isinstance(node, list) and len(node) == 2 and isinstance(node[0], str) \
+                and node[0].lower() == "function" and isinstance(node[1], str):
+            return None if node[1].lower() in funcs else \
+                "function %s is not allowed" % node[1]
+        if isinstance(node, list) and node and isinstance(node[0], str) \
+                and node[0].lower() == "lambda":
+            return None
+        return ("pass a function as a lambda or #'name of an allowed function, "
+                "not a quoted symbol")
+
+    def walk(node, scope, depth):
+        if depth > 40:
+            return err("expression is nested too deeply")
+        if isinstance(node, bool) or isinstance(node, (int, float, s_expr.SString)):
+            return None
+        if isinstance(node, str):
+            low = node.lower()
+            if low.startswith(":"):
+                return None if low in _REPL_KEYWORDS else \
+                    "keyword %s is not allowed" % node
+            if ":" in low:
+                return "package-qualified symbols are not allowed (%s)" % node
+            if low in scope or low in _REPL_VARS:
+                return None
+            return "variable or function %s is not available" % node
+        if not isinstance(node, list):
+            return "unsupported value"
+        if not node:
+            return None
+        head = node[0]
+        if not isinstance(head, str) or isinstance(head, s_expr.SString):
+            return "the first element of a form must be a function name"
+        h = head.lower()
+        rest = node[1:]
+        if h == "quote":
+            return None if len(rest) == 1 else "quote takes one argument"
+        if h == "function":
+            return designator(node)
+        if h == "lambda":
+            if not rest or not isinstance(rest[0], list) or \
+                    not all(isinstance(p, str) and ":" not in p for p in rest[0]):
+                return "lambda needs a plain parameter list"
+            inner = scope | {p.lower() for p in rest[0]}
+            for body in rest[1:]:
+                bad = walk(body, inner, depth + 1)
+                if bad:
+                    return bad
+            return None
+        if h in ("let", "let*"):
+            if not rest or not isinstance(rest[0], list):
+                return "let needs a binding list"
+            inner = set(scope)
+            for b in rest[0]:
+                if isinstance(b, str):
+                    inner.add(b.lower())
+                    continue
+                if not (isinstance(b, list) and len(b) == 2 and isinstance(b[0], str)):
+                    return "let bindings must look like (name value)"
+                bad = walk(b[1], inner if h == "let*" else scope, depth + 1)
+                if bad:
+                    return bad
+                inner.add(b[0].lower())
+            for body in rest[1:]:
+                bad = walk(body, inner, depth + 1)
+                if bad:
+                    return bad
+            return None
+        if h in ("dolist", "dotimes"):
+            if not rest or not isinstance(rest[0], list) or len(rest[0]) < 2 \
+                    or not isinstance(rest[0][0], str):
+                return "%s needs (var form)" % h
+            bad = walk(rest[0][1], scope, depth + 1)
+            if bad:
+                return bad
+            inner = scope | {rest[0][0].lower()}
+            for body in rest[0][2:] + rest[1:]:
+                bad = walk(body, inner, depth + 1)
+                if bad:
+                    return bad
+            return None
+        if h == "cond":
+            for clause in rest:
+                if not isinstance(clause, list):
+                    return "cond clauses must be lists"
+                for part in clause:
+                    if isinstance(part, str) and part.lower() == "t":
+                        continue
+                    bad = walk(part, scope, depth + 1)
+                    if bad:
+                        return bad
+            return None
+        if h in _REPL_SPECIAL:                # if when unless and or progn
+            for part in rest:
+                bad = walk(part, scope, depth + 1)
+                if bad:
+                    return bad
+            return None
+        if h not in funcs:
+            return "function %s is not allowed in the typed REPL" % head
+        hof = _REPL_HOF.get(h)
+        for i, part in enumerate(rest):
+            if hof is not None and i == hof:
+                bad = designator(part)
+                if bad is None and isinstance(part, list) and part and \
+                        part[0].lower() == "lambda":
+                    bad = walk(part, scope, depth + 1)
+                if bad:
+                    return bad
+                continue
+            bad = walk(part, scope, depth + 1)
+            if bad:
+                return bad
+        return None
+
+    return walk(form, set(), 0)
 
 
 class SessionManager:
@@ -1801,10 +2061,11 @@ class SessionManager:
         reg = self.registry.for_mode(mode) if mode else self.registry
         names = {t["name"] for t in reg.load()}
         text = quote_literals(text) if isinstance(text, str) else text
-        problem = safe_call_check(text, names)
+        problem = safe_expr_check(text, names)
         if problem:
             return {"ok": False, "error": problem, "tokens": 0}
         prelude = reg.prelude()
+        text = re.sub(r"#'([^\s()'#]+)", r"(function \1)", text)
         env = _worker_fn("%s\n%s" % (prelude, text))
         return {"ok": bool(env.get("ok")), "value": env.get("return_value"),
                 "error": (env.get("error") or "")[:300],

@@ -502,6 +502,64 @@ class FailedRunReplayTests(unittest.TestCase):
             self.assertEqual(summ["efficiency"]["failed_attempts"], 0)
 
 
+class SafeReplTests(unittest.TestCase):
+    TOOLS = {"square", "sum-of-squares"}
+
+    def test_useful_expressions_are_allowed(self):
+        for text in ("(square 7)", "(mapcar #'square '(1 2 3))",
+                     "(reduce #'+ (mapcar (lambda (x) (* x x)) '(1 2 3)))",
+                     "(let ((a 3)) (* a a))", "(sort (list 3 1 2) #'<)",
+                     "(remove-if-not #'evenp '(1 2 3 4))",
+                     "(dolist (x '(1 2)) (* x x))", '(if (> 2 1) "yes" "no")',
+                     '(reverse "abc")', "(cond ((> 1 2) 1) (t 2))"):
+            self.assertIsNone(ag.safe_expr_check(text, self.TOOLS), text)
+
+    def test_dangerous_expressions_are_rejected(self):
+        for text in ('(run-program "cmd" nil)', "(funcall 'print 1)",
+                     "(mapcar 'run-program '(1))", "(eval '(+ 1 2))",
+                     '(open "x")', "(read)", '(intern "X")', "(load \"x\")",
+                     "(sb-ext:run-program 1)", "(symbol-function 'car)",
+                     "#.(+ 1 2)", '(let ((a (open "x"))) a)',
+                     "((lambda () 1))", "(apply #'+ '(1 2))",
+                     '(format t "~/sb-ext:run-program/" 1)',
+                     "(mapcar #'run-program '(1))", "(setq x 1)", "(+ 1 y)",
+                     "(sort (list 2 1) 'run-program)", "", "(" + "(" * 60 + ")" * 61):
+            self.assertIsNotNone(ag.safe_expr_check(text, self.TOOLS), text)
+
+    def test_typed_repl_runs_real_lisp_with_saved_tools_for_zero_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = ag.ToolRegistry(Path(tmp) / "t.json")
+            reg.add({"name": "square", "description": "d",
+                     "definition": "(defun square (x) (* x x))"})
+            mgr = ag.SessionManager(reg)
+            out = mgr.call_tool("(reduce #'+ (mapcar #'square '(1 2 3)))")
+            self.assertTrue(out["ok"], out)
+            self.assertEqual(out["value"], "14")
+            self.assertEqual(out["tokens"], 0)
+            self.assertEqual(mgr.call_tool("(mapcar (lambda (x) (+ x 1)) '(1 2))")["value"], "(2 3)")
+            self.assertFalse(mgr.call_tool('(open "x")')["ok"])
+            self.assertFalse(mgr.call_tool("(mapcar 'print '(1))")["ok"])
+
+
+class HeldoutSetTests(unittest.TestCase):
+    def test_twenty_prompts_with_independent_answers(self):
+        tasks = ag.heldout_tasks(20)
+        self.assertEqual(len(tasks), 20)
+        self.assertEqual(len({t["prompt"] for t in tasks}), 20)          # all distinct
+        self.assertEqual([t["expected"] for t in tasks[10:]],
+                         ["15", '"100101"', "36", '"MCMXCIV"', "T", "385",
+                          "24", "610", "(3 1 2)", "5"])
+        self.assertTrue(all(t["oracle"].startswith("python") for t in tasks))
+        self.assertEqual(len(ag.heldout_tasks()), 10)                    # default unchanged
+        self.assertEqual(len(ag.heldout_tasks(99)), 20)                  # clamped
+        demo_prompts = {"write a function that squares a number, then square 12"}
+        self.assertFalse(demo_prompts & {t["prompt"] for t in tasks})
+
+    def test_base_temperature_is_used_unless_a_retry_overrides_it(self):
+        self.assertEqual(ag.BASE_TEMPERATURE, 0.0)
+        self.assertIsNone(getattr(ag._TEMP, "value", None))
+
+
 class SummaryTests(unittest.TestCase):
     def test_planned_build_ends_with_a_success_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

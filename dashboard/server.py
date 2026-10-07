@@ -431,7 +431,12 @@ def dispatch(method, path, body, ctx):
             return 200, {"snapshots": agent.snapshots()}
         if method == "GET" and sub == "heldout":
             import agent_session
-            return 200, {"tasks": agent_session.heldout_tasks()}
+            qs = parse_qs(urlparse(path).query)
+            try:
+                n = int((qs.get("n") or ["10"])[0])
+            except ValueError:
+                n = 10
+            return 200, {"tasks": agent_session.heldout_tasks(n)}
         if method == "POST" and sub == "pin":
             try:
                 payload = json.loads(body.decode("utf-8") if body else "{}")

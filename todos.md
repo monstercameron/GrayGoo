@@ -332,7 +332,10 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] Reference oracles beyond hashes (parsers, date math, number formatting) so more exact vectors can be machine-checked
   - [ ] Promote validated sub-facts (e.g. FNV offset basis and prime) into reusable knowledge instead of rediscovering them per run
   - [ ] Semantic task check: a "hash-password" request that yields a fast non-cryptographic hash should be flagged as unsafe for password storage
-  - [ ] Typed-Lisp REPL input (needs a real sandbox; see Harden worker sandbox above)
+  - [x] Typed Lisp REPL box: strict allow-list evaluator (saved tools, math, lists, lambda, let, if); I/O, eval, funcall, quoted-symbol function tricks and reader syntax are rejected before running
+  - [x] 20 held-out prompts with independent Python oracles (10 harder); `evidence_run.py --temperature 0.7 --held 20` measures variance
+  - [ ] Run the 20-prompt, sampled-temperature evidence live (needs a live-spend approval) and ship it in `dashboard/evidence/`
+  - [ ] OS-level worker sandbox (job object / jail) so the typed REPL could be widened beyond the allow-list
   - [ ] Larger held-out set and confidence intervals (current: 10 prompts, a few runs)
   - [ ] Persistent REPL image instead of one SBCL process per eval
 
