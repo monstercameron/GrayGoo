@@ -625,6 +625,41 @@ class LessonRegistry:
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [lesson for _, _, lesson in scored[:limit]]
 
+    def record_usage(self, lesson_id, success=None):
+        """Record one retrieval; *success* True/False/None updates counters.
+
+        Mirrors :meth:`LessonStore.record_usage` for the in-memory
+        registry (issues.md #89: per-task lesson outcomes in the
+        lesson-key experiment).
+        """
+        lesson = self._lessons.get(lesson_id)
+        if lesson is None:
+            raise KeyError("unknown lesson id %r" % lesson_id)
+        lesson["usage"]["retrievals"] += 1
+        if success is True:
+            lesson["usage"]["successes"] += 1
+        elif success is False:
+            lesson["usage"]["failures"] += 1
+        return lesson["usage"]
+
+    def record_counterexample(self, lesson_id, task_id, note):
+        """Append {"task_id", "note} to a registered lesson (memory.md 17).
+
+        Mirrors :meth:`LessonStore.record_counterexample` for the
+        in-memory registry (issues.md #89).
+        """
+        lesson = self._lessons.get(lesson_id)
+        if lesson is None:
+            raise KeyError("unknown lesson id %r" % lesson_id)
+        if not task_id or not isinstance(task_id, str):
+            raise ValueError("task_id must be a non-empty string, got %r"
+                             % (task_id,))
+        if not note or not isinstance(note, str):
+            raise ValueError("note must be a non-empty string, got %r"
+                             % (note,))
+        lesson["counterexamples"].append({"task_id": task_id, "note": note})
+        return lesson["counterexamples"]
+
 
 #: Factor applied by :func:`decay_confidence` when the runtime or model
 #: version differs from the lesson's last-validated versions.
@@ -802,3 +837,42 @@ def refine_or_deprecate(lesson):
         when_not = when_not.rstrip() + not_suffix
     lesson["applies_when"] = {"when": when, "when_not": when_not}
     return lesson
+
+
+def precision(source):
+    """Aggregate retrieval precision over lesson usage (issues.md #97).
+
+    *source* is a :class:`LessonStore`, :class:`LessonRegistry`, or an
+    iterable of lesson dicts. Returns ``{"retrievals", "successes",
+    "failures", "precision", "per_lesson"}`` where ``precision`` is
+    successes/retrievals rounded to 4 decimals, or None when nothing
+    was ever retrieved. ``per_lesson`` maps lesson id to its own
+    (retrievals, successes, precision-or-None) triple. Lessons without
+    a ``usage`` dict count as never retrieved.
+    """
+    if isinstance(source, (LessonStore, LessonRegistry)):
+        items = list(source)
+    else:
+        items = list(source)
+    total_r = total_s = total_f = 0
+    per_lesson = {}
+    for lesson in items:
+        usage = lesson.get("usage") or {}
+        got = int(usage.get("retrievals", 0) or 0)
+        won = int(usage.get("successes", 0) or 0)
+        lost = int(usage.get("failures", 0) or 0)
+        total_r += got
+        total_s += won
+        total_f += lost
+        per_lesson[lesson.get("id", "?")] = {
+            "retrievals": got,
+            "successes": won,
+            "precision": (round(won / got, 4) if got else None),
+        }
+    return {
+        "retrievals": total_r,
+        "successes": total_s,
+        "failures": total_f,
+        "precision": (round(total_s / total_r, 4) if total_r else None),
+        "per_lesson": per_lesson,
+    }

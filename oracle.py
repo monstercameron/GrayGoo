@@ -9,7 +9,8 @@ Pure Python: no model calls and no SBCL, so every rule here is unit-testable.
   (``high`` = boolean/property or hand-computable, ``low`` = a number or hex
   string no model can compute by hand).
 * Failure classes: ``COMPILER_ERROR``, ``RUNTIME_ERROR``, ``IMPLEMENTATION_WRONG``,
-  ``TEST_WRONG``, ``AMBIGUOUS``, ``SPEC_INCONSISTENT``, ``REPEATED_CANDIDATE``.
+  ``TEST_WRONG``, ``TEST_CALL_INVALID``, ``AMBIGUOUS``, ``SPEC_INCONSISTENT``,
+  ``REPEATED_CANDIDATE``.
 * Lessons: recurring Lisp slips are counted on disk and fed back into prompts.
 """
 
@@ -123,15 +124,98 @@ def is_compile_error(text):
     return bool(_COMPILE.search(text or ""))
 
 
-def failure_class(infos, drift=None):
+def _norm_lisp(text):
+    """Comparable form of Lisp text: case, whitespace, quotes and NIL/() unified.
+
+    SBCL prints ``()`` as ``NIL`` and upper-cases symbols, so both sides are
+    reduced to lower case with ``()`` as the only empty-list spelling.
+    """
+    s = (text or "").lower().replace("'", "")
+    s = re.sub(r"\(\s*\)", " nil ", s)
+    s = re.sub(r"(?<![\w*+%<>=/!?.&:-])nil(?![\w*+%<>=/!?.&:-])", "()", s)
+    return re.sub(r"\s+", "", s)
+
+
+def _has_word(word, text):
+    """Whole-symbol match of WORD in TEXT (``insert`` is not in ``db-insert``)."""
+    rx = r"(?<![\w*+%<>=/!?.&-])" + re.escape(word) + r"(?![\w*+%<>=/!?.&-])"
+    return bool(re.search(rx, text or "", re.I))
+
+
+_FORM = re.compile(r"Form:\s*(.+?)(?=\s+(?:Compile-time|Compilation|Execution|"
+                   r"--- backtrace|Source form)|\Z)", re.I | re.S)
+_UNDEF = re.compile(r"\bthe variable (\S+) is unbound|"
+                    r"undefined (?:variable|function):?\s+(\S+)|"
+                    r"\bthe function (\S+) is undefined", re.I)
+_BAD_HEAD = re.compile(r"\((\(|\"|[-+]?\d)")
+
+
+_NOT_LIST = re.compile(r"the value\s+(\"(?:[^\"\\]|\\.)*\"|[^\s]+)\s+is not of type\s+list", re.I)
+
+
+def is_flat_data_error(info, calls=()):
+    """True when a test passed FLAT data where the other tests pass NESTED data.
+
+    The error is ``The value "users" is not of type LIST`` and that very value
+    is the first element of a quoted argument in this call, written
+    ``'("users" ...)``, while another test of the same tool writes its data as
+    ``'((...``. The code expects a list of records and this one test dropped a
+    level of parentheses.
+    """
+    m = _NOT_LIST.search(info.get("error") or "")
+    call = info.get("call") or ""
+    if not m or not call or m.group(1).startswith(":"):
+        return False
+    flat = re.search(r"'\(\s*" + re.escape(m.group(1)) + r"(?![^\s()])", call, re.I)
+    nested_elsewhere = any(re.search(r"'\(\s*\(", c) for c in calls if c != call)
+    return bool(flat) and nested_elsewhere
+
+
+def is_test_call_error(info, definition=""):
+    """True when this failed test's error comes from its CALL, not the definition.
+
+    Three signals, each only when the offending text is absent from the
+    definition: SBCL's ``Form:`` (normalised) appears inside the call; an
+    ``illegal function call`` on a form whose head is a string, number or list;
+    or an undefined variable/function named in the error that the call uses.
+    """
+    err = info.get("error") or ""
+    call = info.get("call") or ""
+    if not err or not call:
+        return False
+    defn_n = _norm_lisp(definition)
+    m = _FORM.search(err)
+    if m:
+        form_n = _norm_lisp(m.group(1))
+        if form_n and form_n not in defn_n:
+            if form_n in _norm_lisp(call):
+                return True
+            if re.search(r"illegal function call", err, re.I) and \
+                    _BAD_HEAD.match(form_n):
+                return True
+    u = _UNDEF.search(err)
+    if u:
+        name = (u.group(1) or u.group(2) or u.group(3)).rstrip(".,;").split(":")[-1].lower()
+        if name and _has_word(name, call) and not _has_word(name, definition):
+            return True
+    return False
+
+
+def failure_class(infos, drift=None, definition=None, calls=()):
     """Classify one failed rehearsal.
 
-    INFOS: one dict per failing test with ``error`` (str), ``got`` (str|None)
-    and ``confidence``. DRIFT: calls whose expected value changed between
-    attempts in this session.
+    INFOS: one dict per failing test with ``error`` (str), ``got`` (str|None),
+    ``call`` (str) and ``confidence``. DRIFT: calls whose expected value changed
+    between attempts in this session. DEFINITION: the code under test, used to
+    tell a broken test call from a broken definition.
     """
     if drift:
         return "AMBIGUOUS"
+    if any(is_test_call_error(i, definition or "") for i in infos):
+        return "TEST_CALL_INVALID"
+    # only when every failure is this slip: a real bug elsewhere outranks it
+    if infos and all(is_flat_data_error(i, calls or ()) for i in infos):
+        return "TEST_CALL_INVALID"
     if any(is_compile_error(i.get("error")) for i in infos):
         return "COMPILER_ERROR"
     wrong_value = [i for i in infos if i.get("got") is not None]
@@ -150,6 +234,8 @@ CLASS_LABELS = {
     "AMBIGUOUS": "the expected values keep changing between attempts",
     "SPEC_INCONSISTENT": "the tests contradict each other or an earlier verified value",
     "REPEATED_CANDIDATE": "the new code is identical to an earlier failed attempt",
+    "TEST_CALL_INVALID": "a test call is not valid Lisp (the definition itself is fine)",
+    "REGRESSION": "the change breaks a tool that was already working",
 }
 
 
@@ -177,21 +263,84 @@ HINTS = (
      "SETF takes flat place/value pairs: (setf a 1 b 2). Do not wrap a later "
      "pair in parentheses like (setf a 1 (b 2)); write separate SETF forms or "
      "one flat SETF."),
-    ("undefined-function", r"undefined function",
-     "A function is undefined: define helpers before use or inline them."),
+    ("undefined-function", r"undefined function|the function (?!:)\S+ is undefined",
+     "A function is undefined. If its name is one of your own LET/LET* "
+     "variables, the binding list was closed one paren too early, so the next "
+     "binding (name value) was read as a call: all bindings go inside ONE "
+     "list, (let* ((a 1) (b 2)) body). Otherwise define the helper before use "
+     "or inline it."),
+    ("keyword-call", r"the function :\S+ is undefined",
+     "A plist was written as code: (:output text) calls a function named "
+     "OUTPUT. Build a plist with (list :output text :state state), never "
+     "(:output text); a keyword is data, not a function."),
+    ("key-arg", r"unknown &key argument",
+     "A function was given a keyword it does not accept. STRING=, STRING-EQUAL, "
+     "CHAR= and EQUAL take NO :TEST; :TEST belongs to ASSOC, FIND, MEMBER, "
+     "REMOVE, POSITION and COUNT, e.g. (assoc key table :test #'string=)."),
+    ("plist-as-alist", r"the value :\S+ is not of type\s+list",
+     "A KEYWORD was used as a list: the code called ASSOC (or CAR/FIRST) on a "
+     "plist. A plist such as the REQUEST is read with (getf plist :key), or "
+     "with the kit tools (cookie-value request \"sid\"), (form-value request "
+     "\"title\"), (request-field request :path). Never ASSOC a plist."),
+    ("string-of-strings", r"is not of type character when setting an element",
+     "CONCATENATE 'STRING was given a LIST of strings as one argument, so it "
+     "tried to store whole strings as characters. Join a list of strings with "
+     "(apply #'concatenate 'string list-of-strings) or "
+     "(format nil \"~{~a~}\" list-of-strings); pass separate strings as "
+     "separate arguments."),
+    ("paren-balance", r"unbalanced delimiter|unterminated '\('|unexpected '\)'",
+     "The parentheses of the definition do not balance. Keep the function "
+     "short, close every LET binding list before the body, and count: each "
+     "opening parenthesis needs exactly one closing one."),
+    ("one-form", r"trailing content after first s-expression|expected a single form",
+     "A tool is exactly ONE defun. Do not send a helper defun next to it: make "
+     "the helper its own tool first, or define it inside with FLET or LABELS."),
+    ("constant-name", r"names a defined constant",
+     "T and NIL are constants and cannot be variable or parameter names. "
+     "Rename the variable: (lambda (task) ...) or (lambda (item) ...), never "
+     "(lambda (t) ...)."),
+    ("loop-collect", r"function \S*collect is undefined",
+     "COLLECT is a LOOP keyword, not a function: write (loop for x in xs "
+     "collect (f x)), never (collect ...) inside DO. To join strings with a "
+     "separator use (format nil \"~{~a~^~%~}\" list)."),
     ("arity", r"invalid number of arguments",
      "Wrong number of arguments: check the lambda list against how the test "
      "calls it."),
     ("not-list", r"is not of type\s+list|the value\s+\S+\s+is not of type\s+list",
      "A value was used as a list but is not one. Vectors, points and records "
-     "are plain quoted lists like '(0 0 1); do not use #( ) arrays."),
+     "are plain quoted lists like '(0 0 1); do not use #( ) arrays. If the "
+     "error names a piece of your TEST data, the data has the wrong nesting: "
+     "copy the argument shape from the e.g. call of the REGISTRY tool that "
+     "receives it (a table list is '((\"name\" (rows...))), with two opening "
+     "parentheses)."),
 )
+
+
+_GOT = re.compile(r"got (.+?), expected (.+?)(?:;|$)", re.S)
+WRAPPED = ("extra-nesting",
+           "The result has one level of parentheses too many (or too few). In a "
+           "(key value) pair the value is (SECOND pair) or (CADR pair); (CDR pair) "
+           "is the LIST (value). A table is (name rows): its rows are "
+           "(second table), and (table-rows state name) returns them directly.")
+
+
+def _one_level_off(detail):
+    """True when a mismatch differs only by one wrapping pair of parentheses."""
+    norm = lambda x: re.sub(r"\s+", " ", x.strip()).lower().replace("nil", "()")
+    for got, want in _GOT.findall(detail or ""):
+        g, w = norm(got), norm(want)
+        if g == "(%s)" % w or w == "(%s)" % g:
+            return True
+    return False
 
 
 def lisp_hints(detail):
     """``[(key, advice)]`` for the common Lisp slips visible in DETAIL."""
     d = detail or ""
-    return [(k, adv) for k, rx, adv in HINTS if re.search(rx, d, re.I)]
+    found = [(k, adv) for k, rx, adv in HINTS if re.search(rx, d, re.I)]
+    if _one_level_off(d):
+        found.append(WRAPPED)
+    return found
 
 
 class LessonStore:
@@ -233,16 +382,176 @@ class LessonStore:
     def counts(self):
         return self._read()
 
-    def advice(self, min_count=2, limit=4):
-        """Advice text for slips that have recurred, most frequent first."""
-        data = self._read()
-        known = {k: adv for k, _, adv in HINTS}
-        top = sorted(((n, k) for k, n in data.items()
-                      if n >= min_count and k in known), reverse=True)[:limit]
-        if not top:
+    # -- detail ledger ---------------------------------------------------
+    # ``lessons.json`` keeps the plain counts. The ledger beside it records what
+    # the counts cannot: where a slip happens, whether warning about it works,
+    # which errors have no lesson yet, and what the harness had to fix itself.
+    def _detail_path(self):
+        return self.path.with_name(self.path.stem + ".detail.json") if self.path else None
+
+    def _read_detail(self):
+        blank = {"lessons": {}, "signatures": {}, "fixes": {}, "harness": {}}
+        if self.path is None:
+            return json.loads(json.dumps(getattr(self, "_detail_mem", blank)))
+        try:
+            data = json.loads(self._detail_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return blank
+        if not isinstance(data, dict):
+            return blank
+        for k, v in blank.items():
+            if not isinstance(data.get(k), dict):
+                data[k] = v
+        return data
+
+    def _write_detail(self, data):
+        if self.path is None:
+            self._detail_mem = data
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._detail_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        tmp.replace(self._detail_path())
+
+    @staticmethod
+    def _entry(detail, key):
+        return detail["lessons"].setdefault(
+            key, {"projects": {}, "shown": 0, "recurred": 0})
+
+    def record(self, keys, signature="", detail="", project=None, warned=()):
+        """One failed attempt.
+
+        KEYS are the known slips in it (they are counted, per project too).
+        A slip that was WARNED about earlier in the same run counts as a
+        recurrence, which is how we learn that a warning does not work. A
+        failure with no known slip is remembered by SIGNATURE so that errors
+        nobody has written a lesson for become visible once they repeat.
+        """
+        keys = [k for k in dict.fromkeys(keys) if k]
+        self.note(keys)
+        with self._lock:
+            data = self._read_detail()
+            for k in keys:
+                entry = self._entry(data, k)
+                if project:
+                    entry["projects"][project] = entry["projects"].get(project, 0) + 1
+                if k in warned:
+                    entry["recurred"] += 1
+            if not keys and signature:
+                sig = data["signatures"].setdefault(
+                    signature, {"count": 0, "example": "", "projects": {}})
+                sig["count"] += 1
+                sig["example"] = (detail or sig["example"])[:300]
+                if project:
+                    sig["projects"][project] = sig["projects"].get(project, 0) + 1
+            self._write_detail(data)
+
+    def mark_shown(self, keys):
+        """KEYS were put in front of the model (call once per run per key)."""
+        keys = [k for k in dict.fromkeys(keys) if k]
+        if not keys:
+            return
+        with self._lock:
+            data = self._read_detail()
+            for k in keys:
+                self._entry(data, k)["shown"] += 1
+            self._write_detail(data)
+
+    def record_fixes(self, names):
+        """The harness silently repaired these model slips."""
+        self._bump("fixes", names)
+
+    def record_harness(self, event):
+        """A harness-level event worth counting (bad JSON, repeated code, ...)."""
+        self._bump("harness", [event])
+
+    def _bump(self, section, names):
+        names = [n for n in names if n]
+        if not names:
+            return
+        with self._lock:
+            data = self._read_detail()
+            for n in names:
+                data[section][n] = data[section].get(n, 0) + 1
+            self._write_detail(data)
+
+    def ineffective(self, min_shown=4, rate=0.5):
+        """Lessons that keep recurring in runs where they were already shown."""
+        lessons = self._read_detail()["lessons"]
+        return sorted(k for k, e in lessons.items()
+                      if e["shown"] >= min_shown and e["recurred"] >= rate * e["shown"])
+
+    def unhandled(self, min_count=3):
+        """Repeated failures that match no lesson: ``[(signature, count, example)]``."""
+        sigs = self._read_detail()["signatures"]
+        return sorted(((s, e["count"], e["example"]) for s, e in sigs.items()
+                       if e["count"] >= min_count), key=lambda r: -r[1])
+
+    def select(self, project=None, session_keys=(), min_count=2, limit=2):
+        """Which lessons to show now, most relevant first.
+
+        Slips already made in THIS run come first, then the ones most frequent
+        in this project, then the globally frequent ones.
+        """
+        counts = self._read()
+        detail = self._read_detail()["lessons"]
+        known = {k for k, _, _ in HINTS} | {WRAPPED[0]}
+        session = [k for k in dict.fromkeys(session_keys) if k in known]
+
+        def rank(k):
+            return (-(detail.get(k, {}).get("projects", {}).get(project, 0) if project else 0),
+                    -int(counts.get(k, 0)), k)
+        rest = sorted((k for k, n in counts.items()
+                       if k in known and k not in session and int(n) >= min_count), key=rank)
+        return (session + rest)[:max(limit, len(session[:limit]))][:limit]
+
+    def advice(self, min_count=2, limit=4, brief=False, project=None, session_keys=()):
+        """Advice text for the selected lessons.
+
+        ``brief`` keeps the first sentence of each lesson, except for lessons
+        this run already tripped over and lessons known to be ineffective when
+        brief: those are given in full, because the short form did not work.
+        """
+        keys = self.select(project, session_keys, min_count, limit)
+        if not keys:
             return ""
-        return ("RECURRING SLIPS TO AVOID (seen in earlier runs): "
-                + " ".join(known[k] for _, k in top))
+        known = dict({k: adv for k, _, adv in HINTS}, **{WRAPPED[0]: WRAPPED[1]})
+        weak = set(self.ineffective())
+        again = [k for k in keys if k in session_keys]
+        other = [k for k in keys if k not in session_keys]
+
+        def text(k):
+            if not brief or k in weak or k in again:
+                return known[k]
+            first = re.split(r"(?<=[.:])\s", known[k], 1)[0]
+            return first if first.endswith(".") else first.rstrip(":") + "."
+        parts = []
+        if again:
+            parts.append("YOU ALREADY MADE THESE MISTAKES IN THIS RUN - do not repeat "
+                         "them: " + " ".join(text(k) for k in again))
+        if other:
+            parts.append("RECURRING SLIPS TO AVOID (seen in earlier runs): "
+                         + " ".join(text(k) for k in other))
+        return "\n".join(parts)
+
+    def report(self):
+        """Everything the layer has learned, for a person deciding what to fix."""
+        counts = self._read()
+        detail = self._read_detail()
+        lessons = []
+        for k, n in sorted(counts.items(), key=lambda kv: -int(kv[1])):
+            e = detail["lessons"].get(k, {})
+            shown = e.get("shown", 0)
+            lessons.append({"lesson": k, "count": int(n), "shown_in_runs": shown,
+                            "recurred_after_shown": e.get("recurred", 0),
+                            "recurrence_rate": round(e.get("recurred", 0) / shown, 2)
+                            if shown else None,
+                            "projects": e.get("projects", {})})
+        return {"lessons": lessons, "ineffective": self.ineffective(),
+                "unhandled_errors": [{"signature": s, "count": c, "example": x}
+                                     for s, c, x in self.unhandled()],
+                "harness_fixes": dict(sorted(detail["fixes"].items(), key=lambda kv: -kv[1])),
+                "harness_events": dict(sorted(detail["harness"].items(), key=lambda kv: -kv[1]))}
 
 
 # --------------------------------------------------------------- postmortem

@@ -275,5 +275,54 @@ class RetrievalTest(unittest.TestCase):
             lessons.MAX_LESSONS_PER_CALL)
 
 
+class RegistryOutcomeTest(unittest.TestCase):
+    """Registry usage/counterexample recording + precision (issues #89/#97)."""
+
+    def _registry(self):
+        return lessons.LessonRegistry(
+            lessons=lessons.seed_10_20()[:2])
+
+    def test_registry_record_usage_mirrors_store(self):
+        registry = self._registry()
+        registry.record_usage("csv-field-escaping-first", success=True)
+        registry.record_usage("csv-field-escaping-first", success=False)
+        usage = registry.get("csv-field-escaping-first")["usage"]
+        self.assertEqual(
+            usage, {"retrievals": 2, "successes": 1, "failures": 1})
+        with self.assertRaises(KeyError):
+            registry.record_usage("missing", success=True)
+
+    def test_registry_record_counterexample(self):
+        registry = self._registry()
+        out = registry.record_counterexample(
+            "csv-field-escaping-first", "A-TRN-01", "injected, still failed")
+        self.assertEqual(out, [{"task_id": "A-TRN-01",
+                                "note": "injected, still failed"}])
+        with self.assertRaises(KeyError):
+            registry.record_counterexample("missing", "t", "n")
+
+    def test_precision_aggregates_usage(self):
+        registry = self._registry()
+        self.assertIsNone(lessons.precision(registry)["precision"])
+        registry.record_usage("csv-field-escaping-first", success=True)
+        registry.record_usage("csv-field-escaping-first", success=False)
+        got = lessons.precision(registry)
+        self.assertEqual(got["retrievals"], 2)
+        self.assertEqual(got["successes"], 1)
+        self.assertEqual(got["failures"], 1)
+        self.assertEqual(got["precision"], 0.5)
+        self.assertEqual(
+            got["per_lesson"]["csv-field-escaping-first"]["precision"], 0.5)
+
+    def test_precision_accepts_lesson_dicts(self):
+        got = lessons.precision([
+            {"id": "a", "usage": {"retrievals": 4, "successes": 3,
+                                 "failures": 1}},
+            {"id": "b"},  # no usage: never retrieved, still listed
+        ])
+        self.assertEqual(got["precision"], 0.75)
+        self.assertIsNone(got["per_lesson"]["b"]["precision"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -560,6 +560,46 @@ class HeldoutSetTests(unittest.TestCase):
         self.assertIsNone(getattr(ag._TEMP, "value", None))
 
 
+class GroundedCallTests(unittest.TestCase):
+    def _reg(self, tmp):
+        reg = ag.ToolRegistry(Path(tmp) / "t.json")
+        reg.add({"name": "trace-ray", "description": "color of a ray",
+                 "definition": "(defun trace-ray (o d spheres) (length spheres))",
+                 "tests": [{"call": "(trace-ray '(0 0 -5) '(0 0 1) '(((0 0 0) 1 (1 1 1))))",
+                            "expect": "1"}]})
+        return reg
+
+    def test_registry_lines_show_a_passing_call_for_argument_shapes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            line = ag.tool_line(self._reg(tmp).load()[0])
+            self.assertIn("e.g. (trace-ray '(0 0 -5) '(0 0 1) '(((0 0 0) 1 (1 1 1))))", line)
+            self.assertIn("=> 1", line)
+
+    def test_failed_final_call_is_repaired_using_the_tools_passing_calls(self):
+        prompts = []
+        replies = iter([
+            {"action": "use", "call": "(trace-ray '(0 0 -5) '(0 0 1) '((0 0 0 1)))"},   # wrong shape
+            {"action": "use", "call": "(trace-ray '(0 0 -5) '(0 0 1) '(((0 0 0) 1 (1 1 1))))"},
+        ])
+
+        def worker(code):
+            bad = "'((0 0 0 1))" in code
+            return {"ok": not bad, "stdout": "", "return_value": "" if bad else "1",
+                    "error": "The value 0 is not of type LIST" if bad else "",
+                    "timed_out": False, "elapsed_ms": 1.0}
+
+        def gen(system, user):
+            prompts.append(user)
+            return ag._fake(next(replies))
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = ag.Session("render it", gen, registry=self._reg(tmp),
+                              worker_fn=worker, log_path=Path(tmp) / "l.jsonl")
+            sess.run()
+            self.assertEqual(sess.state, "done", sess.events)
+            self.assertIn("PASSED their tests", prompts[1])
+            self.assertIn("(((0 0 0) 1 (1 1 1)))", prompts[1])
+
+
 class SummaryTests(unittest.TestCase):
     def test_planned_build_ends_with_a_success_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

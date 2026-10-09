@@ -110,7 +110,7 @@
       <section class="card wide">
         <h2>How to read the Agent tab</h2>
         <ol class="th-list">
-          <li><b>The proof panel</b> at the top: three headline numbers, then one pair of bars per prompt. Red dashed = no memory, coloured = with the learned tools. Prompts group into <i>learn</i>, <i>reuse</i>, <i>repeat</i>. &ldquo;Show the math&rdquo; opens the arithmetic.</li>
+          <li><b>The proof panel</b> at the top: three headline numbers, then a line chart of tokens per prompt over time. Red = the same prompt without saved tools (dashed where predicted), blue = with them; the shaded gap is the saving. Below it: tokens, cost and waiting time saved. &ldquo;Show the math&rdquo; opens the arithmetic.</li>
           <li><b>Ask the agent</b>: type any request (Live) or click an example (Demo). &ldquo;Build, test and answer&rdquo; streams what the model decided, the tests, and the REPL transcript.</li>
           <li><b>Prompt log</b>: per prompt, how it was answered, tokens used vs the no-memory run, and whether the answer is correct.</li>
           <li><b>Tools</b>: everything the agent has taught itself, with source, passing tests, reuse counts, and a box to call a tool directly for 0 tokens.</li>
@@ -153,6 +153,170 @@
       </div>
     </div>
 
+    <div class="card wide ag-project" id="ag-proj-bar">
+      <div class="ag-proj-top">
+        <div class="ag-proj-id">
+          <span class="ag-proj-label" id="ag-proj-label">Project</span>
+          <b id="ag-proj-name">Scratchpad</b>
+          <span id="ag-proj-desc" class="muted"></span>
+        </div>
+        <div class="ag-proj-actions">
+          <button type="button" id="ag-proj-new" class="ag-ghost">New project</button>
+          <button type="button" id="ag-proj-edit" class="ag-ghost" hidden>Edit</button>
+          <button type="button" id="ag-proj-delete" class="ag-ghost ag-danger" hidden>Delete</button>
+        </div>
+      </div>
+      <div id="ag-proj-chips" class="ag-proj-chips" role="group" aria-labelledby="ag-proj-label"></div>
+      <div id="ag-proj-server" class="ag-proj-server">
+        <span class="ag-proj-label">Server</span>
+        <span id="ag-srv-state" class="ag-srv-state">stopped</span>
+        <a id="ag-srv-link" class="ag-srv-link" target="_blank" rel="noopener" hidden></a>
+        <button type="button" id="ag-srv-toggle" class="ag-ghost">Run server</button>
+        <span id="ag-srv-info" class="muted"></span>
+      </div>
+      <form id="ag-cmd" class="ag-cmd" hidden>
+        <label for="ag-cmd-in" class="ag-proj-label">Run a command</label>
+        <input id="ag-cmd-in" type="text" autocomplete="off" spellcheck="false" placeholder="add &quot;Buy milk&quot;">
+        <button type="submit" id="ag-cmd-run" class="ag-ghost">Run</button>
+        <span class="muted ag-cmd-info">Calls this project's handle-command function with the words you type (quotes keep words together).</span>
+        <pre id="ag-cmd-out" class="ag-cmd-out" role="status" hidden></pre>
+      </form>
+      <form id="ag-proj-form" class="ag-proj-form" aria-labelledby="ag-proj-form-h" hidden>
+        <h3 id="ag-proj-form-h">New project</h3>
+        <label for="ag-proj-name-in">Name <span class="muted">(required, up to 60 characters)</span></label>
+        <input id="ag-proj-name-in" type="text" maxlength="60" autocomplete="off">
+        <label for="ag-proj-desc-in">Description <span class="muted">(optional, up to 200 characters)</span></label>
+        <input id="ag-proj-desc-in" type="text" maxlength="200" autocomplete="off">
+        <div class="ag-proj-row">
+          <button type="submit" id="ag-proj-save" class="ag-primary">Create</button>
+          <button type="button" id="ag-proj-cancel" class="ag-ghost">Cancel</button>
+        </div>
+      </form>
+      <div id="ag-proj-delrow" class="ag-proj-delrow" role="group" aria-label="Confirm project delete" hidden>
+        <p id="ag-proj-deltext"></p>
+        <div class="ag-proj-row">
+          <button type="button" id="ag-proj-delgo" class="ag-danger-btn">Delete project</button>
+          <button type="button" id="ag-proj-delcancel" class="ag-ghost">Cancel</button>
+        </div>
+      </div>
+      <p id="ag-proj-err" class="ag-proj-err" role="alert" hidden></p>
+      <p id="ag-proj-note" class="muted ag-proj-note" role="status"></p>
+    </div>
+    <div class="ag-stage">
+      <div class="card ag-ask">
+        <h2 id="ag-ask-h">Ask the agent</h2>
+        <div id="ag-active-note" class="ag-notice" role="status" hidden></div>
+        <div class="ag-bar-row">
+          <textarea id="ag-prompt" rows="3" aria-label="Prompt for the agent"
+            placeholder="e.g. write a function to square a number"></textarea>
+          <div class="ag-ctl">
+            <select id="ag-mode" aria-label="Model mode">
+              <option value="demo">Demo (free, chips only)</option>
+              <option value="live" id="ag-live-opt">Live (paid)</option>
+            </select>
+            <button id="ag-send" class="ag-send">Send prompt</button>
+          </div>
+        </div>
+        <div id="ag-resume" class="ag-resume" hidden>
+          <div class="ag-resume-t">Your last build did not finish</div>
+          <div id="ag-resume-p" class="ag-resume-p"></div>
+          <p class="ag-resume-s">Continue sends that same prompt again and builds on the tools already saved in this project.</p>
+          <div class="ag-resume-row">
+            <button type="button" id="ag-resume-go" class="ag-primary">Continue this build</button>
+            <button type="button" id="ag-resume-x" class="ag-ghost" aria-label="Dismiss the unfinished build notice">Dismiss</button>
+          </div>
+        </div>
+        <p id="ag-proj-hint" class="muted ag-proj-hint"></p>
+        <label class="ag-check"><input type="checkbox" id="ag-compare" checked> Also run without memory (on Live this roughly doubles the tokens, about half a cent per prompt)</label>
+        <details class="ag-examples" open>
+          <summary>Example prompts</summary>
+          <div class="ag-chips" aria-label="Example prompts">
+            <div class="ag-chiprow"><span class="muted">Simple</span>
+              <button class="ag-chip" data-p="write a function that squares a number, then square 12">square 12</button>
+              <button class="ag-chip" data-p="write a function that computes the factorial of a number, then factorial of 6">factorial 6</button>
+              <button class="ag-chip" data-p="write a function that checks for a palindrome, then check the word level">palindrome</button>
+              <button class="ag-chip" data-p="write a function for the largest number in a list, then use it on (4 17 8)">largest in a list</button>
+              <button class="ag-chip" data-p="write a function that checks if a number is even, then check 10">is 10 even</button>
+              <button class="ag-chip" data-p="reverse the words in the sentence one two three">reverse words</button>
+            </div>
+            <div class="ag-chiprow"><span class="muted">Big goal (plans small tools)</span>
+              <button class="ag-chip" data-p="write a ray tracer">write a ray tracer</button>
+            </div>
+            <div class="ag-chiprow"><span class="muted">Builds on a tool</span>
+              <button class="ag-chip" data-p="sum of squares of the list (3 4 5)">sum of squares</button>
+              <button class="ag-chip" data-p="mean of squares of the list (2 4 6 8)">mean of squares</button>
+              <button class="ag-chip" data-p="count the even numbers in the list (1 2 3 4 6)">count evens</button>
+            </div>
+            <div class="ag-chiprow"><span class="muted">Reuse and failure</span>
+              <button class="ag-chip" data-p="sum of squares of the list (3 4 5), again">sum of squares, again</button>
+              <button class="ag-chip" data-p="write a function that cubes a number, then cube 4">cube (a wrong first try)</button>
+            </div>
+          </div>
+        </details>
+        <p id="ag-mode-note" class="muted"></p>
+      </div>
+
+      <div class="card ag-graphcard">
+        <div class="ag-head"><h2 id="ag-graph-h">Function graph</h2><span id="ag-graph-sub" class="muted">each box is a Lisp function; a line runs from a function to the function that calls it</span></div>
+        <div id="ag-gstatus" class="ag-gstatus"><span id="ag-gstatus-t" role="status" aria-live="polite"></span></div>
+        <div class="ag-gwrap">
+          <svg id="ag-graph" tabindex="0" viewBox="0 0 640 340" role="group"
+               aria-label="Graph of the project's functions. Tab moves between functions, Enter selects one. Plus, minus and arrow keys zoom and pan, 0 fits everything."></svg>
+          <div class="ag-gctl" role="group" aria-label="Graph view controls">
+            <button type="button" id="ag-zin" title="Zoom in" aria-label="Zoom in">+</button>
+            <button type="button" id="ag-zout" title="Zoom out" aria-label="Zoom out">&minus;</button>
+            <button type="button" id="ag-zfit" title="Fit all functions in view" aria-label="Fit all functions in view">Fit</button>
+          </div>
+          <div class="ag-ghint">scroll to zoom &middot; drag to pan &middot; double-click to fit</div>
+        </div>
+        <div id="ag-gsel" class="ag-gsel" hidden></div>
+        <div id="ag-glegend" class="ag-glegend" aria-label="Legend: what the icons on the functions mean"></div>
+      </div>
+    </div>
+
+    <div class="ag-cols">
+      <div class="ag-left">
+        <div class="card">
+          <div class="ag-head"><h2>Build, test and answer</h2><span id="ag-compare-note" class="muted"></span></div>
+          <div id="ag-answer-box"><div id="ag-answer">&mdash;</div><div id="ag-answer-call">Run a prompt to see its Lisp, tests and REPL output here.</div></div>
+          <div id="ag-capnotice" class="ag-capnotice" hidden></div>
+          <div id="ag-summary" class="ag-sumcard" hidden></div>
+          <div id="ag-stages"></div>
+          <div id="ag-log"></div>
+          <div class="ag-sub">Lisp REPL (SBCL) <span class="muted">each eval is a fresh sandboxed process that reloads the saved tools</span></div>
+          <div id="ag-repl" role="log" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div class="ag-right">
+        <div class="card">
+          <div class="ag-head"><h2>Prompt log</h2><span class="muted">click a row to reuse its prompt</span></div>
+          <div id="ag-table"></div>
+          <p class="muted ag-foot-note">&#10003; = matches the known answer and the no-memory run. A brand-new tool costs about the same with or without memory; the savings come from reusing or combining tools that already exist.</p>
+        </div>
+    <div class="card">
+      <div class="ag-head"><h2 id="ag-tools-h">Tools in Scratchpad</h2><span id="ag-count">0 tools</span></div>
+      <p class="muted ag-foot-note" style="margin:0 0 .6rem">Click a tool row or a graph node to see its Lisp source and the tests it passed before being saved.</p>
+      <div class="ag-tools-stack">
+        <div>
+          <div id="ag-tools"><p class="muted ag-pad">No tools yet. Ask for something and the model will write one.</p></div>
+          <div id="ag-detail" class="ag-detail" hidden></div>
+          <div class="ag-try">
+            <label for="ag-call" class="ag-sub">Type Lisp <span class="muted">safe subset: your saved tools plus math, lists, lambda, let, if. No model, 0 tokens.</span></label>
+            <div class="ag-try-row">
+              <input id="ag-call" type="text" spellcheck="false" placeholder="(mapcar #'square '(1 2 3))" aria-label="Lisp expression using your saved tools">
+              <button id="ag-callbtn" class="ag-ghost">Run</button>
+            </div>
+            <div id="ag-call-ex" class="ag-callex"></div>
+            <div id="ag-callout" class="ag-callout" role="status"></div>
+          </div>
+          <div class="ag-foot"><button id="ag-reset" class="ag-ghost">Forget this project's tools</button></div>
+        </div>
+      </div>
+    </div>
+      </div>
+    </div>
+
     <div class="card wide ag-proof">
       <div class="ag-head"><h2>The model learns once, then stops paying</h2><span id="ag-overall" class="ag-overall">lower is better</span></div>
       <div id="ag-evbanner" class="ag-evbanner demo"></div>
@@ -165,18 +329,22 @@
         <div class="kpi k4"><span class="kl" title="Prompts that are not in the demo script. Expected answers are computed by independent Python (digit sums, gcd, string reversal, ...), never by the model.">Correct on held-out prompts <span class="why">how verified?</span></span><b id="k-held">&mdash;</b><i id="k-held-sub">not run yet</i></div>
       </div>
       <div id="ag-strength" class="ag-strength" aria-label="How strong this evidence is"></div>
-      <div class="ag-scroll">
-        <svg id="ag-pairs" viewBox="0 0 760 250" role="img"
-             aria-label="For each prompt, tokens used with no memory next to tokens used with the learned tools"></svg>
+      <div class="ag-line-head">
+        <h3 class="ag-line-title">Tokens per prompt, over time</h3>
+        <div class="ag-legend ag-line-legend">
+          <span><i class="sw-line-nomem"></i>without saved tools (measured)</span>
+          <span><i class="sw-line-pred"></i>without saved tools (predicted)</span>
+          <span><i class="sw-line-used"></i>with saved tools (actual)</span>
+          <span><i class="sw-line-gap"></i>saved</span>
+        </div>
       </div>
+      <div class="ag-scroll ag-line-wrap">
+        <svg id="ag-pairs" viewBox="0 0 760 290" role="img"
+             aria-label="Line chart of tokens per prompt over time: with saved tools, and without them"></svg>
+        <div id="ag-linetip" class="ag-linetip" role="status" hidden></div>
+      </div>
+      <div id="ag-savings" class="ag-savings" aria-label="Savings over these prompts"></div>
       <div id="ag-barinfo" class="ag-barinfo" hidden></div>
-      <div class="ag-legend">
-        <span><i class="sw-nomem"></i>no memory: the same prompt on an empty tool registry</span>
-        <span><i style="background:#b18cff"></i>built a new tool</span>
-        <span><i style="background:#5ad1ff"></i>reused a saved tool</span>
-        <span><i style="background:#7bd88a"></i>exact repeat, no model call</span>
-        <span><i class="sw-fail"></i>no-memory run that failed (tokens wasted)</span>
-      </div>
       <p class="muted ag-foot-note">Every prompt is also re-run against an empty tool registry, so the comparison is measured, not assumed. <span id="ag-hero-note"></span> <span id="ag-est-note" hidden>Token counts here are estimates (about 4 characters per token, scripted model); Live mode reports real usage.</span></p>
     </div>
 
@@ -203,104 +371,6 @@
       <p id="ag-recon" class="muted ag-foot-note"></p>
       <p class="muted ag-foot-note">Hatched baseline bars are no-memory runs that failed to produce an answer: their tokens were spent for nothing.</p>
     </details>
-
-    <div class="ag-cols">
-      <div class="ag-left">
-        <div class="card">
-          <h2>Ask the agent</h2>
-          <div class="ag-bar-row">
-            <textarea id="ag-prompt" rows="2" aria-label="Prompt for the agent"
-              placeholder="e.g. write a function to square a number"></textarea>
-            <div class="ag-ctl">
-              <select id="ag-mode" aria-label="Model mode">
-                <option value="demo">Demo (free, chips only)</option>
-                <option value="live" id="ag-live-opt">Live (paid)</option>
-              </select>
-              <button id="ag-send" class="ag-send">Send prompt</button>
-            </div>
-          </div>
-          <label class="ag-check"><input type="checkbox" id="ag-compare" checked> Also run without memory (on Live this roughly doubles the tokens, about half a cent per prompt)</label>
-          <div class="ag-chips" aria-label="Example prompts">
-            <div class="ag-chiprow"><span class="muted">Simple</span>
-              <button class="ag-chip" data-p="write a function that squares a number, then square 12">square 12</button>
-              <button class="ag-chip" data-p="write a function that computes the factorial of a number, then factorial of 6">factorial 6</button>
-              <button class="ag-chip" data-p="write a function that checks for a palindrome, then check the word level">palindrome</button>
-              <button class="ag-chip" data-p="write a function for the largest number in a list, then use it on (4 17 8)">largest in a list</button>
-              <button class="ag-chip" data-p="write a function that checks if a number is even, then check 10">is 10 even</button>
-              <button class="ag-chip" data-p="reverse the words in the sentence one two three">reverse words</button>
-            </div>
-            <div class="ag-chiprow"><span class="muted">Big goal (plans small tools)</span>
-              <button class="ag-chip" data-p="write a ray tracer">write a ray tracer</button>
-            </div>
-            <div class="ag-chiprow"><span class="muted">Builds on a tool</span>
-              <button class="ag-chip" data-p="sum of squares of the list (3 4 5)">sum of squares</button>
-              <button class="ag-chip" data-p="mean of squares of the list (2 4 6 8)">mean of squares</button>
-              <button class="ag-chip" data-p="count the even numbers in the list (1 2 3 4 6)">count evens</button>
-            </div>
-            <div class="ag-chiprow"><span class="muted">Reuse and failure</span>
-              <button class="ag-chip" data-p="sum of squares of the list (3 4 5), again">sum of squares, again</button>
-              <button class="ag-chip" data-p="write a function that cubes a number, then cube 4">cube (a wrong first try)</button>
-            </div>
-          </div>
-          <p id="ag-mode-note" class="muted"></p>
-        </div>
-        <div class="card">
-          <div class="ag-head"><h2>Build, test and answer</h2><span id="ag-compare-note" class="muted"></span></div>
-          <div id="ag-answer-box"><div id="ag-answer">&mdash;</div><div id="ag-answer-call">Run a prompt to see its Lisp, tests and REPL output here.</div></div>
-          <div id="ag-summary" class="ag-sumcard" hidden></div>
-          <div id="ag-stages"></div>
-          <div id="ag-log"></div>
-          <div class="ag-sub">Lisp REPL (SBCL) <span class="muted">each eval is a fresh sandboxed process that reloads the saved tools</span></div>
-          <div id="ag-repl" role="log" aria-live="polite"></div>
-        </div>
-      </div>
-
-      <div class="ag-right">
-        <div class="card">
-          <div class="ag-head"><h2>Prompt log</h2><span class="muted">click a row to reuse its prompt</span></div>
-          <div id="ag-table"></div>
-          <p class="muted ag-foot-note">&#10003; = matches the known answer and the no-memory run. A brand-new tool costs about the same with or without memory; the savings come from reusing or combining tools that already exist.</p>
-        </div>
-    <div class="card">
-      <div class="ag-head"><h2>Tools the agent has taught itself</h2><span id="ag-count">0 tools</span></div>
-      <p class="muted ag-foot-note" style="margin:0 0 .6rem">Click a tool row or a graph node to see its Lisp source and the tests it passed before being saved.</p>
-      <div class="ag-tools-stack">
-        <div>
-          <div id="ag-tools"><p class="muted ag-pad">No tools yet. Ask for something and the model will write one.</p></div>
-          <div id="ag-detail" class="ag-detail" hidden></div>
-          <div class="ag-try">
-            <label for="ag-call" class="ag-sub">Type Lisp <span class="muted">safe subset: your saved tools plus math, lists, lambda, let, if. No model, 0 tokens.</span></label>
-            <div class="ag-try-row">
-              <input id="ag-call" type="text" spellcheck="false" placeholder="(mapcar #'square '(1 2 3))" aria-label="Lisp expression using your saved tools">
-              <button id="ag-callbtn" class="ag-ghost">Run</button>
-            </div>
-            <div id="ag-call-ex" class="ag-callex"></div>
-            <div id="ag-callout" class="ag-callout" role="status"></div>
-          </div>
-          <div class="ag-foot"><button id="ag-reset" class="ag-ghost">Forget all tools</button></div>
-        </div>
-        <div>
-          <div class="ag-gwrap">
-          <svg id="ag-graph" tabindex="0" viewBox="0 0 640 340" role="img"
-               aria-label="Graph of saved tools; a purple edge means one tool calls another"></svg>
-          <div class="ag-gctl" role="group" aria-label="Graph view controls">
-            <button type="button" id="ag-zin" title="Zoom in" aria-label="Zoom in">+</button>
-            <button type="button" id="ag-zout" title="Zoom out" aria-label="Zoom out">&minus;</button>
-            <button type="button" id="ag-zfit" title="Fit all tools in view" aria-label="Fit all tools in view">Fit</button>
-          </div>
-          <div class="ag-ghint">scroll to zoom &middot; drag to pan &middot; double-click to fit</div>
-        </div>
-          <div class="ag-legend">
-            <span><i style="background:#5ad1ff"></i>saved tool (click for source and tests)</span>
-            <span><i style="background:#ffb454"></i>candidate being tested</span>
-            <span><i style="background:#7bd88a"></i>just saved</span>
-            <span><i style="background:#b18cff"></i>purple edge: one tool calls another</span>
-          </div>
-        </div>
-      </div>
-    </div>
-      </div>
-    </div>
 
   </section>
 

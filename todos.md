@@ -338,6 +338,16 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] OS-level worker sandbox (job object / jail) so the typed REPL could be widened beyond the allow-list
   - [ ] Larger held-out set and confidence intervals (current: 10 prompts, a few runs)
   - [ ] Persistent REPL image instead of one SBCL process per eval
+  - [x] Model-slip guards from the live blog runs (2026-10-09): data lists with string heads auto-quoted, dropped paren in nested test data restored by arity, surplus `)` trimmed, unusable tests pruned, missing-quote JSON repaired, JSON retries at rising temperature, unreadable reply costs one attempt not the session
+  - [x] `TEST_CALL_INVALID` failure class: a broken test call is repaired without rewriting the definition
+  - [x] House style for built tools (`lispstyle.py`): pure single-purpose functions, auto docstring, hard rules against global state, printing, destructive ops on arguments and case-insensitive secret comparison
+  - [x] Projects (`projects.py`): separate programs with their own tool registry and prompt log; create, rename, switch, delete (to trash) in the dashboard; follow-up prompts refine a project
+  - [x] Regression guard: replacing a saved tool is refused when a tool that calls it would fail its tests
+  - [x] Mounting (`mount.py`): the harness serves a project's pure `(handle-request request state)` on a local port and persists the returned state in SQLite; request log and report; Run server control in the dashboard
+  - [ ] Live-verify a web app built end to end against the mount contract (needs a live-spend approval)
+  - [ ] Verified password hashing for mounted apps (a Lisp SHA-256 checked by the reference oracle, or a harness-supplied primitive)
+  - [ ] Keep one SBCL process alive per mounted app (each request currently starts one, about 150 ms)
+  - [ ] Show `lispstyle.style_notes` per tool in the tools table
 
 - [ ] **Only after the core experiment succeeds**
   - [ ] Add shadow execution on real workloads

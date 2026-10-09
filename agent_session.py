@@ -30,8 +30,12 @@ import uuid
 from pathlib import Path
 
 import pipeline
+import projects
 import risk
 import s_expr
+import toolmeta
+import webkit
+import lispstyle
 import oracle as orc
 import workers
 
@@ -39,10 +43,15 @@ ROOT = Path(__file__).resolve().parent
 AGENT_DIR = ROOT / "artifacts" / "agent"
 MAX_MODEL_CALLS = 5          # per session: quick check + plan + repairs
 MAX_REPAIRS = 3
-REWRITE_TEMPERATURE = 0.8    # fresh-rewrite repairs sample for a different idea
+REWRITE_TEMPERATURE = 0.7    # fresh-rewrite repairs sample for a different idea
 MAX_PLAN_STEPS = 6
-MAX_MODEL_CALLS_PLAN = 34    # when a goal is split into small tools
-MAX_DEEP_CALLS = 5           # per session: costly "thinking" rewrites
+MAX_MODEL_CALLS_PLAN = 80    # when a goal is split into small tools
+# Measured on 80 live sessions: a "thinking" rewrite passed its tests 23% of
+# the time, a plain repair 24%, at four times the cost and over three times
+# the wait. So thinking is the exception: only a step's LAST attempt, once a
+# run. A low-effort deep call gets 3500 tokens (was 5000): one run spent all
+# 5000 on reasoning and returned an empty reply.
+MAX_DEEP_CALLS = 1
 MAX_SPLIT_DEPTH = 1         # a failed step may be split once into smaller tools
 
 # Tolerant test comparison, defined in every rehearsal: numbers compare within
@@ -52,9 +61,15 @@ GG_CHECK = (
     "(defun gg-near (a b) (cond ((and (realp a) (realp b)) "
     "(<= (abs (- a b)) (* 1d-4 (max 1 (abs a) (abs b))))) "
     "((and (consp a) (consp b)) (and (gg-near (car a) (car b)) "
-    "(gg-near (cdr a) (cdr b)))) (t (equal a b))))\n"
+    "(gg-near (cdr a) (cdr b)))) "
+    # a test cannot type a line break, so the model writes ~% in the expected
+    # string: accept that spelling for a real newline in the result
+    "((and (stringp a) (stringp b)) (or (string= a b) (string= a (gg-nl b)))) "
+    "(t (equal a b))))\n"
+    "(defun gg-nl (s) (let ((p (search \"~%\" s))) (if p (concatenate 'string "
+    "(subseq s 0 p) (string #\\Newline) (gg-nl (subseq s (+ p 2)))) s)))\n"
     "(defun gg-check (got want) (if (gg-near got want) t (list :got got)))")
-LIVE_SPEND_CAP_USD = 0.15   # per server process; live sessions refuse past it
+LIVE_SPEND_CAP_USD = 1.00   # per server process; live sessions refuse past it
 WORKER_TIMEOUT_S = 15.0
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 
@@ -73,8 +88,8 @@ SYSTEM_PROMPT = (
     "\"\\\"abc\\\"\" or \"(1 2 3)\". Give 2-4 tests on inputs whose results you can compute exactly by hand "
     "(numbers are compared with a small tolerance, so 0.6 matches 3/5). 'call' answers the "
     "user's request using the literal data from the goal; quote list "
-    "literals, e.g. '(1 2 3)."
-)
+    "literals, e.g. '(1 2 3). "
+) + lispstyle.STYLE_GUIDE
 
 
 SHORT_SYSTEM = (
@@ -121,6 +136,82 @@ def normalize_prompt(text):
     return " ".join(re.findall(r"[a-z0-9]+", str(text).lower()))
 
 
+def tool_line(t, with_example=True):
+    """``TOOL name (args): description  e.g. (call) => value`` for prompts.
+
+    The example is the tool's first passing test, so the model sees the exact
+    argument SHAPES (lists, nesting, units) that are known to work.
+    """
+    line = "TOOL %s %s: %s" % (t["name"], signature(t["definition"]).split(" ", 1)[1][:-1],
+                              t.get("description", ""))
+    if with_example:
+        tests = [x for x in (t.get("tests") or []) if isinstance(x, dict)
+                 and x.get("call") and (x.get("expect") or "").strip().upper() != "T"]
+        tests = tests or [x for x in (t.get("tests") or []) if isinstance(x, dict) and x.get("call")]
+        if tests:
+            ex = tests[0]
+            line += "  e.g. %s => %s" % (ex["call"][:110], str(ex.get("expect"))[:50])
+    return line
+
+
+FOCUS_OVER = 8          # registries larger than this are sent focused
+FOCUS_RECENT = 4        # the newest tools are the likeliest dependencies
+
+
+def compact_line(t):
+    """``name (args): first words of the description`` - a tool the call may use."""
+    desc = " ".join((t.get("description") or "").split())
+    return "%s %s%s" % (t["name"], signature(t["definition"]).split(" ", 1)[1][:-1],
+                        ": " + (desc[:57] + "..." if len(desc) > 60 else desc) if desc else "")
+
+
+def relevant_tools(tools, text):
+    """Names of the tools TEXT is about: mentioned by name, or the newest few."""
+    text = text or ""
+    named = {t["name"] for t in tools
+             if re.search(r"(?<![^\s('\"#])%s(?![^\s)\".,;:])" % re.escape(t["name"]),
+                          text, re.I)}
+    recent = {t["name"] for t in tools[-FOCUS_RECENT:]}
+    return named | recent
+
+
+def registry_text(tools, focus=None):
+    """The REGISTRY block. With FOCUS (the call's own text) and a large registry,
+    only relevant tools get a full line with an example; the rest are listed
+    compactly so the model still knows they exist and how to call them."""
+    if not tools:
+        return "(no tools yet)"
+    if focus is None or len(tools) <= FOCUS_OVER:
+        return "\n".join(tool_line(t) for t in tools)
+    keep = relevant_tools(tools, focus)
+    full = [tool_line(t) for t in tools if t["name"] in keep]
+    rest = [compact_line(t) for t in tools if t["name"] not in keep]
+    return "\n".join(full) + ("\nOTHER SAVED TOOLS (callable the same way): "
+                              + "; ".join(rest) if rest else "")
+
+
+# One line for every non-planning call of a web app (the full contract goes to the planner).
+WEB_REMINDER = (
+    "WEB APP: REQUEST is a plist (read it with the kit tools or GETF, never "
+    "ASSOC); STATE is a list of (name rows) tables, e.g. '((\"posts\" ()) "
+    "(\"users\" ())); responses are plists made with html-page, redirect-to, "
+    "with-state and with-cookie.")
+
+# Fixing test calls needs the output format and the data rules, not the whole build brief.
+TEST_SYSTEM = (
+    "You repair the TESTS of a Common Lisp tool. Answer with ONE JSON object and "
+    "nothing else: {\"action\":\"build\",\"name\":\"...\",\"description\":\"...\","
+    "\"definition\":\"(defun ...)\",\"tests\":[{\"call\":\"(name ...)\","
+    "\"expect\":\"printed result\"}],\"call\":\"(name ...)\"}. Keep the name, "
+    "description and definition exactly as given. Each call is exactly one Lisp "
+    "form that calls the tool. Quote data lists with one leading quote, e.g. "
+    "'(1 \"a\"), and put no quote marks inside quoted data. 'expect' is the "
+    "PRIN1 text of the result, e.g. \"25\" or \"\\\"abc\\\"\" or \"(1 2)\"; use "
+    "a property test with expect T when the exact value is long or uncertain. "
+    "Only call functions that exist: the tool itself and the tools listed in "
+    "the REGISTRY.")
+
+
 def signature(definition):
     """``(name (args))`` header of a defun, enough to call it."""
     m = re.match(r"\s*\(defun\s+(\S+)\s+(\([^)]*\))", definition or "")
@@ -164,8 +255,22 @@ class ToolRegistry:
     def _mine(self, tool):
         return not self.mode or self._mode_of(tool) == self.mode
 
-    def load(self):
-        return [t for t in self._raw() if self._mine(t)]
+    def load(self, retired=False):
+        """Visible tools. Retired ones (kept on disk, with the reason) only on request."""
+        return [t for t in self._raw() if self._mine(t) and (retired or not t.get("retired"))]
+
+    def retire(self, reasons):
+        """Mark tools as retired: REASONS maps a tool name to why. Returns the names."""
+        done = []
+        with self._lock:
+            tools = self._raw()
+            for t in tools:
+                if self._mine(t) and t.get("name") in reasons and not t.get("retired"):
+                    t["retired"] = reasons[t["name"]]
+                    done.append(t["name"])
+            if done:
+                self._write(tools)
+        return done
 
     def add(self, tool):
         with self._lock:
@@ -174,6 +279,7 @@ class ToolRegistry:
                 tool["mode"] = self.mode
             tools = [t for t in self._raw()
                      if not (t.get("name") == tool["name"] and self._mine(t))]
+            tool.pop("retired", None)
             tools.append(tool)
             self._write(tools)
 
@@ -290,6 +396,11 @@ def live_generate(system, user):
         return _with_retry(lambda: cerebras_client.generate(
             user, system=system, max_tokens=getattr(_TEMP, "max_tokens", 2200),
             temperature=temp, reasoning_effort="none"))
+    effort = getattr(_TEMP, "effort", "low")
+    if effort != "medium":
+        return _with_retry(lambda: cerebras_client.generate(
+            user, system=system, max_tokens=3500, temperature=temp,
+            reasoning_effort="low", timeout=120.0))
     res = _with_retry(lambda: cerebras_client.generate(
         user, system=system, max_tokens=8000, temperature=temp,
         reasoning_effort="medium", timeout=120.0))
@@ -562,15 +673,54 @@ def _risk_fn(parsed):
     return risk.classify(parsed, {"effects": ["pure"]})
 
 
-def quote_literals(text):
-    """Quote bare numeric-led lists such as ``(3 4 5)`` -> ``'(3 4 5)``.
+# Forms whose arguments are clauses, never data: nothing inside them is quoted.
+_CLAUSE_HEADS = frozenset({
+    "cond", "case", "ccase", "ecase", "typecase", "etypecase", "handler-case",
+    "handler-bind", "restart-case", "do", "do*"})
+# Forms whose FIRST argument is a binding or lambda list (not data).
+_BIND_HEADS = frozenset({
+    "let", "let*", "flet", "labels", "macrolet", "symbol-macrolet",
+    "destructuring-bind", "multiple-value-bind", "dolist", "dotimes",
+    "with-slots", "defun", "defmacro", "lambda"})
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?![^\s()])")
+_SYM_RE = re.compile(r"[^\s()\"';]+")
+_SPACE_RE = re.compile(r"\s*")
 
-    Real models often write list data without the quote, which Lisp reads
-    as a call of the number 3. Lists already inside ``'(...)`` or
-    ``(quote ...)`` and strings are left alone.
+
+def _head_of(text, i):
+    """Classify the first element of the list whose ``(`` is just before I.
+
+    Returns ``(kind, head, end)``: kind is ``str``, ``num``, ``list`` (a nested
+    or quoted list), ``sym`` (HEAD is the lower-cased symbol, END is the index
+    just past it) or None for an empty list.
+    """
+    j = _SPACE_RE.match(text, i).end()
+    if text.startswith('"', j):
+        return "str", None, j
+    if text.startswith("(", j) or text.startswith("'(", j):
+        return "list", None, j
+    if _NUM_RE.match(text, j):
+        return "num", None, j
+    m = _SYM_RE.match(text, j)
+    if m:
+        return "sym", m.group(0).lower(), m.end()
+    return None, None, j
+
+
+def quote_literals(text):
+    """Quote list data that the model wrote without a quote mark.
+
+    ``(3 4 5)`` becomes ``'(3 4 5)``, since Lisp would read it as a call of 3.
+    An argument list whose first element is a string, number or list, such as
+    ``(("users" ()))`` or ``('(1 "a"))``, is data too and is quoted, with its
+    inner quote marks stripped. Lists already quoted, ``nil``, and code such as
+    ``(f (g x))`` stay as written. Binding and clause forms (``let``, ``cond``,
+    lambda lists) are never touched, and strings and ``#\\x`` characters are
+    copied verbatim.
     """
     out, i, n = [], 0, len(text)
     depth, qdepth = 0, None
+    frames = []          # one (kind, head, end, start) per open "("
     while i < n:
         c = text[i]
         if c == '"':
@@ -580,21 +730,46 @@ def quote_literals(text):
             out.append(text[i:j + 1])
             i = j + 1
             continue
+        if c == "#" and text[i + 1:i + 2] == "\\":
+            out.append(text[i:i + 3])           # character literal, e.g. #\(
+            i += 3
+            continue
         if c == "'" and qdepth is not None and text[i + 1:i + 2] == "(":
             i += 1                 # nested quote inside quoted data: (a '(b)) -> (a (b))
             continue
         if c == "(":
-            rest = text[i + 1:].lstrip()
-            if out and out[-1].endswith("'") and qdepth is None:
+            kind, head, end = _head_of(text, i + 1)
+            enc_kind, enc_head, enc_end, enc_start = \
+                frames[-1] if frames else (None, None, 0, 0)
+            is_sym = enc_kind == "sym"
+            if is_sym:
+                # a direct argument of a clause or binding form is never data
+                first_arg = text[enc_end:i].strip() == ""
+                skip = enc_head in _CLAUSE_HEADS or \
+                    (enc_head in _BIND_HEADS and first_arg)
+            else:
+                # a clause or binding list itself, e.g. ((1 2) "low") in a case
+                gp_kind, gp_head, gp_end, _ = \
+                    frames[-2] if len(frames) > 1 else (None, None, 0, 0)
+                skip = gp_kind == "sym" and (
+                    gp_head in _CLAUSE_HEADS or
+                    (gp_head in _BIND_HEADS and
+                     text[gp_end:enc_start].strip() == ""))
+            if out and out[-1].endswith("'") and qdepth is None and \
+                    not (len(out) > 1 and out[-2] == "#"):   # not #'(lambda ...)
                 qdepth = depth
             elif qdepth is None and text.startswith("(quote ", i):
                 qdepth = depth
-            elif qdepth is None and re.match(r"-?\d", rest):
+            elif qdepth is None and not skip and (
+                    kind == "num" or (is_sym and kind in ("str", "list"))):
                 out.append("'")
                 qdepth = depth
             depth += 1
+            frames.append((kind, head, end, i))
         elif c == ")":
             depth -= 1
+            if frames:
+                frames.pop()
             if qdepth is not None and depth == qdepth:
                 qdepth = None
         out.append(c)
@@ -716,25 +891,293 @@ def fix_setf(text):
     return text
 
 
+_EG_RE = re.compile(r"e\.g\.\s*\(")
+
+
+def _quote_spec_examples(spec):
+    """Quote the call in each ``e.g. <call> => <value>`` example of a spec.
+
+    Only the call is touched, and only when it is a call (its head is a
+    symbol). The rest of the spec text is left exactly as written.
+    """
+    out, pos = [], 0
+    for m in _EG_RE.finditer(spec):
+        start = m.end() - 1                     # index of the example's "("
+        if start < pos:
+            continue
+        end = _form_end(spec, start)
+        if end < 0 or not re.match(r"\s*=>", spec[end + 1:]):
+            continue
+        call = spec[start:end + 1]
+        if _head_of(call, 1)[0] != "sym":
+            continue
+        fixed = quote_literals(call)
+        if fixed != call:
+            out.append(spec[pos:start])
+            out.append(fixed)
+            pos = end + 1
+    out.append(spec[pos:])
+    return "".join(out)
+
+
+def balance_call(call, definition):
+    """Put back the ``)`` a model dropped inside nested data in a test call.
+
+    ``(db-insert '(("users" (("bob" "x"))) "users" '("a"))`` is one paren
+    short, and the model repeats the slip when asked to recount. The missing
+    paren is restored only when exactly one placement makes the call pass as
+    many arguments as the tool's ``defun`` takes; otherwise CALL is returned
+    unchanged and validation reports it. Tools with ``&optional``/``&rest``
+    parameters are left alone, since their argument count proves nothing.
+    """
+    m = re.match(r"\s*\(defun\s+(\S+)\s+\(([^)]*)\)", definition or "")
+    if not m or "&" in m.group(2):
+        return call
+    name, argc = m.group(1).lower(), len(m.group(2).split())
+    closes, depth, i, n = [], 0, 0, len(call)
+    while i < n:                                  # ")" positions outside strings
+        c = call[i]
+        if c == '"':
+            i += 1
+            while i < n and call[i] != '"':
+                i += 2 if call[i] == "\\" else 1
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            closes.append(i)
+        i += 1
+    if depth not in (1, 2) or not closes:
+        return call
+    found = set()
+    for p in closes:
+        cand = call[:p + 1] + ")" * depth + call[p + 1:]
+        try:
+            form = s_expr.parse(cand)
+        except s_expr.SExprError:
+            continue
+        if isinstance(form, list) and len(form) == argc + 1 and \
+                str(form[0]).lower() == name:
+            found.add(cand)
+    return found.pop() if len(found) == 1 else call
+
+
+_STR_LIT = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def newline_escapes(text):
+    """Turn ``\\n`` inside string literals into a real line break.
+
+    Lisp has no ``\\n`` escape (it reads as the letter n), so a model that
+    writes it always means a newline.
+    """
+    return _STR_LIT.sub(lambda m: m.group(0).replace("\\n", "\n"), text)
+
+
+def quote_bare_string(expect):
+    """Wrap an expected value in quotes when it can only be an unquoted string.
+
+    A printed Lisp value is exactly one datum. ``[ ] 1. Buy milk`` or
+    ``No tasks.`` is several bare words, so the model meant the string.
+    """
+    text = expect.strip()
+    if not text or text[0] in "\"('#:" or text.upper() in ("T", "NIL"):
+        return expect
+    if " " not in text:
+        return expect
+    return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def one_line(printed):
+    """A printed value on one line: line breaks INSIDE strings become a visible
+    ``\\n``; layout whitespace between elements becomes one space."""
+    out, in_str, i, n = [], False, 0, len(printed)
+    while i < n:
+        c = printed[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                out.append(printed[i:i + 2])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            out.append("\\n" if c == "\n" else c)
+        elif c == '"':
+            in_str = True
+            out.append(c)
+        elif c in " \t\r\n":
+            if out and out[-1] != " ":
+                out.append(" ")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out).strip()
+
+
+def trim_surplus_parens(text):
+    """Drop extra ``)`` after the end of the one top-level form.
+
+    ``(defun f (x) x))`` cannot be read at all, so the model only ever hears
+    "unexpected ')'". Without the surplus the compiler reads the code and can
+    name the real mistake. Anything other than stray ``)`` after the form is
+    left for validation to report.
+    """
+    start = text.find("(")
+    if start < 0:
+        return text
+    end = _form_end(text, start)
+    rest = text[end + 1:] if end >= 0 else ""
+    if end >= 0 and rest.strip() and not rest.replace(")", "").strip():
+        return text[:end + 1]
+    return text
+
+
+def _usable_test(t, name):
+    """A test the harness can run: one Lisp form that calls the tool NAME."""
+    if not (isinstance(t, dict) and isinstance(t.get("call"), str)):
+        return False
+    try:
+        form = s_expr.parse(t["call"])
+    except s_expr.SExprError:
+        return False
+    return isinstance(form, list) and bool(form) and bool(re.search(
+        r"(?<![^\s('])%s(?![^\s)])" % re.escape(name), t["call"], re.I))
+
+
 def normalize_plan(plan):
-    """Apply quote_literals to every call in a build/use plan, in place."""
+    """Balance and quote every call in a build/use plan, in place.
+
+    ``plan["auto_fixes"]`` lists the repairs that changed something (for the
+    session log; it tells us which model slips are common enough to matter).
+    """
+    fixes = []
+
+    def step(name, fn, text):
+        out = fn(text)
+        if out != text and name not in fixes:
+            fixes.append(name)
+        return out
+
     if isinstance(plan.get("definition"), str):
-        plan["definition"] = fix_setf(complete_parens(plan["definition"]))
+        d = step("trimmed-surplus-paren", trim_surplus_parens, plan["definition"])
+        d = step("completed-missing-paren", complete_parens, d)
+        d = step("flattened-setf", fix_setf, d)
+        d = step("let-to-let-star", lispstyle.let_to_let_star, d)
+        if plan.get("action") == "build":
+            # every tool states its own interface, even when the model forgot
+            d = step("added-docstring",
+                     lambda x: lispstyle.ensure_docstring(x, plan.get("description")), d)
+        plan["definition"] = d
+    defn = plan.get("definition") if isinstance(plan.get("definition"), str) else ""
+
+    parts = lispstyle.defun_parts(defn) if defn else None
+    state_at = parts[1].index("state") if parts and "state" in parts[1] else None
+
+    def fix_call(text):
+        text = step("restored-paren-in-call", lambda x: balance_call(x, defn), text)
+        text = step("quoted-data-list", quote_literals, text)
+        if state_at is not None:
+            # the STATE argument is always a list of (name rows) tables
+            text = step("nested-state-data",
+                        lambda x: webkit.fix_state_args(x, parts[0], state_at), text)
+        return text
+
+    for t in plan.get("tests") or []:
+        if isinstance(t, dict) and isinstance(t.get("expect"), str):
+            e = step("quoted-bare-expected-string", quote_bare_string, t["expect"])
+            e = step("newline-escape-in-expected-string", newline_escapes, e)
+            t["expect"] = step("completed-paren-in-expected-value", complete_parens, e)
+
     if isinstance(plan.get("call"), str):
-        plan["call"] = quote_literals(plan["call"])
+        plan["call"] = fix_call(plan["call"])
     for t in plan.get("tests") or []:
         if isinstance(t, dict) and isinstance(t.get("call"), str):
-            t["call"] = quote_literals(t["call"])
+            t["call"] = fix_call(t["call"])
+    # Tests that are prose or call some other (often non-existent) function are
+    # dropped when usable tests remain: one bad extra test must not cost a
+    # whole repair round. With none left, validation reports the problem.
+    if plan.get("action") == "build" and isinstance(plan.get("name"), str) and \
+            isinstance(plan.get("tests"), list):
+        usable = [t for t in plan["tests"] if _usable_test(t, plan["name"])]
+        if usable and len(usable) < len(plan["tests"]):
+            plan["dropped_tests"] = [t.get("call") if isinstance(t, dict) else str(t)
+                                     for t in plan["tests"] if t not in usable]
+            plan["tests"] = usable
+            fixes.append("dropped-unusable-test")
+    for item in plan.get("steps") or []:
+        if isinstance(item, dict) and isinstance(item.get("spec"), str):
+            item["spec"] = step("quoted-spec-example", _quote_spec_examples, item["spec"])
+            sig = re.match(r"\s*\(\s*([^\s()]+)((?:\s+[^\s()]+)*)\s*\)", item["spec"])
+            names = sig.group(2).split() if sig else []
+            if "state" in names:
+                item["spec"] = step(
+                    "nested-state-data",
+                    lambda x: webkit.fix_state_args(x, sig.group(1), names.index("state")),
+                    item["spec"])
+    if fixes:
+        plan["auto_fixes"] = fixes
     return plan
 
 
+class BudgetExhausted(RuntimeError):
+    """The session reached its model-call limit."""
+
+
+class BadReply(ValueError):
+    """The model's reply was not usable JSON even after the retries."""
+
+
+def _loads_tolerant(raw):
+    """``json.loads`` plus repairs for the slips real models make.
+
+    Tried in order: the text as is, then a closing quote the model forgot just
+    before a ``}`` or ``]`` (it wrote ``"expect":"(1 2)}`` ). Only a result that
+    parses to an object is accepted. A reply that was CUT OFF is not patched
+    here: its content is incomplete, so it must be asked for again.
+    """
+    try:
+        return json.loads(raw)
+    except ValueError as exc:
+        first = exc
+    try:
+        data = json.loads(raw, strict=False)     # literal newlines or tabs in a string
+        if isinstance(data, dict):
+            return data
+    except ValueError:
+        pass
+    closers = [i for i, c in enumerate(raw) if c in "}]"]
+    for p in reversed(closers[-80:]):
+        try:
+            data = json.loads(raw[:p] + '"' + raw[p:])
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise first
+
+
 def extract_json(text):
-    """Pull the first balanced JSON object out of model text."""
+    """Pull the first JSON object out of model text, repairing small slips."""
     if not isinstance(text, str):
         raise ValueError("empty model reply")
     start = text.find("{")
     if start < 0:
         raise ValueError("no JSON object in reply")
+    try:
+        return _extract_balanced(text, start)
+    except ValueError as exc:
+        end = text.rfind("}")
+        raw = text[start:end + 1] if end > start else text[start:]
+        try:
+            data = _loads_tolerant(raw.rstrip().rstrip("`").rstrip())
+        except ValueError:
+            raise exc
+        if not isinstance(data, dict):
+            raise exc
+        return data
+
+
+def _extract_balanced(text, start):
     depth, in_str, esc = 0, False, False
     for i in range(start, len(text)):
         ch = text[i]
@@ -756,6 +1199,9 @@ def extract_json(text):
     raise ValueError("unterminated JSON object")
 
 
+JSON_RETRY_TEMPS = (0.4, 0.8)     # a retry at the same temperature repeats the slip
+
+
 def validate_build(plan, frozen=None):
     """Return an error string for a malformed build plan, else None."""
     name = plan.get("name")
@@ -764,6 +1210,12 @@ def validate_build(plan, frozen=None):
     definition = plan.get("definition")
     if not isinstance(definition, str) or not definition.strip():
         return "definition missing"
+    for problem in lispstyle.purity_problems(definition):
+        return "not a pure function: " + problem
+    for problem in lispstyle.case_problems(definition):
+        return problem
+    for problem in lispstyle.security_problems(name, plan.get("description"), definition):
+        return "unsafe secret comparison: " + problem
     tests = plan.get("tests")
     if not isinstance(tests, list) or not tests:
         return "at least one test required"
@@ -782,9 +1234,34 @@ def validate_build(plan, frozen=None):
                     "%s (verified earlier); do not change it"
                     % (t["call"], frozen[t["call"]]))
     for t in tests:
-        if "#" in t["expect"]:
+        if "#" in re.sub(r'"(?:[^"\\]|\\.)*"', '""', t["expect"]):
             return ("expected values cannot contain '#': write plain lists like "
                     "(0 0 -5), not #(0 0 -5) vectors or other reader syntax")
+    for t in tests:
+        bare = re.sub(r'"(?:[^"\\]|\\.)*"', '""', t["expect"])
+        if bare.count("(") != bare.count(")"):
+            return ("expected value %s has unbalanced parentheses (%d opening, %d "
+                    "closing); write the whole printed result"
+                    % (t["expect"], bare.count("("), bare.count(")")))
+    for t in tests:
+        if t["call"].count("(") != t["call"].count(")") and '"' not in \
+                re.sub(r'"(?:[^"\\]|\\.)*"', "", t["call"]):
+            bare = re.sub(r'"(?:[^"\\]|\\.)*"', "", t["call"])
+            if bare.count("(") != bare.count(")"):
+                return ("test call %s has unbalanced parentheses (%d opening, %d "
+                        "closing); count them and resend every test call balanced"
+                        % (t["call"], bare.count("("), bare.count(")")))
+        try:
+            call_form = s_expr.parse(t["call"])
+        except s_expr.SExprError:
+            call_form = None
+        if not (isinstance(call_form, list) and call_form):
+            return ("test call %s must be exactly one Lisp call such as (%s ...), "
+                    "with no prose or second form" % (t["call"], name))
+        if not re.search(r"(?<![^\s('])%s(?![^\s)])" % re.escape(name),
+                         t["call"], re.I):
+            return ("test call %s does not call the tool %s; every test must call "
+                    "%s" % (t["call"], name, name))
     if not isinstance(plan.get("call"), str):
         return "call missing"
     try:
@@ -799,6 +1276,165 @@ def validate_build(plan, frozen=None):
 def candidate_text(plan):
     return ("(candidate (:target %s) (:parent 0) (:definition (%s)))"
             % (plan["name"], plan["definition"]))
+
+
+# -- capability gaps: what the pure-Lisp sandbox cannot do, read from the goal --
+# (need, instead, pattern). Patterns are whole-word and case-insensitive; the
+# misspellings listed are the ones seen in real prompts.
+_CAPABILITY_RULES = [
+    ("database",
+     "the app's STATE value (a Lisp list of tables); the harness saves it in "
+     "SQLite between requests when the project is mounted",
+     re.compile(r"\b(?:sqlite\d?|sql\s*-?\s*lite|sqllite|sqlight|postgres(?:ql)?|"
+                r"mysql|mariadb|data ?bas\w*|databse|sql|persist\w*)\b", re.I)),
+    ("command line",
+     "a pure (handle-command args state now) function; the harness runs it for "
+     "each command the user types (Run a command, or mount.py --shell)",
+     re.compile(r"\b(?:cli|tui|command[- ]?line|terminal|console (?:app|tool|program)|"
+                r"text (?:ui|interface|user interface)|shell (?:app|tool)|"
+                r"interactive (?:prompt|menu))\b", re.I)),
+    ("web server",
+     "a pure (handle-request request state) function; the harness mounts it "
+     "on a port (Run server) and calls it for every request",
+     re.compile(r"\b(?:ssr|server[- ]side\w*|(?:web|http|api) ?servers?|http ?requests?|"
+                r"(?:api|rest|http|web|server)\s+endpoints?|"
+                r"endpoints?\s+(?:for|that|to)\s+(?:the\s+)?(?:api|web|site|server|browsers?|clients?|users?)|"
+                r"(?:web|http|url|api)\s+routes?|websites?|web ?sites?|blogs?|"
+                r"web ?apps?|web ?pages?|served\s+(?:to|in)\s+(?:a\s+|the\s+)?browsers?)\b", re.I)),
+    ("login security",
+     "login written in plain Lisp using the request's :nonce and :now; no "
+     "vetted password hashing — not safe for real accounts",
+     re.compile(r"\b(?:log-?\s?ins?|sign-?\s?ins?|auth|authent\w*|authori[sz]\w*|"
+                r"passwords?|passwd|credentials?|security|"
+                r"sucurity|secuirty|securty|sercurity|sessions?|encrypt\w*|"
+                r"decrypt\w*|cryptograph\w*|bcrypt|argon2|scrypt|pbkdf2)\b", re.I)),
+    ("file system",
+     "no file access in the sandbox",
+     re.compile(r"\b(?:(?:read|reads|write|writes|save|saves|load|loads|open|opens|store|stores)"
+                r"\s+(?:\w+\s+){0,3}?(?:files?|disk|folders?|director(?:y|ies))|"
+                r"(?:to|on|from)\s+(?:a\s+|the\s+)?(?:disk|file|filesystem|file system))\b", re.I)),
+    ("network connection",
+     "no network access in the sandbox",
+     re.compile(r"\b(?:networks?|networking|internet|downloads?|downloading|downloaded|"
+                r"scrap(?:e|es|ed|ing)|web ?requests?|"
+                r"fetch(?:es|ing)?\s+(?:from|over|data|(?:a|the)\s+(?:url|page|web|site|remote|api))|"
+                r"(?:call|calls|calling|query|queries|querying)\s+(?:an?\s+|the\s+|external\s+|remote\s+)?"
+                r"(?:api|apis|web ?services?)|api\s+calls?)\b", re.I)),
+]
+
+
+# The request/response contract of a mounted app (kept in step with mount.py).
+WEB_APP_CONTRACT = (
+    "WEB APP CONTRACT - the harness mounts the app on a port; you write only "
+    "pure functions. The top-level tool MUST be (handle-request request state). "
+    "REQUEST is a plist: (:method \"GET\" :path \"/posts\" :query ((\"k\" \"v\")) "
+    ":form ((\"title\" \"Hi\")) :cookies ((\"sid\" \"abc\")) :now 1791560000 "
+    ":nonce \"9f2c41aa\"). Read it with (getf request :path) and "
+    "(second (assoc \"title\" (getf request :form) :test #'string=)). "
+    "STATE is the app's whole data, a list of tables such as "
+    "'((\"posts\" ((\"Hi\" \"text\"))) (\"users\" ()) (\"sessions\" ())); it is "
+    "NIL on the very first request unless you also build a zero-argument tool "
+    "initial-state. The harness saves the state you return in SQLite and "
+    "passes it back on the next request. "
+    "RETURN a plist: (:status 200 :headers ((\"Content-Type\" \"text/html\")) "
+    ":body \"<html>...</html>\" :state new-state). Leave :state out when "
+    "nothing changed. Redirect with :status 303 and a (\"Location\" \"/\") "
+    "header; set a cookie with a (\"Set-Cookie\" \"sid=VALUE; HttpOnly; Path=/\") "
+    "header. Stay pure: take the time from :now and randomness (session ids, "
+    "salts) from :nonce. Escape all user text before putting it in HTML. "
+    "Keep handle-request small: it only routes on method and path to other "
+    "tools, each of which is (request state) -> response plist or a helper. "
+) + webkit.USAGE
+
+
+CLI_APP_CONTRACT = (
+    "COMMAND-LINE APP CONTRACT - the harness runs the app; you write only pure "
+    "functions. The top-level tool MUST be (handle-command args state now). ARGS "
+    "is the list of words the user typed, e.g. '(\"add\" \"Buy milk\") or "
+    "'(\"list\") or '(\"done\" \"2\"); numbers arrive as strings, so use "
+    "(parse-integer word :junk-allowed t). STATE is the app's whole data, a list "
+    "of (name rows) tables such as '((\"tasks\" ((1 \"Buy milk\" \"pending\" "
+    "1700000000)))); it is NIL on the first run unless you build a zero-argument "
+    "tool initial-state. NOW is the current time in whole seconds, passed in by "
+    "the harness: functions must never read the clock or random numbers "
+    "themselves. RETURN a plist (:output \"text to show\" :state new-state); "
+    "leave :state out when nothing changed. :output is everything the user "
+    "sees, so format it as readable lines; an unknown command returns usage "
+    "help. These tested tools are already in the REGISTRY, use them and do NOT "
+    "rebuild them: (table-rows state \"tasks\"), (with-table-rows state \"tasks\" "
+    "rows), (join-strings strings separator). Test data for STATE always starts "
+    "with two opening parentheses. "
+    "COMMANDS: handle-command dispatches on (first args) and passes (rest args) "
+    "to ONE tool per command, named cmd-<word>, with signature (cmd-<word> args "
+    "state now) where ARGS holds only the words AFTER the command word, e.g. "
+    "(cmd-add '(\"Buy\" \"milk\") state now); cmd-add joins its title words with "
+    "(join-strings args \" \"). Each cmd tool returns the same RETURN plist. "
+    "Keep handle-command small: it only dispatches."
+)
+
+
+def stale_tools(tools):
+    """``{name: reason}`` for saved tools that no longer fit the project.
+
+    A project keeps what earlier, abandoned plans saved. Such a tool poisons
+    later runs: the model sees it in the registry, calls it, and inherits its
+    old data layout. A tool is stale when it breaks a purity rule, when its code looks
+    the app data up by keyword instead of as (name rows) tables, or when it
+    calls a stale tool. The rule is deliberately narrow: a working app must
+    never lose a function to a guess.
+    """
+    reasons = {}
+    for t in tools:
+        if t.get("kit"):
+            continue
+        problems = lispstyle.purity_problems(t.get("definition") or "")
+        if problems:
+            reasons[t["name"]] = "breaks a rule for pure functions: " + problems[0]
+            continue
+        # the definition itself looks app data up by KEYWORD: the layout of an
+        # abandoned plan, incompatible with the project's (name rows) tables
+        code = lispstyle.code_only(t.get("definition") or "")
+        parts = lispstyle.defun_parts(t.get("definition") or "")
+        if parts and "state" in parts[1] and re.search(
+                r"\(\s*assoc\s+:[\w-]+\s+state(?![^\s)])", code, re.I) and "keywordp" not in code:
+            reasons[t["name"]] = ("reads app data by keyword, a different layout than the "
+                                  "project's list of (name rows) tables")
+    changed = True
+    while changed:                                # whatever calls a stale tool is stale too
+        changed = False
+        for t in tools:
+            if t["name"] in reasons or t.get("kit"):
+                continue
+            code = lispstyle.code_only(t.get("definition") or "")
+            hit = next((n for n in reasons if re.search(
+                r"(?<![^\s('#])%s(?![^\s)])" % re.escape(n), code, re.I)), None)
+            if hit:
+                reasons[t["name"]] = "calls %s, which was retired" % hit
+                changed = True
+    return reasons
+
+
+def capability_gaps(prompt):
+    """Return [{"need", "instead"}] for each thing the goal asks for that the
+    sandbox cannot do. Pure keyword matching: no model call, no I/O."""
+    text = str(prompt or "")
+    return [{"need": need, "instead": instead}
+            for need, instead, pat in _CAPABILITY_RULES if pat.search(text)]
+
+
+def capability_note(gaps):
+    """Planner-prompt paragraph telling the model what to substitute. Empty
+    when there are no gaps, so ordinary prompts are unchanged."""
+    if not gaps:
+        return ""
+    lines = "; ".join("%s: %s" % (g["need"], g["instead"]) for g in gaps)
+    text = ("CAPABILITY LIMITS: your code cannot itself provide: " + lines + ". "
+            "Build what is named after each colon and never claim more than that.")
+    if any(g["need"] == "web server" for g in gaps):
+        text += " " + WEB_APP_CONTRACT
+    elif any(g["need"] == "command line" for g in gaps):
+        text += " " + CLI_APP_CONTRACT
+    return text
 
 
 class Session:
@@ -820,6 +1456,14 @@ class Session:
         self.oracle = oracle
         self.pair = pair
         self.compare = None  # None | 'running' | 'done' (main arm only)
+        self._systems = set()             # system prompt ids already logged
+        self._prerun = {}                 # test results computed side by side
+        self._slips = []                  # known slips made in this run, in order
+        self._warned = set()              # lessons already shown to the model in this run
+        self._recurred = set()            # ...that happened again anyway (counted once)
+        self._eval_ms = []                # timings of the latest rehearsal's tests
+        self.project = projects.BUILTIN   # which program this session works on
+        self.project_note = ""            # one line of project context for the model
         self.events = []
         self.state = "running"
         self.model_calls = 0
@@ -866,29 +1510,33 @@ class Session:
                     "events": self.events[since:], "next": len(self.events)}
 
     # -- model ----------------------------------------------------------
-    def _ask(self, user_text, label, system=None, temperature=None):
+    def _ask(self, user_text, label, system=None, temperature=None, effort="low",
+             deep=False):
+        """One model call. TEMPERATURE varies the answer at no extra cost; DEEP
+        turns reasoning on (slow and expensive) and is rationed per session."""
         if self.model_calls >= self.max_calls:
-            raise RuntimeError("model call budget (%d) exhausted"
-                               % self.max_calls)
+            raise BudgetExhausted("model call budget (%d) exhausted"
+                                  % self.max_calls)
         self.model_calls += 1
-        self.emit("model_call", label=label, prompt=user_text)
-        if temperature is not None:
-            # "thinking" retries are the expensive part: bound them per session
+        if deep:
             if self._deep_calls >= MAX_DEEP_CALLS:
-                temperature = None
+                deep = False
             else:
                 self._deep_calls += 1
-        if temperature is not None:
-            _TEMP.value = temperature
-            _TEMP.deep = True
+        self.emit("model_call", label=label, prompt=user_text,
+                  system=self._system_id(system or SYSTEM_PROMPT),
+                  temperature=BASE_TEMPERATURE if temperature is None else temperature,
+                  deep=deep, effort=effort if deep else "none")
+        _TEMP.effort = effort
+        _TEMP.value = temperature
+        _TEMP.deep = deep
         _TEMP.notify = lambda msg: self.emit("model_wait", message=msg)
         try:
             res = self.generate(system or SYSTEM_PROMPT, user_text)
         finally:
             _TEMP.notify = None
-            if temperature is not None:
-                _TEMP.value = None
-                _TEMP.deep = False
+            _TEMP.value = None
+            _TEMP.deep = False
         self.cost_usd += res.get("cost_usd") or 0.0
         self.input_tokens += res.get("input_tokens") or 0
         self.output_tokens += res.get("output_tokens") or 0
@@ -900,24 +1548,35 @@ class Session:
                   cost_usd=res.get("cost_usd"),
                   latency_ms=res.get("latency_ms"))
         try:
-            return normalize_plan(extract_json(res.get("text")))
+            return self._parsed(res.get("text"), label)
         except ValueError as exc:
-            # cut off or malformed JSON: retry once, bigger budget, compact reply
+            err = exc
+        # Cut off or malformed JSON. Retry with a bigger budget and a HIGHER
+        # temperature each time: at the same temperature the model repeats the
+        # same broken reply word for word.
+        for temp in JSON_RETRY_TEMPS:
             if self.model_calls >= self.max_calls:
-                raise
-            self.emit("json_retry", reason=str(exc))
+                break
+            self.emit("json_retry", reason=str(err))
+            if self.lessons is not None:
+                self.lessons.record_harness("invalid-json-reply")
             self.model_calls += 1
+            retry_text = (
+                user_text + "\nYOUR PREVIOUS REPLY WAS CUT OFF OR NOT VALID "
+                "JSON (%s). Reply with ONE complete JSON object only. Close "
+                "every string with a double quote before the next } or ], "
+                "and keep the Lisp definition compact." % str(err)[:120])
             self.emit("model_call", label=label + " (retry: invalid JSON)",
-                      prompt=user_text)
+                      prompt=retry_text,
+                      system=self._system_id(system or SYSTEM_PROMPT),
+                      temperature=temp, deep=False)
             _TEMP.max_tokens = 5000
+            _TEMP.value = temp
             try:
-                res = self.generate(
-                    system or SYSTEM_PROMPT,
-                    user_text + "\nYOUR PREVIOUS REPLY WAS CUT OFF OR NOT VALID "
-                    "JSON. Reply with ONE complete JSON object only, and keep "
-                    "the Lisp definition compact.")
+                res = self.generate(system or SYSTEM_PROMPT, retry_text)
             finally:
                 _TEMP.max_tokens = 2200
+                _TEMP.value = None
             self.cost_usd += res.get("cost_usd") or 0.0
             self.input_tokens += res.get("input_tokens") or 0
             self.output_tokens += res.get("output_tokens") or 0
@@ -928,20 +1587,64 @@ class Session:
                       estimated=bool(res.get("estimated")),
                       cost_usd=res.get("cost_usd"),
                       latency_ms=res.get("latency_ms"))
-            return normalize_plan(extract_json(res.get("text")))
+            try:
+                return self._parsed(res.get("text"), label)
+            except ValueError as exc:
+                err = exc
+        raise BadReply("the model's reply was not valid JSON: %s" % err)
 
-    def _user_prompt(self, extra="", goal=None):
-        lines = []
-        for t in self.registry.load():
-            lines.append("TOOL %s %s: %s" % (t["name"],
-                         signature(t["definition"]).split(" ", 1)[1][:-1],
-                         t.get("description", "")))
-        reg = "\n".join(lines) or "(no tools yet)"
-        text = "REGISTRY:\n%s\nGOAL: %s\n%s" % (reg, goal or self.prompt, extra)
-        if self.lessons is not None:
-            advice = self.lessons.advice()
+    def _system_id(self, system):
+        """Short id of a system prompt; its full text is logged once per session."""
+        import hashlib
+        sid = hashlib.sha1(system.encode("utf-8")).hexdigest()[:8]
+        if sid not in self._systems:
+            self._systems.add(sid)
+            self.emit("system_prompt", id=sid, chars=len(system), text=system)
+        return sid
+
+    def _parsed(self, text, label):
+        """The reply as a normalized plan; logs every automatic fix applied to it."""
+        strict = True
+        try:
+            _extract_balanced(text, text.find("{")) if isinstance(text, str) and "{" in text \
+                else None
+        except ValueError:
+            strict = False
+        plan = normalize_plan(extract_json(text))
+        fixes = plan.pop("auto_fixes", [])
+        if not strict:
+            fixes = ["repaired-json"] + fixes
+        if fixes:
+            self.emit("auto_fix", label=label, fixes=fixes,
+                      dropped=plan.get("dropped_tests") or [])
+            if self.lessons is not None:
+                self.lessons.record_fixes(fixes)
+        return plan
+
+    def _user_prompt(self, extra="", goal=None, full=False):
+        """The user message of a model call.
+
+        ``full`` (the planner) gets every tool with its example. Every other
+        call gets a registry focused on what the call is about, the short web
+        reminder, and only the two most frequent lessons.
+        """
+        tools = self.registry.load()
+        target = goal or self.prompt
+        focus = None if full else "%s\n%s" % (target, extra)
+        text = "REGISTRY:\n%s\nGOAL: %s\n%s" % (registry_text(tools, focus), target, extra)
+        if self.project_note:
+            text = self.project_note + "\n" + text
+        if not full and any(t["name"] == "handle-request" or t.get("kit") for t in tools):
+            text += "\n" + WEB_REMINDER
+        if self.lessons is not None and not full:
+            keys = self.lessons.select(self.project, self._slips, limit=2)
+            advice = self.lessons.advice(limit=2, brief=True, project=self.project,
+                                         session_keys=self._slips)
             if advice:
                 text += "\n" + advice
+                fresh = [k for k in keys if k not in self._warned]
+                self.lessons.mark_shown(fresh)
+                self._warned.update(fresh)
         return text
 
     # -- REPL -----------------------------------------------------------
@@ -957,6 +1660,19 @@ class Session:
     def run(self):
         try:
             self._run()
+        except BudgetExhausted:
+            # not a crash: the work so far is saved and the next prompt builds on it
+            names = [n for n, _ in self._built]
+            if self.lessons is not None:
+                self.lessons.record_harness("call-limit-reached")
+            self.emit("gave_up", attempts=self.model_calls, detail=(
+                "Stopped at the limit of %d model calls. %s"
+                % (self.max_calls,
+                   "Saved so far: %s." % ", ".join(names) if names
+                   else "No tool passed its tests yet.")),
+                hint=("Send the same prompt again to continue from the saved tools."
+                      if names else "Try a smaller, more specific prompt."))
+            self.state = "failed"
         except Exception as exc:  # noqa: BLE001 - surface, never hang
             self.emit("error", message="%s: %s" % (type(exc).__name__, exc))
             self.state = "error"
@@ -1053,13 +1769,36 @@ class Session:
             "stopped": ({"detail": gave[-1].get("detail"),
                          "hint": gave[-1].get("hint")} if gave else None),
             "error": errs[-1].get("message") if errs else None,
+            "capability_gaps": next((e.get("gaps") for e in ev
+                                     if e["kind"] == "capability_notice"), None) or [],
         }
 
     def _run(self):
         tools = self.registry.load()
         self.emit("goal", prompt=self.prompt, mode=self.mode, arm=self.arm,
                   pair=self.pair, expected=self.expected,
-                  oracle=self.oracle)
+                  oracle=self.oracle, project=self.project)
+        gaps = capability_gaps(self.prompt)
+        if gaps:
+            self.emit("capability_notice", gaps=gaps)
+        needs = {g["need"] for g in gaps}
+        names = {t["name"] for t in tools}
+        if "web server" in needs or "handle-request" in names:
+            added = webkit.seed(self.registry)
+        elif needs & {"command line", "database"} or "handle-command" in names:
+            added = webkit.seed(self.registry, webkit.STATE_NAMES)
+        else:
+            added = []
+        if added:
+            self.emit("kit_seeded", tools=added)
+            tools = self.registry.load()
+        if needs or names & {"handle-request", "handle-command"}:
+            # leftovers of abandoned plans must not steer this one
+            reasons = stale_tools(tools)
+            retired = self.registry.retire(reasons)
+            if retired:
+                self.emit("retired", tools=[{"name": n, "reason": reasons[n]} for n in retired])
+                tools = self.registry.load()
         self.emit("registry", tools=[t["name"] for t in tools])
         cached = self.registry.find_cached(self.prompt)
         if cached:
@@ -1071,11 +1810,11 @@ class Session:
             if worked:
                 self.registry.note_use(cached["name"], self.prompt, worked)
             return
-        hits = retrieve(self.prompt, tools)
+        # A goal that asks for a whole app is never answered by one saved tool:
+        # skip the reuse check and go straight to planning.
+        hits = [] if gaps else retrieve(self.prompt, tools)
         if hits:
-            lines = ["TOOL %s %s: %s" % (
-                t["name"], signature(t["definition"]).split(" ", 1)[1][:-1],
-                t.get("description", "")) for t in hits]
+            lines = [tool_line(t) for t in hits]
             self.emit("retrieval", tools=[t["name"] for t in hits])
             quick = self._ask("%s\nGOAL: %s" % ("\n".join(lines), self.prompt),
                               "quick-reuse", system=SHORT_SYSTEM)
@@ -1090,7 +1829,14 @@ class Session:
                     self.registry.note_use(m.group(1), self.prompt, worked)
                 return
             self.emit("retrieval_miss", tools=[t["name"] for t in hits])
-        plan = self._ask(self._user_prompt(), "plan")
+        note = capability_note(gaps)
+        if "WEB APP CONTRACT" not in note and \
+                any(t["name"] == "handle-request" for t in tools):
+            note = (note + " " + WEB_APP_CONTRACT).strip()   # follow-up on a web app
+        elif "COMMAND-LINE APP CONTRACT" not in note and \
+                any(t["name"] == "handle-command" for t in tools):
+            note = (note + " " + CLI_APP_CONTRACT).strip()
+        plan = self._ask(self._user_prompt(note, full=True), "plan")
         if plan.get("action") == "plan":
             if not self._run_steps(plan):
                 return
@@ -1180,6 +1926,10 @@ class Session:
                       spec=sub["spec"], sub=True)
             if not self._build_step(sub, depth + 1):
                 return False
+        want = (step.get("name") or "").lower()
+        if want and any((x.get("name") or "").lower() == want for x in subs) and \
+                any(t["name"].lower() == want for t in self.registry.load()):
+            return True          # the split's last tool IS this step, and it passed
         again = self._ask(self._user_prompt(
             "Now build the ORIGINAL step again, calling the new helper tools: "
             "%s" % spec, goal=spec), "retry step")
@@ -1203,8 +1953,17 @@ class Session:
             "attempt": attempt, "class": verdict.get("class"), "sig": sig,
             "tokens": tokens, "detail": detail[:300],
             "repeated": any(f["sig"] == sig for f in self._fails)})
+        keys = [k for k, _ in orc.lisp_hints(self._failure_text(verdict))]
         if self.lessons is not None:
-            self.lessons.note([k for k, _ in orc.lisp_hints(self._failure_text(verdict))])
+            self.lessons.record(keys, signature=sig, detail=detail, project=self.project,
+                                warned=self._warned - self._recurred)
+            self._recurred.update(k for k in keys if k in self._warned)
+            if verdict.get("class") in ("REPEATED_CANDIDATE", "REGRESSION",
+                                        "SPEC_INCONSISTENT", "TEST_CALL_INVALID"):
+                self.lessons.record_harness(verdict["class"])
+        for k in keys:                      # this run's own slips outrank old statistics
+            if k not in self._slips:
+                self._slips.append(k)
 
     def _build_loop(self, plan, prelude, goal=None, quiet=False):
         """Rehearse PLAN, repairing up to MAX_REPAIRS times. True if saved."""
@@ -1236,18 +1995,30 @@ class Session:
                 defs_seen.add(ndef)
                 verdict = self._rehearse(plan, self.registry.prelude())
             if verdict["ok"]:
-                return self._promote(plan)
+                broken = self._regressions(plan)
+                if not broken:
+                    return self._promote(plan)
+                verdict = {"ok": False, "stage": "regression", "got_map": {},
+                           "class": "REGRESSION",
+                           "reason": "the new %s breaks %d existing test(s)"
+                                     % (plan["name"], len(broken)),
+                           "detail": "Changing %s broke tools that call it; keep "
+                                     "their behaviour or give the new behaviour a "
+                                     "NEW tool name. %s"
+                                     % (plan["name"], "; ".join(broken[:3]))}
+                self.emit("verdict", **verdict)
             self._note_failure(verdict, attempt)
             # identical code AND identical tests after a value mismatch: the
             # model is stuck defending an expectation, so blame the test
             repeat_stuck = verdict.get("class") == "REPEATED_CANDIDATE" and \
                 bool(prev_got)
-            test_wrong = verdict.get("class") == "TEST_WRONG" or \
-                bool(verdict.get("drift")) or repeat_stuck
+            crashed = any(i.get("got") is None for i in verdict.get("infos") or [])
+            test_wrong = (verdict.get("class") == "TEST_WRONG" or
+                          bool(verdict.get("drift")) or repeat_stuck) and not crashed
             if test_wrong:
                 self._last_stuck = True
-            if not rescued and (test_wrong or (attempt >= MAX_REPAIRS
-                                               and self._last_stuck)):
+            if not rescued and not crashed and (test_wrong or (
+                    attempt >= MAX_REPAIRS and self._last_stuck)):
                 # The evidence points at the TEST, not the code: stop mutating the
                 # code. Keep it as is and swap guessed values for property tests.
                 rescued = True
@@ -1309,7 +2080,32 @@ class Session:
                     % (verdict.get("stage"), verdict.get("class") or "?",
                        verdict["reason"], verdict.get("detail") or "n/a"))
             temp = None
-            if verdict.get("class") == "COMPILER_ERROR":
+            kept = plan                 # the rehearsed plan; its definition is reused
+            if verdict.get("class") == "TEST_CALL_INVALID":
+                # the definition is right: only the test calls are not valid Lisp
+                self.emit("test_call_repair", reason=(
+                    verdict.get("detail") or verdict.get("reason") or "")[:160])
+                frozen = ["%s = %s" % (t["call"], self._frozen[t["call"]])
+                          for t in kept["tests"]
+                          if isinstance(t, dict) and t.get("call") in self._frozen]
+                body = ("A TEST CALL is not valid Lisp. The definition is correct "
+                        "and is kept EXACTLY as it is. Fix ONLY the test calls, "
+                        "and keep their expected values.\n"
+                        "Rules: a data list passed as an argument must be quoted "
+                        "with a single leading quote, e.g. '(1 \"alice\" \"pw\"), "
+                        "never a bare (1 \"alice\") list; no quote marks nested "
+                        "inside quoted data; every call is exactly ONE Lisp form; "
+                        "only call functions that exist (the definition's function "
+                        "or a saved tool in the REGISTRY).\n"
+                        "The worker said: %s\n"
+                        "%sCurrent definition (keep it exactly):\n%s\n"
+                        "Return build JSON with the same name and definition and "
+                        "corrected tests."
+                        % (" ".join((verdict.get("error_text") or "n/a").split())[:400],
+                           ("Verified expected values that must NOT change: %s\n"
+                            % "; ".join(frozen)) if frozen else "",
+                           kept["definition"]))
+            elif verdict.get("class") == "COMPILER_ERROR":
                 # syntax first: a narrow repair, not a rewrite of the algorithm
                 body = ("The code does not COMPILE. Fix ONLY the compile "
                         "error(s) shown: keep the algorithm and the tests "
@@ -1343,9 +2139,22 @@ class Session:
                         "small; helper tools in the registry may be used.\n"
                         "%sReturn build JSON." % (hint + "\n" if hint else ""))
                 temp = REWRITE_TEMPERATURE
-            plan = self._ask(self._user_prompt(head + body, goal=goal),
-                             "repair" if attempt == 0 else "rewrite",
-                             temperature=temp)
+            test_call = verdict.get("class") == "TEST_CALL_INVALID"
+            try:
+                plan = self._ask(self._user_prompt(head + body, goal=goal),
+                                 "test-calls" if test_call else
+                                 ("repair" if attempt == 0 else "rewrite"),
+                                 system=TEST_SYSTEM if test_call else None,
+                                 temperature=temp, effort="low",
+                                 deep=temp is not None and attempt >= MAX_REPAIRS - 1)
+            except BadReply as exc:
+                # unusable reply: this attempt is lost, the step is not
+                self.emit("bad_reply", reason=str(exc)[:200])
+                continue
+            if test_call and plan.get("action") == "build":
+                # keep the definition the tests were run against; take only the tests
+                plan = dict(kept, tests=plan.get("tests"),
+                            call=plan.get("call") or kept.get("call"))
             self.emit("decision", action=plan.get("action"), plan=plan)
             if plan.get("action") != "build":
                 self._last_failure = {"detail": "the model stopped building",
@@ -1354,6 +2163,32 @@ class Session:
                     self.state = "failed"
                 return False
         return False
+
+    def _regressions(self, plan):
+        """Failing tests of OTHER saved tools if PLAN replaces a tool they call.
+
+        Empty when the name is new, the code is unchanged, or nothing depends
+        on it. This is what makes a follow-up prompt safe: a refinement may
+        change a tool only if everything built on it still passes.
+        """
+        tools = self.registry.load()
+        old = next((t for t in tools if t["name"] == plan["name"]), None)
+        if not old or orc.norm_definition(old["definition"]) == \
+                orc.norm_definition(plan["definition"]):
+            return []
+        uses = re.compile(r"(?<![^\s('])%s(?![^\s)])" % re.escape(plan["name"]), re.I)
+        prelude = "%s\n%s" % (self.registry.prelude(), plan["definition"])
+        broken = []
+        for dep in tools:
+            if dep["name"] == plan["name"] or not uses.search(dep["definition"]):
+                continue
+            for t in dep.get("tests") or []:
+                env = self._repl("%s\n%s\n(gg-check %s '%s)" % (
+                    GG_CHECK, prelude, t["call"], t["expect"]), "regression")
+                if not (env.get("ok") and
+                        (env.get("return_value") or "").strip().upper() == "T"):
+                    broken.append("%s no longer gives %s" % (t["call"], t["expect"]))
+        return broken
 
     def _promote(self, plan):
         """Save a tool whose tests passed and, at top level, answer with it."""
@@ -1374,6 +2209,8 @@ class Session:
             "prompts": ([] if self._in_step
                         else [normalize_prompt(self.prompt)]),
             "call": plan["call"],
+            "eval_ms": (round(sorted(self._eval_ms)[len(self._eval_ms) // 2], 2)
+                        if self._eval_ms else None),
             "created": round(time.time(), 3)})
         for dep in self.registry.load():
             if dep["name"] != plan["name"] and re.search(
@@ -1445,10 +2282,13 @@ class Session:
                 GG_CHECK, prelude, plan["definition"], t["call"], t["expect"])
             self._shown[code] = "%s   ;; expect %s" % (t["call"], t["expect"])
             direct.append({"code": code, "expect": "T"})
+        self._eval_ms = []
+        self._prerun = self._run_side_by_side([d["code"] for d in direct])
         res = pipeline.run_candidate(
             candidate_text(plan), tests={"direct": direct},
             worker_fn=self._recording_worker(plan, prelude),
             risk_fn=self.risk_fn)
+        self._prerun = {}
         stage_names = [(s["name"], s["status"]) for s in res.get("stages", [])]
         v = res.get("verdict", {})
         items = ((res.get("evidence") or {}).get("direct") or {}).get("items") or []
@@ -1459,12 +2299,14 @@ class Session:
             idx = item.get("index")
             ok_idx = isinstance(idx, int) and 0 <= idx < len(plan["tests"])
             if item.get("pass", True):
-                if ok_idx:                     # passed: this expectation is verified
+                # passed: a FACT (number, boolean, list) is verified and frozen; a
+                # string literal is the model's own formatting, which may change
+                if ok_idx and '"' not in plan["tests"][idx]["expect"]:
                     self._frozen.setdefault(plan["tests"][idx]["call"],
                                             plan["tests"][idx]["expect"])
                 continue
             t = plan["tests"][idx] if ok_idx else {"call": "?", "expect": ""}
-            rv = (item.get("return_value") or "").strip()
+            rv = one_line(item.get("return_value") or "")
             got = rv[6:-1] if rv.upper().startswith("(:GOT ") and ok_idx else None
             err = (item.get("error") or "")
             infos.append({"index": idx, "call": t["call"], "expected": t["expect"],
@@ -1486,12 +2328,35 @@ class Session:
                 "stages": stage_names, "infos": infos, "drift": drift,
                 "error_text": " ".join(" ".join((i["error"] or "").split())
                                        for i in infos)[:2500],
-                "class": None if ok else orc.failure_class(infos, drift)}
+                "class": None if ok else orc.failure_class(
+                    infos, drift, definition=plan["definition"],
+                    calls=[t["call"] for t in plan["tests"]] + [
+                        x["call"] for tool in self.registry.load()
+                        for x in (tool.get("tests") or [])
+                        if isinstance(x, dict) and x.get("call")])}
+
+    def _run_side_by_side(self, codes):
+        """``{code: result}`` for CODES, evaluated concurrently.
+
+        Each evaluation is its own sandboxed SBCL process, so they are
+        independent. Only the real worker is parallelised; injected test
+        workers keep their strict one-at-a-time order.
+        """
+        codes = list(dict.fromkeys(codes))
+        if self.worker_fn is not _worker_fn or len(codes) < 2:
+            return {}
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(4, len(codes))) as pool:
+            return dict(zip(codes, pool.map(self.worker_fn, codes)))
 
     def _recording_worker(self, plan, prelude):
         """Worker wrapper that logs each rehearsal eval as a REPL line."""
         def run(code):
-            env = self.worker_fn(code)
+            env = self._prerun.pop(code, None) or self.worker_fn(code)
+            if env.get("candidate_ms") is not None or env.get("elapsed_ms") is not None:
+                self._eval_ms.append(env.get("candidate_ms")
+                                     if env.get("candidate_ms") is not None
+                                     else env.get("elapsed_ms"))
             shown = self._shown.get(code) or code
             if prelude and shown.startswith(prelude):
                 shown = shown[len(prelude):].lstrip("\n")
@@ -1529,11 +2394,23 @@ class Session:
             reason = (env.get("error") or "call failed").split("\n")[0]
             self.emit("repair", attempt=1, reason="answer call failed: %s"
                       % reason[:160])
+            head = re.match(r"\s*\(\s*(\S+)", call)
+            shown = ""
+            if head:
+                tool = next((t for t in self.registry.load()
+                             if t["name"].lower() == head.group(1).lower()), None)
+                if tool:
+                    passed = [x["call"] for x in (tool.get("tests") or [])
+                              if isinstance(x, dict) and x.get("call")][:3]
+                    if passed:
+                        shown = ("Calls of %s that PASSED their tests (imitate "
+                                 "their argument shapes exactly): %s\n"
+                                 % (tool["name"], " | ".join(c[:120] for c in passed)))
             plan = self._ask(self._user_prompt(
-                "YOUR CALL FAILED: %s\nCall was: %s\nReturn JSON "
+                "YOUR CALL FAILED: %s\nCall was: %s\n%sReturn JSON "
                 '{"action":"use","call":"..."} with a corrected call '
                 "(literal data from the goal, quoted lists)."
-                % (reason[:200], call)), "repair-call")
+                % (reason[:200], call, shown)), "repair-call")
             fixed = plan.get("call")
             if isinstance(fixed, str) and fixed.strip():
                 return self._finish_call(fixed, prelude, retry=False)
@@ -1724,7 +2601,8 @@ def row_from_log(path):
            "model_calls": 0, "cost_usd": 0.0, "promoted": None,
            "input_tokens": 0, "output_tokens": 0, "estimated": False,
            "tests_passed": 0, "tests_failed": 0, "arm": "main",
-           "pair": None, "state": "running", "result": None, "repairs": 0}
+           "pair": None, "state": "running", "result": None, "repairs": 0,
+           "model_ms": 0.0, "wall_s": None}
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -1743,10 +2621,12 @@ def row_from_log(path):
             row["expected"] = ev.get("expected")
             row["oracle"] = ev.get("oracle")
             row["mode"] = ev.get("mode")
+            row["project"] = ev.get("project") or projects.BUILTIN
         elif k == "model_call":
             row["model_calls"] += 1
         elif k == "model_reply":
             row["cost_usd"] += ev.get("cost_usd") or 0.0
+            row["model_ms"] += ev.get("latency_ms") or 0.0
             row["input_tokens"] += ev.get("input_tokens") or 0
             row["output_tokens"] += ev.get("output_tokens") or 0
             row["estimated"] = row["estimated"] or bool(ev.get("estimated"))
@@ -1766,6 +2646,9 @@ def row_from_log(path):
             row["expected_ok"] = ev.get("expected_ok")
         elif k == "done":
             row["state"] = ev.get("state")
+            if row.get("t") and ev.get("t"):
+                row["wall_s"] = round(ev["t"] - row["t"], 2)   # prompt sent -> answer shown
+    row["model_ms"] = round(row["model_ms"], 1)
     return row
 
 
@@ -1960,9 +2843,36 @@ class SessionManager:
         self.lessons = orc.LessonStore(AGENT_DIR / "lessons.json")
         self.live_spend = 0.0
         self._lock = threading.Lock()
+        self.projects = projects.ProjectStore(self.registry.path.parent)
+        self._registries = {}
+
+    def busy(self):
+        """True while a session is running."""
+        return self._busy
+
+    def registry_for(self, project=None):
+        """The tool registry of PROJECT (the built-in one when unknown)."""
+        pid = self.projects.resolve(project)
+        if pid == projects.BUILTIN:
+            return self.registry
+        if pid not in self._registries:
+            self._registries[pid] = ToolRegistry(self.projects.tools_path(pid))
+        return self._registries[pid]
+
+    def project_note(self, project=None):
+        """One line telling the model which program it is extending, and how."""
+        meta = self.projects.get(self.projects.resolve(project))
+        if not meta or meta["builtin"]:
+            return ""
+        return ("PROJECT: %s%s. Its saved tools are in the REGISTRY below. To ADD a "
+                "feature, build new tools that call the existing ones. To CHANGE a "
+                "tool, build it again under the SAME name: it replaces the old "
+                "version only if the tools that call it still pass their tests. "
+                "Keep every argument shape used by the existing tools."
+                % (meta["name"], " - " + meta["description"] if meta["description"] else ""))
 
     def start(self, prompt, mode="demo", compare=False, expected=None,
-              oracle=None):
+              oracle=None, project=None):
         """Returns (session_id, None) or (None, error).
 
         ``compare`` also runs the same prompt against an empty, throwaway
@@ -1983,10 +2893,12 @@ class SessionManager:
                 return None, "busy"
             self._busy = True
             sess = Session(prompt.strip(), self.generators[mode],
-                           registry=self.registry, mode=mode,
+                           registry=self.registry_for(project), mode=mode,
                            expected=expected, oracle=oracle,
                            lessons=self.lessons,
                            postmortem_dir=AGENT_DIR / "postmortems")
+            sess.project = self.projects.resolve(project)
+            sess.project_note = self.project_note(project)
             sess.compare = "running" if compare else None
             self._sessions[sess.id] = sess
         threading.Thread(target=self._chain, args=(sess, compare),
@@ -1996,6 +2908,7 @@ class SessionManager:
     def _chain(self, sess, compare):
         try:
             sess.run()
+            self.projects.touch(sess.project)
             if sess.mode == "live":
                 self.live_spend += sess.cost_usd
             if compare:
@@ -2008,6 +2921,7 @@ class SessionManager:
                         expected=sess.expected, oracle=sess.oracle,
                         lessons=self.lessons,
                         postmortem_dir=AGENT_DIR / "postmortems")
+                    twin.project = sess.project
                     twin.run()
                     self.live_spend += twin.cost_usd if sess.mode == "live" else 0.0
                 finally:
@@ -2056,38 +2970,78 @@ class SessionManager:
         sess = self._sessions.get(session_id)
         return sess.snapshot(since) if sess else None
 
-    def call_tool(self, text, mode=None):
+    def call_tool(self, text, mode=None, project=None):
         """Run one allow-listed call of a saved tool. Zero model tokens."""
-        reg = self.registry.for_mode(mode) if mode else self.registry
+        base = self.registry_for(project)
+        reg = base.for_mode(mode) if mode else base
         names = {t["name"] for t in reg.load()}
         text = quote_literals(text) if isinstance(text, str) else text
         problem = safe_expr_check(text, names)
         if problem:
-            return {"ok": False, "error": problem, "tokens": 0}
+            out = {"ok": False, "error": problem, "tokens": 0}
+            self._log_call(str(text)[:600], mode, project, dict(out, value="", error="refused: " + problem))
+            return out
         prelude = reg.prelude()
         text = re.sub(r"#'([^\s()'#]+)", r"(function \1)", text)
         env = _worker_fn("%s\n%s" % (prelude, text))
-        return {"ok": bool(env.get("ok")), "value": env.get("return_value"),
-                "error": (env.get("error") or "")[:300],
-                "elapsed_ms": env.get("elapsed_ms"), "tokens": 0}
-
-    def history(self, limit=40):
-        """Per-session summaries from the JSONL logs, oldest first."""
-        out = []
-        files = sorted((AGENT_DIR / "sessions").glob("*.jsonl"),
-                       key=lambda p: p.stat().st_mtime)[-limit:]
-        for path in files:
-            row = row_from_log(path)
-            if row and row.get("t", 0) >= self.registry.epoch():
-                out.append(row)
+        out = {"ok": bool(env.get("ok")), "value": env.get("return_value"),
+               "error": (env.get("error") or "")[:300],
+               "elapsed_ms": env.get("elapsed_ms"), "tokens": 0}
+        self._log_call(text, mode, project, out)
         return out
 
-    def tools(self, mode=None):
-        reg = self.registry.for_mode(mode) if mode else self.registry
+    def _log_call(self, text, mode, project, out):
+        """Append one typed-REPL call to ``calls.jsonl`` beside the registry."""
+        try:
+            path = self.registry.path.parent / "calls.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "t": round(time.time(), 3), "project": self.projects.resolve(project),
+                    "mode": mode, "call": text, "ok": out["ok"],
+                    "value": (out.get("value") or "")[:2000], "error": out.get("error"),
+                    "elapsed_ms": out.get("elapsed_ms")}) + "\n")
+        except OSError:
+            pass
+
+    def history(self, limit=40, project=None):
+        """Per-session summaries from the JSONL logs, oldest first.
+
+        With PROJECT given, only that project's sessions (newest LIMIT of them).
+        """
+        out = []
+        pid = self.projects.resolve(project) if project else None
+        epoch = self.registry_for(pid).epoch()
+        files = sorted((AGENT_DIR / "sessions").glob("*.jsonl"),
+                       key=lambda p: p.stat().st_mtime)
+        for path in (files if pid else files[-limit:]):
+            row = row_from_log(path)
+            if row and row.get("t", 0) >= epoch and \
+                    (pid is None or row.get("project", projects.BUILTIN) == pid):
+                out.append(row)
+        return out[-limit:]
+
+    def tools(self, mode=None, project=None):
+        base = self.registry_for(project)
+        reg = base.for_mode(mode) if mode else base
+        loaded = reg.load()
+        meta = toolmeta.describe_all(loaded)
         return [{"name": t.get("name"), "description": t.get("description"),
                  "definition": t.get("definition"), "session": t.get("session"),
                  "created": t.get("created"), "uses": t.get("uses", 0),
                  "tests": t.get("tests", []),
                  "prompts": len(t.get("prompts", [])),
-                 "mode": t.get("mode") or "demo"}
-                for t in reg.load()]
+                 "mode": t.get("mode") or "demo",
+                 "meta": meta.get(t.get("name"))}
+                for t in loaded]
+
+    def active(self):
+        """The run in progress, if any: ``{session_id, prompt, project, mode}``."""
+        with self._lock:
+            running = [s for s in self._sessions.values()
+                       if s.state == "running" and s.arm == "main"]
+        if not (self._busy and running):
+            return {"session_id": None}
+        sess = running[-1]
+        return {"session_id": sess.id, "prompt": sess.prompt,
+                "project": sess.project, "mode": sess.mode}

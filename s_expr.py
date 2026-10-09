@@ -151,6 +151,17 @@ def tokenize(text):
             if not closed:
                 _fail("unterminated string literal", text, start)
             tokens.append(_Token("atom", SString("".join(buf)), start))
+        elif ch == "#" and text[i + 1:i + 2] == "\\" and i + 2 < n:
+            # Character literal: #\' #\( #\) #\; #\" #\, are one token each,
+            # as are named ones such as #\Space. The character after the
+            # backslash is always taken, whatever it is.
+            start = i
+            i += 3
+            while i < n and text[i] not in " \t\r\n,();\"'":
+                i += 1
+            tokens.append(
+                _Token("atom", _classify_atom(text[start:i], text, start), start)
+            )
         elif ch == "'":
             # Quote sugar: 'x -> (quote x)
             tokens.append(_Token("atom", "quote-marker", i))

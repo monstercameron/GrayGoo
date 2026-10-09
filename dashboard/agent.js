@@ -13,7 +13,8 @@
     session: null, next: 0, timer: null,
     history: [], mode: "demo",
     vp: { x: 0, y: 0, k: 1 }, vpTouched: false, vpMoved: false, gdims: { w: 640, h: 340 },
-    snapshots: [], view: "session", liveOk: false, busy: false, picked: false, rows: [], pick: null
+    snapshots: [], view: "session", liveOk: false, busy: false, picked: false, rows: [], pick: null,
+    project: "scratch", projects: [], projMode: null, projPending: false
   };
   function curHistory() {
     if (state.view !== "session") {
@@ -66,8 +67,20 @@
       });
     var measured = rows.filter(function (x) { return x.twin; });
     var avgTwin = measured.length ? measured.reduce(function (a, x) { return a + tok(x.twin); }, 0) / measured.length : null;
+    // Prediction for a prompt with no measured no-memory run: answering it
+    // without the saved tool would mean building that tool again, so it costs
+    // what the build cost (or the average build, when the builder is not in view).
+    var builds = rows.filter(function (x) { return kind(x.r) === "build" && tok(x.r) > 0; });
+    var avgBuild = builds.length ? builds.reduce(function (a, x) { return a + tok(x.r); }, 0) / builds.length : null;
+    function predicted(x) {
+      var k = kind(x.r);
+      if (k !== "reuse" && k !== "cached") return tok(x.r);
+      var maker = rows.filter(function (y) { return y.r.promoted && y.r.promoted === x.r.tool && tok(y.r) > 0; })[0];
+      if (maker) return tok(maker.r);
+      return avgBuild != null ? avgBuild : (avgTwin != null ? avgTwin : tok(x.r));
+    }
     rows.forEach(function (x) {
-      x.base = x.twin ? tok(x.twin) : (avgTwin != null ? avgTwin : tok(x.r));
+      x.base = x.twin ? tok(x.twin) : predicted(x);
       x.baseMeasured = !!x.twin;
       x.twinFailed = !!(x.twin && (x.twin.state === "failed" || x.twin.state === "error" || x.twin.result == null));
       x.match = x.twin && !x.twinFailed ? (x.twin.result === x.r.result && x.r.result != null) : null;
@@ -217,112 +230,221 @@
   }
   var PHASE = { build: ["LEARN", "#b18cff"], reuse: ["REUSE", "#5ad1ff"], cached: ["REPEAT", "#7bd88a"], failed: ["FAILED", "#ff7a7a"] };
 
-  function drawPairsMobile(svg, data, demo) {
-    var W = 360, rowH = 50, top = 8, n = data.length;
-    var maxV = niceMax(data.reduce(function (a, d) { return Math.max(a, d.used, d.base); }, 0));
-    var bx = 34, bw = 232;
-    function X(v) { return bx + bw * v / maxV; }
-    svg.setAttribute("viewBox", "0 0 " + W + " " + (top + n * rowH + 6));
-    var defs = el("defs");
-    var pat = el("pattern", { id: "agHatch", width: 7, height: 7, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
-    pat.appendChild(el("rect", { width: 7, height: 7, fill: "#3a2a30" }));
-    pat.appendChild(el("rect", { width: 3, height: 7, fill: "#a0606c" }));
-    defs.appendChild(pat); svg.appendChild(defs);
-    data.forEach(function (d, i) {
-      var y0 = top + i * rowH;
-      var col = d.k === "reuse" ? "#5ad1ff" : (d.k === "cached" ? "#7bd88a" : (d.k === "failed" ? "#ff7a7a" : "#b18cff"));
-      var ph = PHASE[d.k] || PHASE.build;
-      svg.appendChild(el("rect", { x: 0, y: y0, width: W, height: rowH - 4, rx: 6, fill: ph[1], opacity: 0.08 }));
-      svg.appendChild(el("text", { x: 8, y: y0 + 29, "class": "ag-tick", fill: ph[1] }, "#" + (i + 1)));
-      var nb = el("rect", { x: bx, y: y0 + 7, width: Math.max(2, X(d.base) - bx), height: 12, rx: 3, "class": "pp-nomem" + (d.ghost ? " ghost" : "") + (d.failedTwin ? " failed" : ""), fill: d.failedTwin ? "url(#agHatch)" : "" });
-      if (!d.failedTwin) nb.removeAttribute("fill");
-      var ub = el("rect", { x: bx, y: y0 + 23, width: Math.max(d.used === 0 ? 4 : 2, X(d.used) - bx), height: 14, rx: 3, fill: col, "class": "pp-used-h" + (d.ghost ? " ghost" : "") });
-      svg.appendChild(nb); svg.appendChild(ub);
-      if (!d.ghost) {
-        [nb, ub].forEach(function (rr) { rr.style.cursor = "pointer"; rr.addEventListener("click", function () { showBarInfo(i); }); });
-        svg.appendChild(el("text", { x: Math.min(X(d.base) + 5, 262), y: y0 + 17, "class": "pp-v nomem" }, fmt(d.base)));
-        svg.appendChild(el("text", { x: Math.min(X(d.used) + 5, 262), y: y0 + 35, "class": "pp-v used" }, d.used === 0 ? "0" : fmt(d.used)));
-        var pct = d.base ? Math.round(100 * (d.base - d.used) / d.base) : 0;
-        if (pct >= 20) svg.appendChild(el("text", { x: W - 6, y: y0 + 22, "class": "pp-delta good", "text-anchor": "end" }, "−" + pct + "%"));
-        else if (pct <= -5) svg.appendChild(el("text", { x: W - 6, y: y0 + 22, "class": "pp-delta warn", "text-anchor": "end" }, "+" + Math.abs(pct) + "%"));
-        svg.appendChild(el("text", { x: W - 6, y: y0 + 38, "class": "pp-phase", fill: ph[1], "text-anchor": "end", style: "font-size:10px" }, ph[0]));
-      }
+  // ---- tokens per prompt, over time (line chart) -------------------------
+  // Money and time for a row. Measured values are used where the run recorded
+  // them; a prediction scales the row's tokens by the rates measured elsewhere.
+  function secondsOf(r) {
+    if (!r) return null;
+    if (r.wall_s != null) return r.wall_s;
+    return r.model_ms ? r.model_ms / 1000 : null;
+  }
+  function rates(rows) {
+    var tk = 0, usd = 0, tks = 0, sec = 0;
+    rows.forEach(function (x) {
+      [x.r, x.twin].forEach(function (r) {
+        if (!r) return;
+        var t = tok(r), s = secondsOf(r);
+        if (t && r.cost_usd) { tk += t; usd += r.cost_usd; }
+        if (t && s != null) { tks += t; sec += s; }
+      });
     });
-    if (demo) svg.appendChild(el("text", { x: W / 2, y: 28, "class": "ag-empty", "text-anchor": "middle" }, "Illustration, not data"));
+    return { usdPerTok: tk ? usd / tk : 0, secPerTok: tks ? sec / tks : null };
+  }
+  function seriesOf(rows) {
+    var rt = rates(rows);
+    return rows.map(function (x) {
+      var used = tok(x.r), s = secondsOf(x.r), bs = secondsOf(x.twin);
+      return {
+        x: x, k: kind(x.r), used: used, base: x.base, measured: x.baseMeasured, failedTwin: x.twinFailed,
+        cost: x.r.cost_usd || 0,
+        baseCost: x.twin ? (x.twin.cost_usd || 0) : x.base * rt.usdPerTok,
+        secs: s != null ? s : (rt.secPerTok != null ? used * rt.secPerTok : null),
+        baseSecs: bs != null ? bs : (rt.secPerTok != null ? x.base * rt.secPerTok : null)
+      };
+    });
+  }
+  // The next few prompts if the pattern holds: without tools every prompt costs
+  // the average so far; with tools, the average of the latest reuse/repeat prompts.
+  function forecast(data, n) {
+    if (data.length < 3) return [];
+    var reuse = data.filter(function (d) { return d.k === "reuse" || d.k === "cached"; }).slice(-3);
+    if (!reuse.length) return [];
+    var mean = function (arr, f) { return arr.reduce(function (a, d) { return a + f(d); }, 0) / arr.length; };
+    var out = [];
+    for (var i = 0; i < n; i++) out.push({ base: mean(data, function (d) { return d.base; }), used: mean(reuse, function (d) { return d.used; }) });
+    return out;
+  }
+  function money(v) { return v >= 1 ? "$" + v.toFixed(2) : (v >= 0.01 ? "$" + v.toFixed(3) : "$" + v.toFixed(4)); }
+  function secs(v) { return v == null ? "n/a" : (v >= 10 ? Math.round(v) + " s" : v.toFixed(1) + " s"); }
+
+  function drawSavings(data) {
+    var box = $("ag-savings");
+    clear(box);
+    if (!data.length) return;
+    var sum = function (f) { return data.reduce(function (a, d) { return a + (f(d) || 0); }, 0); };
+    var measured = data.filter(function (d) { return d.measured; }).length;
+    var note = measured === data.length ? "baseline measured on every prompt"
+      : "baseline measured on " + measured + " of " + data.length + " prompts, predicted for the rest";
+    var reused = data.some(function (d) { return d.k === "reuse" || d.k === "cached"; });
+    if (!measured && !reused) {
+      // every prompt so far built something new: there is nothing to compare against yet
+      var none = h("div", "sv");
+      none.appendChild(h("div", "sv-l", "Savings"));
+      none.appendChild(h("div", "sv-v", "none yet"));
+      none.appendChild(h("div", "sv-s", "Every prompt here built something new, so it cost what it would cost without saved tools (" +
+        fmt(sum(function (d) { return d.used; })) + " tokens so far). Savings appear when a later prompt reuses these tools, or tick \"Also run without memory\" to measure the baseline."));
+      box.appendChild(none);
+      box.style.gridTemplateColumns = "1fr";
+      return;
+    }
+    box.style.gridTemplateColumns = "";
+    function tile(label, base, used, show, extra) {
+      var d = h("div", "sv");
+      d.appendChild(h("div", "sv-l", label));
+      var v = h("div", "sv-v", show(Math.abs(base - used)) + (base >= used ? " saved" : " more"));
+      if (base > 0) v.appendChild(h("small", "", Math.round(100 * Math.abs(base - used) / base) + "% " + (base >= used ? "less" : "more")));
+      d.appendChild(v);
+      d.appendChild(h("div", "sv-s", show(used) + " with saved tools vs " + show(base) + " without. " + extra));
+      box.appendChild(d);
+    }
+    tile("Tokens", sum(function (d) { return d.base; }), sum(function (d) { return d.used; }), fmt, note + ".");
+    var baseCost = sum(function (d) { return d.baseCost; }), cost = sum(function (d) { return d.cost; });
+    if (baseCost > 0 || cost > 0) {
+      tile("Cost", baseCost, cost, money, "Real API prices; " + note + ".");
+    } else {
+      var free = h("div", "sv");
+      free.appendChild(h("div", "sv-l", "Cost"));
+      free.appendChild(h("div", "sv-v", "free"));
+      free.appendChild(h("div", "sv-s", "The scripted demo model costs nothing. Switch to Live to see dollars."));
+      box.appendChild(free);
+    }
+    if (data.some(function (d) { return d.secs != null && d.baseSecs != null; })) {
+      tile("Waiting time", sum(function (d) { return d.baseSecs; }), sum(function (d) { return d.secs; }), secs,
+        "Time from sending a prompt to its answer; " + note + ".");
+    } else {
+      var na = h("div", "sv");
+      na.appendChild(h("div", "sv-l", "Waiting time"));
+      na.appendChild(h("div", "sv-v", "n/a"));
+      na.appendChild(h("div", "sv-s", "This recording did not store timings. New runs do."));
+      box.appendChild(na);
+    }
   }
 
   function drawPairs(rows) {
-    var svg = $("ag-pairs");
+    var svg = $("ag-pairs"), tip = $("ag-linetip");
     clear(svg);
-    var W = 760, H = 250, pl = 46, pr = 14, pt = 36, pb = 46;
-    var defs = el("defs");
-    var pat = el("pattern", { id: "agHatch", width: 7, height: 7, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
-    pat.appendChild(el("rect", { width: 7, height: 7, fill: "#3a2a30" }));
-    pat.appendChild(el("rect", { width: 3, height: 7, fill: "#a0606c" }));
-    defs.appendChild(pat);
-    svg.appendChild(defs);
+    tip.hidden = true;
+    var wrapW = (svg.parentNode && svg.parentNode.clientWidth) || 760;
+    var W = Math.max(340, Math.min(1100, wrapW)), H = 290;
+    var narrow = W < 560;
+    var pl = 46, pr = narrow ? 14 : 96, pt = 18, pb = 44;
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
     var demo = rows.length === 0;
-    var data = rows;
-    if (demo) {
-      var ghost = [[330, 330, "build"], [420, 420, "build"], [380, 380, "build"], [410, 410, "build"], [140, 1150, "reuse"], [140, 1150, "reuse"], [0, 1150, "cached"]];
-      data = ghost.map(function (g) { return { ghost: true, k: g[2], used: g[0], base: g[1] }; });
-    } else {
-      data = rows.map(function (x) { return { x: x, k: kind(x.r), used: tok(x.r), base: x.base, failedTwin: x.twinFailed, measured: x.baseMeasured }; });
-    }
-    if (window.innerWidth < 640) { drawPairsMobile(svg, data, demo); return; }
-    svg.setAttribute("viewBox", "0 0 760 250");
-    var maxV = niceMax(data.reduce(function (a, d) { return Math.max(a, d.used, d.base); }, 0));
-    var n = data.length, slot = (W - pl - pr) / n;
-    var bw = Math.min(30, slot * 0.34);
+    var data = demo
+      ? [[330, 330, "build"], [420, 420, "build"], [380, 380, "build"], [410, 410, "build"], [140, 1150, "reuse"], [140, 1150, "reuse"], [0, 1150, "cached"]]
+          .map(function (g) { return { ghost: true, k: g[2], used: g[0], base: g[1], measured: true }; })
+      : seriesOf(rows);
+    drawSavings(demo ? [] : data);
+    var fc = demo ? [] : forecast(data, narrow ? 2 : 3);
+    var n = data.length, total = n + fc.length;
+    var maxV = niceMax(data.concat(fc).reduce(function (a, d) { return Math.max(a, d.used, d.base); }, 0));
+    function X(i) { return total === 1 ? (pl + W - pr) / 2 : pl + (W - pl - pr) * i / (total - 1); }
     function Y(v) { return H - pb - (H - pb - pt) * v / maxV; }
-    // phase bands
-    var groups = [];
-    data.forEach(function (d, i) {
-      var g = groups[groups.length - 1];
-      if (g && g.k === d.k) g.to = i; else groups.push({ k: d.k, from: i, to: i });
-    });
-    groups.forEach(function (g, gi) {
-      var x0 = pl + slot * g.from, x1 = pl + slot * (g.to + 1);
-      var ph = PHASE[g.k] || PHASE.build;
-      svg.appendChild(el("rect", { x: x0 + 1, y: pt - 18, width: x1 - x0 - 2, height: H - pb - pt + 18, rx: 6, fill: ph[1], opacity: gi % 2 ? 0.07 : 0.11 }));
-      svg.appendChild(el("text", { x: (x0 + x1) / 2, y: H - 6, "class": "pp-phase", fill: ph[1], "text-anchor": "middle" }, ph[0]));
-    });
+    var op = demo ? 0.3 : 1;
+
     for (var t = 0; t <= 4; t++) {
       var y = Y(maxV * t / 4);
       svg.appendChild(el("line", { x1: pl, x2: W - pr, y1: y, y2: y, "class": "ag-grid" }));
       svg.appendChild(el("text", { x: pl - 8, y: y + 4, "class": "ag-tick", "text-anchor": "end" }, fmt(maxV * t / 4)));
     }
-    svg.appendChild(el("text", { x: 4, y: 14, "class": "ag-tick" }, "tokens per prompt"));
-    data.forEach(function (d, i) {
-      var cx = pl + slot * (i + 0.5);
-      var gh = d.ghost ? " ghost" : "";
-      var bx = cx - bw - 2, ux = cx + 2;
-      // no-memory bar
-      var nb = el("rect", { x: bx, y: Y(d.base), width: bw, height: Math.max(2, H - pb - Y(d.base)), rx: 3, "class": "pp-nomem" + gh + (d.failedTwin ? " failed" : ""), fill: d.failedTwin ? "url(#agHatch)" : "" });
-      if (!d.failedTwin) nb.removeAttribute("fill");
-      // with-memory bar
-      var col = d.k === "reuse" ? "#5ad1ff" : (d.k === "cached" ? "#7bd88a" : (d.k === "failed" ? "#ff7a7a" : "#b18cff"));
-      var ub = el("rect", { x: ux, y: Y(d.used), width: bw, height: Math.max(d.used === 0 ? 4 : 2, H - pb - Y(d.used)), rx: 3, fill: col, "class": "pp-used" + gh });
-      if (!d.ghost) {
-        var tip = d.x.r.prompt + "\n" + d.used + " tokens with memory (" + d.k + ") vs " + Math.round(d.base) + " with no memory" + (d.failedTwin ? " (that run failed)" : (d.measured ? " (measured)" : " (estimated)"));
-        nb.appendChild(el("title", {}, tip)); ub.appendChild(el("title", {}, tip));
+    if (fc.length) {
+      var fx = (X(n - 1) + X(n)) / 2;
+      svg.appendChild(el("rect", { x: fx, y: pt, width: W - pr - fx + 6, height: H - pb - pt, "class": "ln-forecast" }));
+      svg.appendChild(el("text", { x: fx + 6, y: pt + 12, "class": "ln-kind" }, "FORECAST"));
+    }
+    var all = data.concat(fc);
+    function path(key, from, to) {
+      var d = "";
+      for (var i = from; i <= to; i++) d += (i === from ? "M" : "L") + X(i).toFixed(1) + "," + Y(all[i][key]).toFixed(1) + " ";
+      return d;
+    }
+    if (n > 1) {
+      // the gap between the lines is what the saved tools saved
+      var area = path("base", 0, n - 1);
+      for (var q = n - 1; q >= 0; q--) area += "L" + X(q).toFixed(1) + "," + Y(all[q].used).toFixed(1) + " ";
+      svg.appendChild(el("path", { d: area + "Z", "class": "ln-gap", opacity: demo ? 0.05 : 0.13 }));
+      // baseline: solid between two measured points, dashed where either end is predicted
+      for (var i = 1; i < n; i++) {
+        var solid = data[i].measured && data[i - 1].measured;
+        svg.appendChild(el("path", { d: path("base", i - 1, i), "class": "ln-nomem" + (solid ? "" : " pred"), opacity: op }));
       }
-      svg.appendChild(nb); svg.appendChild(ub);
-      if (!d.ghost) {
-        [nb, ub].forEach(function (rr) { rr.style.cursor = "pointer"; rr.addEventListener("click", function () { showBarInfo(i); }); });
-        if (n <= 10) svg.appendChild(el("text", { x: bx + bw / 2, y: Y(d.base) - 5, "class": "pp-v nomem", "text-anchor": "middle" }, fmt(d.base)));
-        svg.appendChild(el("text", { x: ux + bw / 2, y: Y(d.used) - 5, "class": "pp-v used", "text-anchor": "middle" }, d.used === 0 ? "0" : fmt(d.used)));
-        var pct = d.base ? Math.round(100 * (d.base - d.used) / d.base) : 0;
-        var top = Math.min(Y(d.base), Y(d.used)) - 22;
-        if (pct >= 20) svg.appendChild(el("text", { x: cx, y: Math.max(top, 12), "class": "pp-delta good", "text-anchor": "middle" }, "\u2212" + pct + "%"));
-        else if (pct <= -5) svg.appendChild(el("text", { x: cx, y: Math.max(top, 12), "class": "pp-delta warn", "text-anchor": "middle" }, "+" + Math.abs(pct) + "%"));
-        svg.appendChild(el("text", { x: cx, y: H - 22, "class": "ag-tick", "text-anchor": "middle" }, "#" + (i + 1)));
+      svg.appendChild(el("path", { d: path("used", 0, n - 1), "class": "ln-used", opacity: op }));
+    }
+    if (fc.length) {
+      svg.appendChild(el("path", { d: path("base", n - 1, total - 1), "class": "ln-nomem pred", opacity: 0.6 }));
+      svg.appendChild(el("path", { d: path("used", n - 1, total - 1), "class": "ln-used", "stroke-dasharray": "5 4", opacity: 0.6 }));
+    }
+    var step = Math.max(1, Math.ceil(n / (narrow ? 7 : 16)));
+    data.forEach(function (d, i) {
+      svg.appendChild(el("circle", { cx: X(i), cy: Y(d.base), r: 4, "class": "ln-pt " + (d.measured ? "nomem" : "hollow"), opacity: op }));
+      svg.appendChild(el("circle", { cx: X(i), cy: Y(d.used), r: 4.5, "class": "ln-pt used", opacity: op }));
+      if (!demo && (i % step === 0 || i === n - 1)) {
+        var anchor = narrow && n > 1 ? (i === 0 ? "start" : (i === n - 1 && !fc.length ? "end" : "middle")) : "middle";
+        svg.appendChild(el("text", { x: X(i), y: H - pb + 16, "class": "ag-tick", "text-anchor": anchor }, "#" + (i + 1)));
+        if (!narrow || n <= 8) svg.appendChild(el("text", { x: X(i), y: H - pb + 30, "class": "ln-kind", "text-anchor": anchor }, (PHASE[d.k] || PHASE.build)[0]));
       }
     });
+    if (!demo && n && !narrow) {
+      // direct labels at the right end of each line (text ink, not series colour)
+      var last = all[total - 1], yb = Y(last.base), yu = Y(last.used);
+      if (Math.abs(yb - yu) < 14) { yb -= 7; yu += 7; }
+      svg.appendChild(el("text", { x: X(total - 1) + 8, y: yb + 4, "class": "ln-lab" }, "without " + fmt(last.base)));
+      svg.appendChild(el("text", { x: X(total - 1) + 8, y: yu + 4, "class": "ln-lab" }, "with " + fmt(last.used)));
+    }
     if (demo) {
       svg.appendChild(el("text", { x: W / 2, y: pt + 40, "class": "ag-empty", "text-anchor": "middle" }, "Illustration, not data"));
-      svg.appendChild(el("text", { x: W / 2, y: pt + 62, "class": "ag-empty sub", "text-anchor": "middle" }, "Run the guided demo: the green bars should collapse while the red ones stay tall."));
+      svg.appendChild(el("text", { x: W / 2, y: pt + 62, "class": "ag-empty sub", "text-anchor": "middle" }, "Run the guided demo: the blue line should drop while the red one stays high."));
+      return;
     }
+    // hover: crosshair plus a tooltip with tokens, cost and time for that prompt
+    var cross = el("line", { y1: pt, y2: H - pb, "class": "ln-cross", visibility: "hidden" });
+    svg.appendChild(cross);
+    function show(i) {
+      var d = data[i];
+      cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i)); cross.setAttribute("visibility", "visible");
+      clear(tip);
+      tip.appendChild(h("div", "tt-p", "#" + (i + 1) + "  " + d.x.r.prompt));
+      var tbl = h("table");
+      function row(label, a, b) {
+        var tr = h("tr");
+        tr.appendChild(h("td", "tt-k", label)); tr.appendChild(h("td", "n", a)); tr.appendChild(h("td", "n", b));
+        tbl.appendChild(tr);
+      }
+      row("", "with tools", "without");
+      row("tokens", fmt(d.used), fmt(d.base));
+      if (d.cost || d.baseCost) row("cost", money(d.cost), money(d.baseCost));
+      if (d.secs != null && d.baseSecs != null) row("time", secs(d.secs), secs(d.baseSecs));
+      tip.appendChild(tbl);
+      var kindText = { build: "built a new tool", reuse: "reused a saved tool", cached: "exact repeat, no model call", failed: "this run failed" }[d.k];
+      tip.appendChild(h("div", "tt-k", kindText + " · baseline " + (d.failedTwin ? "measured, and that run failed" : (d.measured ? "measured" : "predicted"))));
+      tip.hidden = false;
+      var px = X(i) / W * wrapW;
+      tip.style.left = Math.max(4, Math.min(wrapW - tip.offsetWidth - 4, px + (px > wrapW / 2 ? -tip.offsetWidth - 12 : 12))) + "px";
+    }
+    function hide() { cross.setAttribute("visibility", "hidden"); tip.hidden = true; }
+    var bandW = n > 1 ? (X(1) - X(0)) : (W - pl - pr);
+    data.forEach(function (d, i) {
+      var hit = el("rect", { x: X(i) - bandW / 2, y: pt, width: bandW, height: H - pb - pt, "class": "ln-hit", tabindex: 0, role: "button",
+        "aria-label": "Prompt " + (i + 1) + ": " + d.used + " tokens with saved tools, " + Math.round(d.base) + " without" });
+      hit.addEventListener("mouseenter", function () { show(i); });
+      hit.addEventListener("mousemove", function () { show(i); });
+      hit.addEventListener("focus", function () { show(i); });
+      hit.addEventListener("mouseleave", hide);
+      hit.addEventListener("blur", hide);
+      hit.addEventListener("click", function () { showBarInfo(i); });
+      hit.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showBarInfo(i); } });
+      svg.appendChild(hit);
+    });
   }
 
   function drawCumulative(rows) {
@@ -395,7 +517,7 @@
       var k = kind(x.r);
       var tr = h("tr", "clickable");
       tr.title = "Click to put this prompt back in the box";
-      tr.addEventListener("click", function () { $("ag-prompt").value = x.r.prompt; $("ag-prompt").focus(); });
+      tr.addEventListener("click", function () { setPrompt(x.r.prompt); $("ag-prompt").focus(); });
       tr.appendChild(h("td", "num", String(i + 1)));
       var ptd = h("td", "pr");
       ptd.appendChild(document.createTextNode(x.r.prompt));
@@ -762,48 +884,529 @@
     return out;
   }
 
-  function layout(tools, ghost) {
-    var nodes = tools.map(function (t) {
-      return { name: t.name, desc: t.description, uses: t.uses || 0, deps: deps(t, tools), ghost: false };
-    });
-    if (ghost) nodes.push({ name: ghost, desc: "being tested", uses: 0, deps: [], ghost: true });
-    var depth = {};
-    function d(n, seen) {
-      if (depth[n.name] != null) return depth[n.name];
-      if (seen[n.name]) return 0;
-      seen[n.name] = 1;
-      var m = 0;
-      n.deps.forEach(function (dn) {
-        var o = nodes.filter(function (x) { return x.name === dn; })[0];
-        if (o) m = Math.max(m, d(o, seen) + 1);
-      });
-      depth[n.name] = m;
-      return m;
-    }
-    nodes.forEach(function (n) { n.depth = d(n, {}); });
-    var maxD = nodes.reduce(function (a, n) { return Math.max(a, n.depth); }, 0);
-    var cols = {};
-    nodes.forEach(function (n) { (cols[n.depth] = cols[n.depth] || []).push(n); });
-    var maxRows = Object.keys(cols).reduce(function (a, k) { return Math.max(a, cols[k].length); }, 1);
-    var W = 640, x0 = 170, x1 = Math.max(W - 80, x0 + 170 * maxD);
-    var H = Math.max(340, maxRows * 118 + 90);
-    W = x1 + 100;
-    state.gdims = { w: W, h: H };
-    Object.keys(cols).forEach(function (k) {
-      var col = cols[k], c = +k;
-      col.forEach(function (n, i) {
-        n.x = maxD === 0 ? (x0 + x1) / 2 : x0 + (x1 - x0) * c / maxD;
-        n.y = H / 2 + (i - (col.length - 1) / 2) * 118 + (c % 2 ? 12 : -12);
-      });
-    });
-    return nodes;
+  // ---------------------------------------------------------------- graph
+  // One persistent SVG scene. Nodes and edges are created once and then updated in
+  // place, so animations survive events, and pan/zoom is never reset by a redraw.
+  // The canvas has a fixed CSS size; the viewBox is the canvas's own pixel size and
+  // the single group #agVp (translate + scale) is what pan, zoom and fit change.
+  var NW = 184, NH = 64, COLW = 244, ROWH = 82, KW = 200, KH = 76;
+  var ENTRY_NAMES = { "handle-request": 1, "handle-command": 1 };
+  var VP_MIN = 0.08, VP_MAX = 4;
+  function reduced() { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+  function trunc(s, n) { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+  function ease(p) { return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2; }
+  function nowMs() { return window.performance && performance.now ? performance.now() : Date.now(); }
+
+  // 24x24 stroke icons, drawn as inline SVG paths (no emoji, no icon font)
+  var ICON = {
+    "pure": "M7 4h3l7 16 M13.5 12L7 20",
+    "reads-request": "M12 3v11 M7.5 9.5L12 14l4.5-4.5 M4 15v5h16v-5",
+    "reads-state": "M12 9V2 M9.5 4.5L12 2l2.5 2.5 M5 13c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3z M5 13v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6",
+    "writes-state": "M12 2v7 M9.5 6.5L12 9l2.5-2.5 M5 15c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3z M5 15v4c0 1.7 3.1 3 7 3s7-1.3 7-3v-4",
+    "http-response": "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M3 12h18 M12 3c3.2 3 3.2 15 0 18 M12 3c-3.2 3-3.2 15 0 18",
+    "sets-cookie": "M12 3a9 9 0 1 0 9 9a4 4 0 0 1-4-4a4 4 0 0 1-5-5z M8.5 11h.01 M12 16h.01 M15.5 13h.01 M9 15.5h.01",
+    "uses-time": "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M12 7v5l3 2",
+    "uses-random": "M5 5h14v14H5z M9 9h.01 M15 9h.01 M12 12h.01 M9 15h.01 M15 15h.01",
+    "entry-point": "M3 12h11 M10 7l5 5-5 5 M20 4v16",
+    "kit": "M4 8h16v11H4z M9 8V5h6v3 M4 13h16",
+    "cpu": "M7 7h10v10H7z M10 3v4 M14 3v4 M10 17v4 M14 17v4 M3 10h4 M3 14h4 M17 10h4 M17 14h4",
+    "disk": "M3 14h18v6H3z M3 14l3-8h12l3 8 M17 17h.01",
+    "network": "M2 9a15 15 0 0 1 20 0 M5.5 12.5a10 10 0 0 1 13 0 M9 16a5 5 0 0 1 6 0 M12 19.5h.01",
+    "plan": "M6 12h.01 M12 12h.01 M18 12h.01",
+    "fail": "M6 6l12 12 M18 6L6 18",
+    "fix": "M20 12a8 8 0 1 1-2.3-5.7 M20 4v5h-5",
+    "other": "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8"
+  };
+  var FX = {
+    "entry-point": { label: "Entry point", text: "the function the harness calls for every request or command (handle-request / handle-command)" },
+    "kit": { label: "Supplied by the harness", text: "supplied by the harness (the web kit), not written by the model" },
+    "writes-state": { label: "Writes state", text: "returns new app state, which the harness saves to disk (SQLite) when the app is mounted" },
+    "http-response": { label: "HTTP response", text: "produces an HTTP response (page or redirect) sent over the network" },
+    "sets-cookie": { label: "Sets cookie", text: "sets a browser cookie" },
+    "reads-state": { label: "Reads state", text: "reads the app’s stored data (the state the harness keeps in SQLite)" },
+    "reads-request": { label: "Reads request", text: "reads the incoming request (method, path, form, cookies)" },
+    "uses-time": { label: "Uses time", text: "depends on the current time passed in with the request" },
+    "uses-random": { label: "Uses random", text: "depends on the random nonce passed in with the request" },
+    "pure": { label: "Pure function", text: "result depends only on its arguments; no outside data at all" }
+  };
+  var FX_ORDER = ["entry-point", "kit", "writes-state", "http-response", "sets-cookie", "reads-state", "reads-request", "uses-time", "uses-random", "pure"];
+  var LAT = {
+    cpu: { label: "CPU", text: "the Lisp evaluation itself" },
+    disk: { label: "Disk", text: "state is persisted" },
+    network: { label: "Network", text: "request and response travel over HTTP" }
+  };
+  var ST_LEGEND = {
+    pending: { icon: "plan", label: "Planned", text: "dashed box: planned, not built yet" },
+    active: { icon: "plan", label: "Building now", text: "moving dashed ring: the agent is writing and testing it" },
+    failed: { icon: "fail", label: "Gave up", text: "red box with a cross: it never passed its tests, nothing was saved" },
+    notbuilt: { icon: "plan", label: "Not built", text: "dashed box: the run ended before this one was built" },
+    repairs: { icon: "fix", label: "Repair rounds", text: "the badge “fix 2” means the tests failed and the code was repaired twice" }
+  };
+
+  var G = {
+    nodes: {}, edges: {}, seq: 0, plan: [], failed: {}, promoted: {}, spawn: {}, animate: {}, kitNew: null,
+    pulses: [], active: null, running: false, finished: false, replay: false, dragging: false,
+    stepI: 0, stepN: 0, stepSub: false, splitOf: null, note: "", dirty: false, scene: null,
+    bounds: null, raf: 0, guard: 0, fxEnd: 0, lit: null, legendSig: "", vpAnim: null, lastFit: "",
+    ready: false, vw: 0, vh: 0, namesSig: "", reloading: false, reloadAgain: false, touchedAt: 0, split: {}, rs: {}, noteBad: false, selSig: "", lastSaved: null, reloadP: null
+  };
+
+  function iconPath(key) { return el("path", { d: ICON[key] || ICON.other }); }
+  function iconG(key, x, y, size, cls) {
+    var g = el("g", { transform: "translate(" + (x - size / 2).toFixed(1) + "," + (y - size / 2).toFixed(1) + ") scale(" + (size / 24).toFixed(3) + ")", "class": "ico" + (cls ? " " + cls : "") });
+    g.appendChild(iconPath(key));
+    return g;
   }
 
-  // -------------------------------------------------- graph pan and zoom
-  var VP_MIN = 0.3, VP_MAX = 4;
+  // Effects, latency and calls of one tool, from the backend's meta or a minimal client fallback.
+  function metaOf(t) {
+    var m = t && t.meta && typeof t.meta === "object" ? t.meta : null;
+    var have = !!(m && Array.isArray(m.effects));
+    var eff = [], seen = {};
+    function add(key, label, via) {
+      if (!key) return;
+      key = String(key);
+      if (seen[key]) { if (seen[key].via && !via) seen[key].via = null; return; }   // direct beats inherited
+      seen[key] = { key: key, label: label ? String(label) : "", via: via ? String(via) : null };
+      eff.push(seen[key]);
+    }
+    if (have) {
+      m.effects.forEach(function (e) { if (e && e.key) add(e.key, e.label, e.via); });
+    } else {
+      if (t && t.session === "web-kit") add("kit");
+      if (t && ENTRY_NAMES[t.name]) add("entry-point");
+    }
+    if (eff.length > 1) eff = eff.filter(function (e) { return e.key !== "pure"; });
+    if (!eff.length) add("pure");
+    var lat = m && m.latency && typeof m.latency === "object" ? m.latency : null;
+    var kinds = lat && Array.isArray(lat.kinds) ? lat.kinds.map(String) : ["cpu"];
+    var ms = lat && typeof lat.cpu_ms === "number" && isFinite(lat.cpu_ms) ? lat.cpu_ms : null;
+    return { effects: eff, kinds: kinds, ms: ms, calls: m && Array.isArray(m.calls) ? m.calls.map(String) : null };
+  }
+  function primaryOf(eff) {
+    var i, k;
+    function direct(e) { return e.key === k && !e.via; }
+    function any(e) { return e.key === k; }
+    for (i = 0; i < FX_ORDER.length; i++) { k = FX_ORDER[i]; if (eff.filter(direct)[0]) return k; }
+    for (i = 0; i < FX_ORDER.length; i++) { k = FX_ORDER[i]; if (eff.filter(any)[0]) return k; }
+    return eff.length ? eff[0].key : "pure";
+  }
+  function fxLabel(e) { return (FX[e.key] && FX[e.key].label) || e.label || e.key; }
+  function fxText(e) { return (FX[e.key] && FX[e.key].text) || ""; }
+  function msText(ms) { return ms < 1 ? "<1 ms" : Math.round(ms) + " ms"; }
+
+  // Everything a node can be filtered by in the legend.
+  function nodeHas(n, key) {
+    if (key === "fix") return n.repairs > 0;
+    var kind = key.slice(0, key.indexOf(":")), v = key.slice(key.indexOf(":") + 1);
+    if (kind === "st") return n.st === v;
+    if (!n.meta) return false;
+    if (kind === "lat") return n.meta.kinds.indexOf(v) >= 0;
+    return n.meta.effects.some(function (e) { return e.key === v; });
+  }
+
+  function tipOf(n) {
+    var lines = [n.name];
+    if (n.desc) lines.push(n.desc);
+    if (n.st === "pending") lines.push("Planned: not built yet.");
+    else if (n.st === "notbuilt") lines.push("Not built: the run ended before this one.");
+    else if (n.st === "failed") lines.push("Gave up: it never passed its tests; nothing was saved.");
+    else if (n.st === "active") lines.push("Building now (" + (n.phaseText || "building") + ").");
+    if (n.repairs) lines.push(n.repairs + " repair round" + (n.repairs === 1 ? "" : "s") + " so far.");
+    if (n.meta) {
+      lines.push("");
+      n.meta.effects.forEach(function (e) {
+        lines.push(fxLabel(e) + ": " + fxText(e) + (e.via ? " (through " + e.via + ")" : ""));
+      });
+      n.meta.kinds.forEach(function (k) {
+        var L = LAT[k] || { label: k, text: "" };
+        lines.push("Latency, " + L.label + (k === "cpu" && n.meta.ms != null ? " " + msText(n.meta.ms) : "") + ": " + L.text);
+      });
+    }
+    if (n.calls.length) lines.push("Calls: " + n.calls.join(", "));
+    if (n.callers.length) lines.push("Called by: " + n.callers.join(", "));
+    return lines.join("\n");
+  }
+  function roleSummary(n) {
+    if (!n.meta) return n.st === "failed" ? "gave up" : "not built yet";
+    return n.meta.effects.map(function (e) { return fxLabel(e) + (e.via ? " (through " + e.via + ")" : ""); }).join(", ");
+  }
+
+  // ---- scene
+  function ensureScene() {
+    var svg = $("ag-graph");
+    if (G.scene && G.scene.svg === svg && G.scene.vp.parentNode === svg) return G.scene;
+    clear(svg);
+    G.nodes = {}; G.edges = {}; G.pulses = [];
+    var defs = el("defs");
+    var pat = el("pattern", { id: "agDots", width: 32, height: 32, patternUnits: "userSpaceOnUse" });
+    pat.appendChild(el("circle", { cx: 2, cy: 2, r: 1, fill: "#2b3040" }));
+    defs.appendChild(pat);
+    var mk = el("marker", { id: "agArrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto" });
+    mk.appendChild(el("path", { d: "M0 0L10 5L0 10z", fill: "#b18cff" }));
+    defs.appendChild(mk);
+    svg.appendChild(defs);
+    var vp = el("g", { id: "agVp" });
+    vp.appendChild(el("rect", { x: -6000, y: -6000, width: 12000, height: 12000, fill: "url(#agDots)" }));
+    var kit = el("g", { "class": "ag-kitbox" });
+    kit.appendChild(el("rect", { rx: 14 }));
+    kit.appendChild(el("text", { "class": "ag-kittitle" }));
+    var edges = el("g", { "class": "ag-edges" }), nodes = el("g", { "class": "ag-nodes" }), fx = el("g", { "class": "ag-fx" });
+    vp.appendChild(kit); vp.appendChild(edges); vp.appendChild(nodes); vp.appendChild(fx);
+    svg.appendChild(vp);
+    var empty = el("g", { "class": "ag-emptyg" });
+    empty.appendChild(el("text", { "class": "ag-empty" }, "No functions yet."));
+    empty.appendChild(el("text", { "class": "ag-empty sub" }, "Ask for something and the agent will write them here."));
+    svg.appendChild(empty);
+    G.scene = { svg: svg, vp: vp, kit: kit, edges: edges, nodes: nodes, fx: fx, empty: empty };
+    G.vw = 0; G.vh = 0; G.lastFit = "";
+    return G.scene;
+  }
+  // The viewBox is the canvas's own pixel size. It changes only when the canvas is resized.
+  function measure() {
+    var svg = $("ag-graph"), r = svg.getBoundingClientRect();
+    var w = Math.round(r.width), h = Math.round(r.height);
+    if (w < 40 || h < 40) return false;
+    if (w !== G.vw || h !== G.vh) {
+      G.vw = w; G.vh = h;
+      svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+      state.gdims = { w: w, h: h };
+      if (G.scene) {
+        var t = G.scene.empty.childNodes;
+        t[0].setAttribute("x", w / 2); t[0].setAttribute("y", h / 2 - 4);
+        t[1].setAttribute("x", w / 2); t[1].setAttribute("y", h / 2 + 20);
+      }
+    }
+    return true;
+  }
+
+  // ---- layout: kit tools in a grid on the left, the rest layered by dependency depth
+  function byIdx(a, b) { return a.idx - b.idx; }
+  function layoutNodes(list) {
+    var by = {}, kitBox = null;
+    list.forEach(function (n) { by[n.name] = n; n.callers = []; });
+    list.forEach(function (n) {
+      n.calls.forEach(function (c) {
+        var o = by[c];
+        if (o && o !== n && o.callers.indexOf(n.name) < 0) o.callers.push(n.name);
+      });
+    });
+    var kit = list.filter(function (n) { return n.kit; }).sort(byIdx);
+    var app = list.filter(function (n) { return !n.kit; });
+    var memo = {};
+    function dep(n, stack) {
+      if (memo[n.name] != null) return memo[n.name];
+      if (!n.tool) return (memo[n.name] = n.hint || 0);
+      if (stack[n.name]) return 0;
+      stack[n.name] = 1;
+      var m = -1;
+      n.calls.forEach(function (c) { var o = by[c]; if (o && !o.kit) m = Math.max(m, dep(o, stack)); });
+      delete stack[n.name];
+      return (memo[n.name] = m + 1);
+    }
+    app.forEach(function (n) { n.depth = dep(n, {}); });
+    var maxOther = 0;
+    app.forEach(function (n) { if (!n.entry) maxOther = Math.max(maxOther, n.depth); });
+    app.forEach(function (n) { if (n.entry) n.depth = Math.max(n.depth, maxOther); });
+    var depths = [];
+    app.forEach(function (n) { if (depths.indexOf(n.depth) < 0) depths.push(n.depth); });
+    depths.sort(function (a, b) { return a - b; });
+    var cols = depths.map(function (d) { return app.filter(function (n) { return n.depth === d; }).sort(byIdx); });
+    // Shape the layout to the canvas: wrap crowded layers into sub-columns so the whole graph
+    // has about the canvas's aspect ratio, then pick the wrap width that fits at the largest scale.
+    var aw = Math.max(200, (G.vw || 1200) - 48), ah = Math.max(150, (G.vh || 560) - 48);
+    var SUBW = NW + 18, LGAP = 40;
+    var maxCount = cols.reduce(function (a, c) { return Math.max(a, c.length); }, Math.max(kit.length, 1));
+    function shape(R) {
+      var kc = kit.length ? Math.ceil(kit.length / R) : 0;
+      var W = kit.length ? kc * KW + 56 : 0, Hh = NH + 20;
+      if (kit.length) Hh = Math.max(Hh, Math.ceil(kit.length / kc) * KH + 52);
+      cols.forEach(function (col, i) {
+        var sub = Math.ceil(col.length / R), rows = Math.ceil(col.length / sub);
+        W += (sub - 1) * SUBW + NW + (i ? LGAP : 0);
+        Hh = Math.max(Hh, rows * ROWH);
+      });
+      return { W: W, H: Hh, k: Math.min(aw / W, ah / Hh, 1) };
+    }
+    var bestR = maxCount, bestK = -1;
+    for (var R = maxCount; R >= 1; R--) {
+      var sh = shape(R);
+      if (sh.k > bestK + 1e-9) { bestK = sh.k; bestR = R; }
+    }
+    var kitCols = kit.length ? Math.ceil(kit.length / bestR) : 0;
+    var kitRows = kit.length ? Math.ceil(kit.length / kitCols) : 0;
+    var best = shape(bestR), H = best.H, rh = ROWH;
+    // spare height: spread rows a little so the graph also fills the canvas vertically
+    if (best.H * best.k < ah) { var sc0 = Math.min(1.45, ah / (best.H * best.k)); rh = ROWH * sc0; H = best.H * sc0; }
+    var minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    function grow(n) {
+      minX = Math.min(minX, n.tx - NW / 2); maxX = Math.max(maxX, n.tx + NW / 2);
+      minY = Math.min(minY, n.ty - NH / 2 - 10); maxY = Math.max(maxY, n.ty + NH / 2 + 10);
+    }
+    kit.forEach(function (n, i) {
+      n.tx = KW / 2 + (i % kitCols) * KW;
+      n.ty = (H - kitRows * KH) / 2 + KH / 2 + Math.floor(i / kitCols) * KH;
+      grow(n);
+    });
+    if (kit.length) {
+      var top = (H - kitRows * KH) / 2;
+      kitBox = { x: -(KW - NW) / 2 - 14, y: top - 40, w: kitCols * KW + 8, h: kitRows * KH + 52 };
+      minX = Math.min(minX, kitBox.x); minY = Math.min(minY, kitBox.y); maxY = Math.max(maxY, kitBox.y + kitBox.h);
+    }
+    var cursor = kit.length ? kitCols * KW + 56 : 0;
+    cols.forEach(function (col, c) {
+      var sub = Math.ceil(col.length / bestR), rows = Math.ceil(col.length / sub);
+      var keyed = col.map(function (n, i) {
+        var ys = [];
+        n.calls.forEach(function (cn) { var o = by[cn]; if (o && !o.kit && o._col != null && o._col < c && o.ty != null) ys.push(o.ty); });
+        return { n: n, key: ys.length ? ys.reduce(function (a, b) { return a + b; }, 0) / ys.length : (H - col.length * rh) / 2 + i * rh };
+      });
+      keyed.sort(function (a, b) { return a.key - b.key || a.n.idx - b.n.idx; });
+      keyed.forEach(function (k, i) {
+        var sc = Math.floor(i / rows), r = i % rows, inCol = Math.min(rows, col.length - sc * rows);
+        k.n.tx = cursor + NW / 2 + sc * SUBW;
+        k.n.ty = (H - inCol * rh) / 2 + rh / 2 + r * rh;
+        k.n._col = c; grow(k.n);
+      });
+      cursor += (sub - 1) * SUBW + NW + LGAP;
+    });
+    var b = list.length ? { x0: minX - 8, y0: minY - 8, x1: maxX + 8, y1: maxY + 8 } : null;
+    return { bounds: b, kit: kitBox };
+  }
+
+  // ---- node DOM
+  function buildNode(n) {
+    var g = el("g", { "class": "gn", tabindex: 0, role: "button", "data-name": n.name });
+    var title = el("title");
+    var inner = el("g", { "class": "gn-in" });
+    var ring = el("rect", { "class": "ring", x: -NW / 2 - 5, y: -NH / 2 - 5, width: NW + 10, height: NH + 10, rx: 15 });
+    var box = el("rect", { "class": "box", x: -NW / 2, y: -NH / 2, width: NW, height: NH, rx: 11 });
+    var disc = el("circle", { "class": "disc", cx: -NW / 2 + 24, cy: -6, r: 15 });
+    var prim = el("g", { "class": "prim" });
+    var nm = el("text", { "class": "nm", x: -NW / 2 + 46, y: -9 });
+    var sb = el("text", { "class": "sb", x: -NW / 2 + 46, y: 5 });
+    var row = el("g", { "class": "row" });
+    var fix = el("g", { "class": "fix" });
+    fix.appendChild(el("rect", { x: NW / 2 - 52, y: -NH / 2 - 9, width: 56, height: 18, rx: 9 }));
+    var ft = el("text", { x: NW / 2 - 24, y: -NH / 2 + 4 });
+    fix.appendChild(ft);
+    var ftt = el("title"); fix.appendChild(ftt);
+    [ring, box, disc, prim, nm, sb, row, fix].forEach(function (c) { inner.appendChild(c); });
+    g.appendChild(title); g.appendChild(inner);
+    n.d = { g: g, title: title, inner: inner, box: box, prim: prim, nm: nm, sb: sb, row: row, fix: fix, ft: ft, ftt: ftt };
+    n.r = {};
+    g.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") { e.preventDefault(); e.stopPropagation(); selectTool(n.name); }
+    });
+    G.scene.nodes.appendChild(g);
+  }
+  function put(n, key, node, attr, val) {
+    if (n.r[key] === val) return;
+    n.r[key] = val; node.setAttribute(attr, val);
+  }
+  function putT(n, key, node, val) {
+    if (n.r[key] === val) return;
+    n.r[key] = val; node.textContent = val;
+  }
+  function placeNode(n) { n.d.g.setAttribute("transform", "translate(" + n.x.toFixed(1) + " " + n.y.toFixed(1) + ")"); }
+
+  var PHASE_TEXT = { building: "building", thinking: "thinking…", testing: "testing", repairing: "repairing", splitting: "splitting…", passed: "tests passed" };
+
+  function paintNode(n) {
+    var d = n.d, cls = "gn st-" + n.st + (n.kit ? " kit" : "") + (n.entry ? " entry" : "");
+    if (n.spawnCls) cls += " " + n.spawnCls;
+    if (n.flashN) cls += n.flashN % 2 ? " flash-a" : " flash-b";
+    if (state.sel === n.name) cls += " sel";
+    if (state.hot === n.name) cls += " hot";
+    if (G.lit) cls += nodeHas(n, G.lit) ? " lit" : " dim";
+    put(n, "cls", d.g, "class", cls);
+    if (n.spawnDelay != null) { var dl = n.spawnDelay + "ms"; if (d.inner.style.animationDelay !== dl) d.inner.style.animationDelay = dl; }
+    putT(n, "nm", d.nm, trunc(n.name, 19));
+    var sub;
+    if (n.st === "active") { n.phaseText = PHASE_TEXT[n.phase] || "building"; sub = n.phaseText; }
+    else if (n.st === "pending") sub = n.split ? "split into parts" : "planned";
+    else if (n.st === "notbuilt") sub = "not built";
+    else if (n.st === "failed") sub = "gave up";
+    else sub = n.kit ? "web kit" : "saved" + (n.uses ? " · reused " + n.uses + "×" : "");
+    putT(n, "sb", d.sb, sub);
+    putT(n, "tip", d.title, tipOf(n));
+    put(n, "aria", d.g, "aria-label", n.name + ", " + (n.st === "done" ? "saved" : n.st === "notbuilt" ? "not built" : n.st === "failed" ? "gave up" : n.st === "active" ? "building, " + (n.phaseText || "") : "planned") + ". " + roleSummary(n) + ". Press Enter to show details.");
+    put(n, "pressed", d.g, "aria-pressed", state.sel === n.name ? "true" : "false");
+    var fx = n.repairs > 0;
+    put(n, "fixv", d.fix, "style", fx ? "" : "display:none");
+    if (fx) { putT(n, "fixt", d.ft, "fix " + n.repairs); putT(n, "fixtt", d.ftt, n.repairs + " repair round" + (n.repairs === 1 ? "" : "s") + ": the tests failed and the code was repaired"); }
+    var sig = n.st + "|" + (n.meta ? n.meta.effects.map(function (e) { return e.key + (e.via ? ">" + e.via : ""); }).join(",") + "|" + n.meta.kinds.join(",") + "|" + n.meta.ms : "-");
+    if (n.r.sig !== sig) { n.r.sig = sig; paintIcons(n); }
+  }
+
+  function paintIcons(n) {
+    var d = n.d;
+    clear(d.prim); clear(d.row);
+    var cx = -NW / 2 + 24, cy = -6;
+    if (!n.meta || n.st === "pending" || n.st === "notbuilt" || (n.st === "active" && !n.tool)) {
+      d.prim.appendChild(iconG("plan", cx, cy, 22, "ico-st"));
+      return;
+    }
+    if (n.st === "failed") { d.prim.appendChild(iconG("fail", cx, cy, 20, "ico-st")); return; }
+    var eff = n.meta.effects, pk = primaryOf(eff);
+    var pe = eff.filter(function (e) { return e.key === pk; })[0];
+    var pg = iconG(pk, cx, cy, 20, pe && pe.via ? "ico-inh" : "");
+    pg.appendChild(el("title", {}, fxLabel(pe || { key: pk }) + (pe && pe.via ? " (through " + pe.via + ")" : "") + ": " + (FX[pk] ? FX[pk].text : "")));
+    d.prim.appendChild(pg);
+    var rest = eff.filter(function (e) { return e.key !== pk; });
+    var shown = rest.length > 5 ? rest.slice(0, 4) : rest, bx = -NW / 2 + 14, by = NH / 2 - 15;
+    shown.forEach(function (e, i) {
+      var cxb = bx + i * 18;
+      var g = el("g", { "class": "bdg" + (e.via ? " inh" : "") });
+      g.appendChild(el("circle", { cx: cxb, cy: by, r: 8 }));
+      g.appendChild(iconG(e.key, cxb, by, 11));
+      g.appendChild(el("title", {}, fxLabel(e) + (e.via ? " (through " + e.via + ")" : "") + ": " + fxText(e)));
+      d.row.appendChild(g);
+    });
+    if (rest.length > shown.length) {
+      var more = el("text", { "class": "more", x: bx + shown.length * 18 - 6, y: by + 4 }, "+" + (rest.length - shown.length));
+      more.appendChild(el("title", {}, rest.slice(shown.length).map(function (e) { return fxLabel(e); }).join(", ")));
+      d.row.appendChild(more);
+    }
+    var lx = 6;
+    n.meta.kinds.forEach(function (k) {
+      if (!ICON[k]) return;
+      var g = el("g", { "class": "lat" });
+      g.appendChild(iconG(k, lx + 6, by, 12));
+      var L = LAT[k] || { label: k, text: "" };
+      var msShow = k === "cpu" && n.meta.ms != null;
+      g.appendChild(el("title", {}, "Latency, " + L.label + (msShow ? " " + msText(n.meta.ms) : "") + ": " + L.text));
+      lx += 16;
+      if (msShow) {
+        g.appendChild(el("text", { x: lx, y: by + 3.5 }, msText(n.meta.ms)));
+        lx += msText(n.meta.ms).length * 5.6 + 6;
+      }
+      d.row.appendChild(g);
+    });
+  }
+
+  // ---- edges ("strings"): one path per call, drawn from the callee to the caller
+  function edgePath(a, b) {
+    var hw = NW / 2, x1, x2, mx;
+    if (b.x - a.x > NW + 10) {
+      x1 = a.x + hw; x2 = b.x - hw; mx = (x1 + x2) / 2;
+      return "M" + x1.toFixed(1) + "," + a.y.toFixed(1) + " C" + mx.toFixed(1) + "," + a.y.toFixed(1) + " " + mx.toFixed(1) + "," + b.y.toFixed(1) + " " + x2.toFixed(1) + "," + b.y.toFixed(1);
+    }
+    if (a.x - b.x > NW + 10) {
+      x1 = a.x - hw; x2 = b.x + hw; mx = (x1 + x2) / 2;
+      return "M" + x1.toFixed(1) + "," + a.y.toFixed(1) + " C" + mx.toFixed(1) + "," + a.y.toFixed(1) + " " + mx.toFixed(1) + "," + b.y.toFixed(1) + " " + x2.toFixed(1) + "," + b.y.toFixed(1);
+    }
+    var xa = a.x + hw, xb = b.x + hw, bulge = 56;
+    return "M" + xa.toFixed(1) + "," + a.y.toFixed(1) + " C" + (xa + bulge).toFixed(1) + "," + a.y.toFixed(1) + " " + (xb + bulge).toFixed(1) + "," + b.y.toFixed(1) + " " + xb.toFixed(1) + "," + b.y.toFixed(1);
+  }
+  function setEdgeD(ed) {
+    var a = G.nodes[ed.from], b = G.nodes[ed.to];
+    if (!a || !b) return;
+    ed.el.setAttribute("d", edgePath(a, b));
+  }
+  function addEdge(key, from, to, delay, t) {
+    var path = el("path", { "class": "ge" });
+    var ed = { key: key, from: from, to: to, el: path, mode: "static", t0: 0, d: 450 };
+    G.edges[key] = ed;
+    setEdgeD(ed);
+    G.scene.edges.appendChild(path);
+    if (delay != null) {
+      ed.mode = "wait"; ed.t0 = t + delay;
+      path.style.opacity = "0";
+      G.fxEnd = Math.max(G.fxEnd, ed.t0 + ed.d + 900);
+    } else {
+      path.setAttribute("marker-end", "url(#agArrow)");
+      if (G.ready && !G.replay && !reduced()) path.setAttribute("class", "ge fade");
+    }
+    return ed;
+  }
+  function removeEdge(key) {
+    var ed = G.edges[key];
+    if (!ed) return;
+    if (ed.el.parentNode) ed.el.parentNode.removeChild(ed.el);
+    delete G.edges[key];
+  }
+  function edgeStep(ed, now, force) {
+    var a = G.nodes[ed.from], b = G.nodes[ed.to];
+    if (!a || !b) return false;
+    var moving = !!(a.mv || b.mv);
+    if (ed.mode === "wait") {
+      if (!force && now < ed.t0) return true;
+      ed.mode = "draw"; ed.t0 = force ? now - ed.d : Math.max(now, ed.t0);
+    }
+    if (ed.mode === "draw") {
+      var p = force ? 1 : (now - ed.t0) / ed.d;
+      setEdgeD(ed);
+      if (p >= 1) {
+        ed.mode = "done";
+        ed.el.style.opacity = ""; ed.el.removeAttribute("stroke-dasharray"); ed.el.removeAttribute("stroke-dashoffset");
+        ed.el.setAttribute("marker-end", "url(#agArrow)");
+        if (!force && !reduced()) startPulse(ed, now);
+        return false;
+      }
+      var len = 0;
+      try { len = ed.el.getTotalLength(); } catch (e) { len = 300; }
+      ed.el.style.opacity = "";
+      ed.el.setAttribute("stroke-dasharray", len.toFixed(1) + " " + len.toFixed(1));
+      ed.el.setAttribute("stroke-dashoffset", (len * (1 - ease(Math.max(0, p)))).toFixed(1));
+      return true;
+    }
+    if (moving) setEdgeD(ed);
+    return moving;
+  }
+  function startPulse(ed, now) {
+    var c = el("circle", { r: 4, "class": "gpulse" });
+    G.scene.fx.appendChild(c);
+    G.pulses.push({ c: c, key: ed.key, t0: now, d: 700 });
+    G.fxEnd = Math.max(G.fxEnd, now + 1200);
+  }
+
+  // ---- animation loop: node glides, string draws, pulses, view fits. Time based; one frame loop.
+  function kick() {
+    if (!G.raf) G.raf = window.requestAnimationFrame(function () { G.raf = 0; tick(nowMs(), false); });
+    clearTimeout(G.guard);
+    G.guard = setTimeout(function () { tick(nowMs(), true); }, Math.max(700, G.fxEnd - nowMs() + 300));
+  }
+  function tick(now, force) {
+    var more = false, name, key;
+    for (name in G.nodes) {
+      var n = G.nodes[name];
+      if (!n.mv) continue;
+      var p = force ? 1 : (now - n.mv.t0) / n.mv.d;
+      if (p >= 1) { n.x = n.tx; n.y = n.ty; n.mv = null; }
+      else { p = ease(Math.max(0, p)); n.x = n.mv.x0 + (n.tx - n.mv.x0) * p; n.y = n.mv.y0 + (n.ty - n.mv.y0) * p; more = true; }
+      placeNode(n);
+    }
+    for (key in G.edges) { if (edgeStep(G.edges[key], now, force)) more = true; }
+    if (G.vpAnim) {
+      var v = G.vpAnim, q = force ? 1 : (now - v.t0) / v.d;
+      if (q >= 1) { state.vp = v.to; G.vpAnim = null; }
+      else { q = ease(Math.max(0, q)); state.vp = { k: v.from.k + (v.to.k - v.from.k) * q, x: v.from.x + (v.to.x - v.from.x) * q, y: v.from.y + (v.to.y - v.from.y) * q }; more = true; }
+      applyVp();
+    }
+    G.pulses = G.pulses.filter(function (pl) {
+      var ed = G.edges[pl.key], u = force ? 1 : (now - pl.t0) / pl.d;
+      if (!ed || u >= 1) { if (pl.c.parentNode) pl.c.parentNode.removeChild(pl.c); return false; }
+      try {
+        var len = ed.el.getTotalLength(), pt = ed.el.getPointAtLength(len * Math.max(0, u));
+        pl.c.setAttribute("cx", pt.x.toFixed(1)); pl.c.setAttribute("cy", pt.y.toFixed(1));
+        pl.c.setAttribute("opacity", (Math.sin(Math.max(0, u) * Math.PI)).toFixed(2));
+      } catch (e) { /* path not measurable yet */ }
+      more = true;
+      return true;
+    });
+    if (more && !force) { if (!G.raf) G.raf = window.requestAnimationFrame(function () { G.raf = 0; tick(nowMs(), false); }); }
+  }
+
+  // ---- pan, zoom, fit
   function applyVp() {
     var g = document.getElementById("agVp");
-    if (g) g.setAttribute("transform", "translate(" + state.vp.x.toFixed(1) + " " + state.vp.y.toFixed(1) + ") scale(" + state.vp.k.toFixed(3) + ")");
+    if (!g) return;
+    g.setAttribute("transform", "translate(" + state.vp.x.toFixed(1) + " " + state.vp.y.toFixed(1) + ") scale(" + state.vp.k.toFixed(3) + ")");
+    // level of detail: far out, drop the small print so names stay readable
+    var svg = $("ag-graph"), k = state.vp.k;
+    svg.classList.toggle("lod-mid", k < 0.55);
+    svg.classList.toggle("lod-low", k < 0.35);
   }
   function svgPoint(svg, cx, cy) {
     var m = svg.getScreenCTM();
@@ -812,20 +1415,36 @@
     var q = p.matrixTransform(m.inverse());
     return { x: q.x, y: q.y };
   }
+  function userMoved() { state.vpTouched = true; G.touchedAt = nowMs(); G.vpAnim = null; }
   function zoomAt(px, py, factor) {
     var k0 = state.vp.k, k1 = Math.min(VP_MAX, Math.max(VP_MIN, k0 * factor));
     if (k1 === k0) return;
-    state.vp.x = px - (px - state.vp.x) * (k1 / k0);
-    state.vp.y = py - (py - state.vp.y) * (k1 / k0);
-    state.vp.k = k1; state.vpTouched = true; applyVp();
+    state.vp = { k: k1, x: px - (px - state.vp.x) * (k1 / k0), y: py - (py - state.vp.y) * (k1 / k0) };
+    userMoved(); applyVp();
   }
-  function fitView(auto) {
-    var d = state.gdims, pad = 28;
-    // content bounds = the laid-out nodes plus the model core on the left
-    var k = Math.min(VP_MAX, Math.max(VP_MIN, Math.min((d.w - pad * 2) / d.w, (d.h - pad * 2) / d.h) * 1.0));
-    state.vp = { k: k, x: (d.w - d.w * k) / 2, y: (d.h - d.h * k) / 2 };
-    if (!auto) state.vpTouched = false;
-    applyVp();
+  // Transform that puts every node inside the canvas with padding; shrinks as far as needed, never grows past 1.
+  function fitTarget() {
+    var b = G.bounds, w = G.vw, h = G.vh, pad = 24;
+    if (!b) return { k: 1, x: 0, y: 0 };
+    var bw = Math.max(1, b.x1 - b.x0), bh = Math.max(1, b.y1 - b.y0);
+    var k = Math.min((w - pad * 2) / bw, (h - pad * 2) / bh, 1);
+    k = Math.max(VP_MIN, k);
+    return { k: k, x: (w - bw * k) / 2 - b.x0 * k, y: (h - bh * k) / 2 - b.y0 * k };
+  }
+  function fitView(auto, animate) {
+    if (!measure()) return;
+    var to = fitTarget();
+    if (!auto) { state.vpTouched = false; G.touchedAt = 0; }
+    if (animate && G.ready && !reduced()) {
+      G.vpAnim = { from: { k: state.vp.k, x: state.vp.x, y: state.vp.y }, to: to, t0: nowMs(), d: 380 };
+      G.fxEnd = Math.max(G.fxEnd, nowMs() + 800);
+      kick();
+    } else { G.vpAnim = null; state.vp = to; applyVp(); }
+  }
+  function mayAutoFit() {
+    if (G.dragging) return false;
+    if (!state.vpTouched) return true;
+    return G.running && nowMs() - G.touchedAt > 2000;
   }
   function initGraphView() {
     var svg = $("ag-graph");
@@ -859,105 +1478,296 @@
         var d = Math.hypot(a.x - b.x, a.y - b.y);
         var mid = svgPoint(svg, (a.x + b.x) / 2, (a.y + b.y) / 2);
         zoomAt(mid.x, mid.y, (pinch.k * d / (pinch.d || 1)) / state.vp.k);
-        state.vpMoved = true;
+        state.vpMoved = true; G.dragging = true;
       } else if (drag) {
         var m = svg.getScreenCTM(); if (!m) return;
         var dx = (e.clientX - drag.x) / m.a, dy = (e.clientY - drag.y) / m.d;
-        if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) state.vpMoved = true;
-        state.vp.x = drag.vx + dx; state.vp.y = drag.vy + dy;
-        state.vpTouched = true; applyVp();
+        if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) { state.vpMoved = true; G.dragging = true; }
+        if (!state.vpMoved) return;
+        state.vp = { k: state.vp.k, x: drag.vx + dx, y: drag.vy + dy };
+        userMoved(); applyVp();
       }
     });
     function end(e) {
       delete ptrs[e.pointerId]; pinch = null;
-      if (!Object.keys(ptrs).length) { drag = null; svg.classList.remove("grabbing"); setTimeout(function () { state.vpMoved = false; }, 0); }
+      if (!Object.keys(ptrs).length) {
+        drag = null; G.dragging = false; svg.classList.remove("grabbing");
+        if (state.vpMoved) G.touchedAt = nowMs();
+        setTimeout(function () { state.vpMoved = false; }, 0);
+      }
     }
     svg.addEventListener("pointerup", end);
     svg.addEventListener("pointercancel", end);
-    svg.addEventListener("dblclick", function (e) { e.preventDefault(); fitView(false); });
+    svg.addEventListener("dblclick", function (e) { e.preventDefault(); fitView(false, true); });
+    // selection: one delegated handler (pointer capture can retarget a click to the svg itself)
+    svg.addEventListener("click", function (e) {
+      if (state.vpMoved) return;
+      var t = e.target && e.target.closest ? e.target.closest(".gn") : null;
+      if (!t) {
+        var u = document.elementFromPoint(e.clientX, e.clientY);
+        t = u && u.closest ? u.closest(".gn") : null;
+      }
+      if (t) selectTool(t.getAttribute("data-name"));
+    });
     svg.addEventListener("keydown", function (e) {
       var d = state.gdims, step = 40, c = { x: d.w / 2, y: d.h / 2 };
       if (e.key === "+" || e.key === "=") zoomAt(c.x, c.y, 1.2);
       else if (e.key === "-" || e.key === "_") zoomAt(c.x, c.y, 1 / 1.2);
-      else if (e.key === "0") fitView(false);
-      else if (e.key === "ArrowLeft") { state.vp.x += step; state.vpTouched = true; applyVp(); }
-      else if (e.key === "ArrowRight") { state.vp.x -= step; state.vpTouched = true; applyVp(); }
-      else if (e.key === "ArrowUp") { state.vp.y += step; state.vpTouched = true; applyVp(); }
-      else if (e.key === "ArrowDown") { state.vp.y -= step; state.vpTouched = true; applyVp(); }
+      else if (e.key === "0") fitView(false, true);
+      else if (e.key === "ArrowLeft") { state.vp.x += step; userMoved(); applyVp(); }
+      else if (e.key === "ArrowRight") { state.vp.x -= step; userMoved(); applyVp(); }
+      else if (e.key === "ArrowUp") { state.vp.y += step; userMoved(); applyVp(); }
+      else if (e.key === "ArrowDown") { state.vp.y -= step; userMoved(); applyVp(); }
       else return;
       e.preventDefault();
     });
     function center() { var d = state.gdims; return { x: d.w / 2, y: d.h / 2 }; }
     $("ag-zin").addEventListener("click", function () { var c = center(); zoomAt(c.x, c.y, 1.3); });
     $("ag-zout").addEventListener("click", function () { var c = center(); zoomAt(c.x, c.y, 1 / 1.3); });
-    $("ag-zfit").addEventListener("click", function () { fitView(false); });
+    $("ag-zfit").addEventListener("click", function () { fitView(false, true); });
+    if (window.ResizeObserver) {
+      var rtimer = null;
+      new ResizeObserver(function () {
+        clearTimeout(rtimer);
+        rtimer = setTimeout(function () {
+          if (!measure()) return;
+          if (mayAutoFit() || !G.ready) { fitView(true, false); G.ready = true; } else applyVp();
+        }, 60);
+      }).observe(svg);
+    }
   }
 
-  function drawGraph() {
-    var svg = $("ag-graph");
-    clear(svg);
-    var defs = el("defs");
-    var rg = el("radialGradient", { id: "agCore" });
-    rg.appendChild(el("stop", { offset: 0, "stop-color": "#b18cff" }));
-    rg.appendChild(el("stop", { offset: 1, "stop-color": "#3f6ad8" }));
-    defs.appendChild(rg);
-    var flt = el("filter", { id: "agGlow", x: "-60%", y: "-60%", width: "220%", height: "220%" });
-    flt.appendChild(el("feGaussianBlur", { stdDeviation: 5, result: "b" }));
-    var mrg = el("feMerge");
-    mrg.appendChild(el("feMergeNode", { "in": "b" }));
-    mrg.appendChild(el("feMergeNode", { "in": "SourceGraphic" }));
-    flt.appendChild(mrg);
-    defs.appendChild(flt);
-    svg.appendChild(defs);
-    var vp = el("g", { id: "agVp" });
-    svg.appendChild(vp);
-    var nodes = layout(state.tools, state.ghost);
-    var gd = state.gdims;
-    svg.setAttribute("viewBox", "0 0 " + gd.w + " " + gd.h);
-    for (var gx = 20; gx < gd.w; gx += 32)
-      for (var gy = 20; gy < gd.h; gy += 32)
-        vp.appendChild(el("circle", { cx: gx, cy: gy, r: 1, fill: "#2b3040" }));
-    var by = {};
-    nodes.forEach(function (n) { by[n.name] = n; });
-    var core = { x: 62, y: gd.h / 2 };
-    function curve(a, b, cls, w) {
-      var mx = (a.x + b.x) / 2;
-      return el("path", {
-        d: "M" + a.x + "," + a.y + " C" + mx + "," + a.y + " " + mx + "," + b.y + " " + b.x + "," + b.y,
-        fill: "none", "class": cls, "stroke-width": w || 2
-      });
-    }
-    nodes.forEach(function (n) {
-      if (!n.deps.length) vp.appendChild(curve(core, n, "ag-edge root" + (n.ghost ? " ghost" : "")));
-      n.deps.forEach(function (dn) {
-        if (by[dn]) vp.appendChild(curve(by[dn], n, "ag-edge dep" + (n.ghost ? " ghost" : ""), 2.5));
-      });
-    });
-    vp.appendChild(el("circle", { cx: core.x, cy: core.y, r: 32, fill: "url(#agCore)", filter: "url(#agGlow)", "class": "ag-core" }));
-    vp.appendChild(el("text", { x: core.x, y: core.y + 4, "class": "ag-core-t" }, "model"));
-    vp.appendChild(el("text", { x: core.x, y: core.y + 54, "class": "ag-note" }, "writes tools"));
+  // ---- reconcile the scene with the data (incremental; never rebuilds what exists)
+  function hasEff(meta, key) { return !!meta && meta.effects.some(function (e) { return e.key === key; }); }
 
-    nodes.forEach(function (n, i) {
-      var g = el("g", { "class": "ag-node" + (n.ghost ? " ghost" : "") + (state.hot === n.name ? " hot" : "") + (state.sel === n.name ? " sel" : ""), transform: "translate(" + n.x + "," + n.y + ")" });
-      g.style.animationDelay = (i * 0.04) + "s";
-      g.appendChild(el("circle", { r: 27, "class": "ring" }));
-      g.appendChild(el("circle", { r: 19, "class": "dot", filter: n.ghost ? "" : "url(#agGlow)" }));
-      g.appendChild(el("text", { y: 5, "class": "glyph" }, n.ghost ? "?" : "λ"));
-      g.appendChild(el("text", { y: 46, "class": "lbl" }, n.name));
-      if (!n.ghost) g.appendChild(el("text", { y: 60, "class": "lbl sub" }, "reused " + n.uses + "×"));
-      g.appendChild(el("title", {}, n.desc || n.name));
-      if (!n.ghost) {
-        g.style.cursor = "pointer";
-        g.addEventListener("click", function () { if (state.vpMoved) return; state.sel = n.name; drawGraph(); showDetail(); });
+  function syncGraph() {
+    var sc = ensureScene();
+    var haveSize = measure();
+    var t = nowMs(), rm = reduced(), tools = state.tools || [];
+    G.namesSig = tools.map(function (x) { return x.name; }).join("\u0001");
+    var seen = {};
+    function node(name) {
+      var n = G.nodes[name];
+      if (!n) {
+        n = G.nodes[name] = { name: name, idx: G.seq++, st: "pending", calls: [], callers: [], repairs: 0, phase: "", uses: 0, hint: 0, x: 0, y: 0, tx: 0, ty: 0, isNew: true, depth: 0 };
       }
-      vp.appendChild(g);
-    });
-    if (!nodes.length) {
-      vp.appendChild(el("text", { x: 360, y: 166, "class": "ag-empty" }, "No tools yet."));
-      vp.appendChild(el("text", { x: 360, y: 190, "class": "ag-empty sub" }, "Ask for something and the model will write one."));
+      seen[name] = 1;
+      return n;
     }
+    tools.forEach(function (tl) {
+      var n = node(tl.name);
+      n.desc = tl.description; n.uses = tl.uses || 0;
+      if (n.tool !== tl || n.namesSeen !== G.namesSig) {
+        n.tool = tl; n.meta = metaOf(tl); n.namesSeen = G.namesSig;
+        n.calls = (n.meta.calls || deps(tl, tools)).filter(function (c) { return c !== tl.name; });
+      }
+      n.kit = hasEff(n.meta, "kit") || tl.session === "web-kit";
+      n.entry = hasEff(n.meta, "entry-point");
+      n.st = (G.running && G.active === n.name && !G.promoted[n.name]) ? "active" : "done";
+    });
+    Object.keys(G.promoted).forEach(function (name) {
+      if (seen[name]) return;
+      node(name).st = "done";
+    });
+    function unbuilt(name, spec, hint) {
+      var n = node(name);
+      if (hint != null) n.hint = hint;
+      if (spec) n.desc = spec;
+      n.tool = n.tool || null;
+      n.st = G.failed[name] ? "failed" : (!G.running ? "notbuilt" : (G.active === name ? "active" : "pending"));
+      n.split = !!G.split[name] && n.st === "pending";
+      return n;
+    }
+    G.plan.forEach(function (p) { if (!seen[p.name]) unbuilt(p.name, p.spec, p.hint); });
+    if (state.ghost && !seen[state.ghost]) unbuilt(state.ghost, "being tested", 0);
+    if (G.active && !seen[G.active]) unbuilt(G.active, "", 0);
+    Object.keys(G.failed).forEach(function (name) { if (!seen[name]) unbuilt(name, "", 0); });
+    Object.keys(G.nodes).forEach(function (name) {
+      if (seen[name]) return;
+      var n = G.nodes[name];
+      if (n.d && n.d.g.parentNode) n.d.g.parentNode.removeChild(n.d.g);
+      delete G.nodes[name];
+    });
+    var list = Object.keys(G.nodes).map(function (k) { return G.nodes[k]; });
+    var lay = layoutNodes(list);
+    G.bounds = lay.bounds;
+    // kit backdrop
+    var kb = sc.kit;
+    if (lay.kit) {
+      kb.style.display = "";
+      var kr = kb.firstChild, kt = kb.lastChild;
+      kr.setAttribute("x", lay.kit.x); kr.setAttribute("y", lay.kit.y); kr.setAttribute("width", lay.kit.w); kr.setAttribute("height", lay.kit.h);
+      kt.setAttribute("x", lay.kit.x + 14); kt.setAttribute("y", lay.kit.y + 22);
+      kt.textContent = "Web kit · supplied by the harness";
+    } else kb.style.display = "none";
+    var kitIdx = 0;
+    list.forEach(function (n) {
+      var fresh = !n.d;
+      if (fresh) { buildNode(n); n.x = n.tx; n.y = n.ty; placeNode(n); }
+      else if (n.x !== n.tx || n.y !== n.ty) {
+        if (rm || !G.ready || G.replay || !haveSize) { n.x = n.tx; n.y = n.ty; n.mv = null; placeNode(n); }
+        else { n.mv = { x0: n.x, y0: n.y, t0: t, d: 460 }; G.fxEnd = Math.max(G.fxEnd, t + 900); }
+      }
+      if (!rm && G.ready && !G.replay) {
+        if (n.st === "done" && G.spawn[n.name]) { n.spawnCls = "spawn"; delete G.spawn[n.name]; }
+        else if (n.st === "done" && G.kitNew && fresh && G.kitNew.indexOf(n.name) >= 0) { n.spawnCls = "spawn"; n.spawnDelay = (kitIdx++) * 70; G.fxEnd = Math.max(G.fxEnd, t + 70 * kitIdx + 900); }
+        else if (fresh && n.st !== "done" && !n.spawnCls) n.spawnCls = "appear";
+      } else delete G.spawn[n.name];
+      paintNode(n);
+    });
+    if (G.kitNew && G.kitNew.some(function (nm) { return G.nodes[nm]; })) G.kitNew = null;
+    // edges
+    var want = {};
+    list.forEach(function (n) {
+      if (!n.tool) return;
+      n.calls.forEach(function (c) { if (G.nodes[c] && c !== n.name) want[c + ">" + n.name] = { from: c, to: n.name }; });
+    });
+    Object.keys(G.edges).forEach(function (key) { if (!want[key]) removeEdge(key); });
+    Object.keys(want).forEach(function (key) {
+      var w = want[key], ed = G.edges[key];
+      if (!ed) {
+        var a = G.animate[w.to], delay = null;
+        if (a && !rm && !G.replay && G.ready) { delay = Math.max(0, a.at - t) + a.i * 520; a.i++; }
+        ed = addEdge(key, w.from, w.to, delay, t);
+      } else if (ed.mode === "static" || ed.mode === "done") setEdgeD(ed);
+      var kk = G.nodes[w.from].kit && G.nodes[w.to].kit;
+      var wantCls = "ge" + (kk ? " kk" : "");
+      if (ed.mode !== "wait" && ed.mode !== "draw" && ed.el.getAttribute("class") !== wantCls && ed.el.getAttribute("class") !== wantCls + " fade") ed.el.setAttribute("class", wantCls);
+    });
+    Object.keys(G.animate).forEach(function (name) { if (G.nodes[name] && G.nodes[name].tool) delete G.animate[name]; });
+    applyMarks();
+    sc.empty.style.display = list.length ? "none" : "";
+    renderLegend(list);
+    renderSel();
+    renderStatus();
+    // auto-fit: first draw, new nodes, plan arrival; never while dragging
+    if (haveSize) {
+      var sig = list.length + ":" + G.vw + "x" + G.vh + ":" + (G.bounds ? [G.bounds.x0, G.bounds.y0, G.bounds.x1, G.bounds.y1].join(",") : "");
+      if (sig !== G.lastFit && mayAutoFit()) { fitView(true, G.ready); G.lastFit = sig; G.ready = true; }
+      else if (!G.ready) { G.ready = true; }
+    }
+    kick();
+  }
+
+  function applyMarks() {
+    var sel = state.sel;
+    Object.keys(G.edges).forEach(function (key) {
+      var ed = G.edges[key], hl = sel && (ed.from === sel || ed.to === sel);
+      var dim = G.lit && !(G.nodes[ed.from] && G.nodes[ed.to] && nodeHas(G.nodes[ed.from], G.lit) && nodeHas(G.nodes[ed.to], G.lit));
+      ed.el.classList.toggle("hl", !!hl);
+      ed.el.classList.toggle("dim", !!dim);
+    });
+  }
+
+  function selectTool(name) {
+    state.sel = name;
+    drawGraph();
+    showDetail();
+  }
+
+  // ---- status strip, selection strip, legend
+  function renderStatus() {
+    var box = $("ag-gstatus"), t = $("ag-gstatus-t");
+    var text = G.note;
+    if (!text) {
+      var n = (state.tools || []).length;
+      text = G.running ? "Working…"
+        : (n ? n + (n === 1 ? " function" : " functions") + " in " + currentProject().name + ". Select one to see its source and tests."
+             : "No functions yet in " + currentProject().name + ". Describe what to build in the box on the left.");
+    }
+    if (t.textContent !== text) t.textContent = text;
+    box.classList.toggle("busy", G.running);
+    box.classList.toggle("bad", !G.running && G.noteBad);
+  }
+
+  function renderSel() {
+    var box = $("ag-gsel"), n = G.nodes[state.sel];
+    if (!n) { if (!box.hidden) { box.hidden = true; clear(box); } G.selSig = ""; return; }
+    var sig = [n.name, n.st, roleSummary(n), n.calls.length, n.callers.length, n.meta && n.meta.ms].join("|");
+    if (G.selSig === sig && !box.hidden) return;
+    G.selSig = sig;
+    box.hidden = false; clear(box);
+    box.appendChild(h("b", "", n.name));
+    box.appendChild(h("span", "ag-gsel-r", " — " + roleSummary(n)));
+    box.appendChild(h("span", "muted", " · calls " + n.calls.length + ", called by " + n.callers.length +
+      (n.meta && n.meta.ms != null ? " · CPU " + msText(n.meta.ms) : "")));
+    if (n.tool) {
+      var go = h("button", "ag-ghost", "Show source and tests ↓");
+      go.type = "button";
+      go.addEventListener("click", function () {
+        var dt = $("ag-detail");
+        dt.scrollIntoView({ behavior: reduced() ? "auto" : "smooth", block: "start" });
+      });
+      box.appendChild(go);
+    } else {
+      box.appendChild(h("span", "muted", n.st === "failed" ? " · never saved" : " · no source yet"));
+    }
+    var x = h("button", "ag-ghost", "Clear");
+    x.type = "button";
+    x.addEventListener("click", function () { state.sel = null; drawGraph(); showDetail(); });
+    box.appendChild(x);
+  }
+
+  function legendIcon(key) {
+    var s = el("svg", { viewBox: "0 0 24 24", width: 20, height: 20, "class": "lg-ico", "aria-hidden": "true", focusable: "false" });
+    s.appendChild(iconPath(key));
+    return s;
+  }
+  function renderLegend(list) {
+    var box = $("ag-glegend");
+    var eff = {}, lat = {}, st = {}, inh = false, fix = false;
+    list.forEach(function (n) {
+      if (n.meta && n.st !== "pending" && n.st !== "notbuilt") {
+        n.meta.effects.forEach(function (e) { eff[e.key] = 1; if (e.via) inh = true; });
+        n.meta.kinds.forEach(function (k) { lat[k] = 1; });
+      }
+      if (n.st !== "done") st[n.st] = 1;
+      if (n.repairs > 0) fix = true;
+    });
+    var entries = [];
+    FX_ORDER.forEach(function (k) { if (eff[k]) entries.push({ key: "eff:" + k, icon: k, label: FX[k].label, text: FX[k].text }); });
+    Object.keys(eff).forEach(function (k) { if (!FX[k]) entries.push({ key: "eff:" + k, icon: "other", label: k, text: "reported by the server" }); });
+    ["cpu", "disk", "network"].forEach(function (k) { if (lat[k]) entries.push({ key: "lat:" + k, icon: k, label: "Latency: " + LAT[k].label, text: LAT[k].text }); });
+    ["pending", "active", "notbuilt", "failed"].forEach(function (k) { if (st[k]) entries.push({ key: "st:" + k, icon: ST_LEGEND[k].icon, label: ST_LEGEND[k].label, text: ST_LEGEND[k].text }); });
+    if (fix) entries.push({ key: "fix", icon: "fix", label: ST_LEGEND.repairs.label, text: ST_LEGEND.repairs.text });
+    var sig = entries.map(function (e) { return e.key; }).join(",") + "|" + inh;
+    if (G.lit && !entries.some(function (e) { return e.key === G.lit; })) G.lit = null;
+    if (sig === G.legendSig) return;
+    G.legendSig = sig;
+    clear(box);
+    if (!entries.length) return;
+    var ul = h("ul", "ag-lgl");
+    entries.forEach(function (e) {
+      var li = h("li");
+      var b = h("button", "ag-lg");
+      b.type = "button";
+      b.setAttribute("data-key", e.key);
+      b.setAttribute("aria-pressed", G.lit === e.key ? "true" : "false");
+      b.title = "Highlight the functions with this: " + e.label;
+      b.appendChild(legendIcon(e.icon));
+      var tx = h("span", "lg-x");
+      tx.appendChild(h("span", "lg-t", e.label));
+      tx.appendChild(h("span", "lg-d", e.text));
+      b.appendChild(tx);
+      b.addEventListener("click", function () {
+        G.lit = G.lit === e.key ? null : e.key;
+        Array.prototype.forEach.call(box.querySelectorAll(".ag-lg"), function (x) { x.setAttribute("aria-pressed", x.getAttribute("data-key") === G.lit ? "true" : "false"); });
+        syncGraph();
+      });
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+    var note = "Click an entry to highlight the functions that have it.";
+    if (inh) note += " An icon with a dashed outline is inherited: the function gets that effect through a function it calls (hover to see which).";
+    box.appendChild(h("p", "muted ag-lg-note", note));
+  }
+
+  // ---- everything that follows a change of the tool list
+  function drawGraph() {
+    syncGraph();
     $("ag-count").textContent = state.tools.length + (state.tools.length === 1 ? " tool" : " tools");
-    if (!state.vpTouched && nodes.length > 4) fitView(true); else applyVp();
+    updateProjectText();
     drawToolTable();
     var ex = $("ag-call-ex");
     clear(ex);
@@ -968,6 +1778,7 @@
       b.addEventListener("click", function () { $("ag-call").value = call; tryCall(); });
       ex.appendChild(b);
     }
+    updateCmdBox();
   }
 
   function drawToolTable() {
@@ -991,20 +1802,148 @@
     box.appendChild(tbl);
   }
 
+  // ---- function detail: inputs, output, ancestors, used-by, definition ----
+  function toolByName(name) {
+    return state.tools.filter(function (x) { return x.name === name; })[0];
+  }
+  // Parameter names and docstring, read from "(defun name (a b) "doc" ...)".
+  function signatureOf(t) {
+    var m = /^\s*\(defun\s+\S+\s*\(([^)]*)\)\s*(?:"((?:[^"\\]|\\.)*)")?/.exec(t.definition || "");
+    var params = m ? m[1].split(/\s+/).filter(function (p) { return p; }) : [];
+    return { params: params, doc: m && m[2] ? m[2].replace(/\\(.)/g, "$1") : "" };
+  }
+  // Levels of tools reached by following NEXT from NAME: [[direct], [one step further], ...].
+  function levels(name, next) {
+    var seen = {}, out = [], frontier = [name];
+    seen[name] = true;
+    while (frontier.length) {
+      var layer = [];
+      frontier.forEach(function (n) {
+        next(n).forEach(function (d) { if (!seen[d]) { seen[d] = true; layer.push(d); } });
+      });
+      if (layer.length) out.push(layer);
+      frontier = layer;
+    }
+    return out;
+  }
+  function callsOf(name) { var t = toolByName(name); return t ? deps(t, state.tools) : []; }
+  function callersOf(name) {
+    return state.tools.filter(function (x) { return deps(x, state.tools).indexOf(name) >= 0; })
+      .map(function (x) { return x.name; });
+  }
+  // The arguments of a test call "(name a b)" as text, split at the top level.
+  function callArgs(call, name) {
+    var m = new RegExp("^\\s*\\(\\s*" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=[\\s)])", "i").exec(call || "");
+    if (!m) return null;
+    var out = [], depth = 0, cur = "", str = false, i;
+    for (i = m[0].length; i < call.length; i++) {
+      var c = call[i];
+      if (str) { cur += c; if (c === "\\") { cur += call[++i] || ""; } else if (c === '"') str = false; continue; }
+      if (c === '"') { str = true; cur += c; continue; }
+      if (c === "(") depth++;
+      if (c === ")") { if (depth === 0) break; depth--; }
+      if (/\s/.test(c) && depth === 0) { if (cur) { out.push(cur); cur = ""; } continue; }
+      cur += c;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+  function chipRow(box, label, layers, emptyText) {
+    var sec = h("div", "dt-sec");
+    sec.appendChild(h("div", "dt-h", label));
+    if (!layers.length) { sec.appendChild(h("div", "muted", emptyText)); box.appendChild(sec); return; }
+    layers.forEach(function (layer, depth) {
+      var row = h("div", "dt-chips");
+      row.appendChild(h("span", "dt-depth", depth === 0 ? "directly" : (depth === 1 ? "one step further" : depth + " steps further")));
+      layer.forEach(function (n) {
+        var b = h("button", "ag-chip dt-chip", n);
+        b.type = "button";
+        b.title = (toolByName(n) || {}).description || n;
+        b.setAttribute("aria-label", "Show the function " + n);
+        b.addEventListener("click", function () { state.sel = n; drawGraph(); showDetail(); });
+        row.appendChild(b);
+      });
+      sec.appendChild(row);
+    });
+    box.appendChild(sec);
+  }
+
   function showDetail() {
     var box = $("ag-detail");
-    var t = state.tools.filter(function (x) { return x.name === state.sel; })[0];
+    var t = toolByName(state.sel);
     if (!t) { box.hidden = true; return; }
     box.hidden = false;
     clear(box);
+    var sig = signatureOf(t);
     var top = h("div", "dt-top");
     top.appendChild(h("b", "", t.name));
     top.appendChild(h("span", "muted", " — " + (t.description || "")));
     box.appendChild(top);
-    box.appendChild(h("pre", "dt-src", t.definition || ""));
-    (t.tests || []).forEach(function (x) {
-      box.appendChild(h("div", "dt-test", "\u2713 " + x.call + "  →  " + x.expect));
-    });
+    box.appendChild(h("div", "dt-meta",
+      (t.session === "web-kit" ? "supplied by the harness (web kit)" : "written by the model") +
+      " · " + (t.tests || []).length + " passing test" + ((t.tests || []).length === 1 ? "" : "s") +
+      " · reused " + (t.uses || 0) + "×"));
+
+    // Inputs
+    var inp = h("div", "dt-sec");
+    inp.appendChild(h("div", "dt-h", "Inputs"));
+    if (sig.params.length) {
+      var row = h("div", "dt-chips");
+      sig.params.forEach(function (p, i) {
+        row.appendChild(h("span", "dt-param" + (p.charAt(0) === "&" ? " kw" : ""), p.charAt(0) === "&" ? p : (i + 1) + ". " + p));
+      });
+      inp.appendChild(row);
+    } else {
+      inp.appendChild(h("div", "muted", "none: it takes no arguments"));
+    }
+    box.appendChild(inp);
+
+    // Output
+    var outp = h("div", "dt-sec");
+    outp.appendChild(h("div", "dt-h", "Output"));
+    outp.appendChild(h("div", "", sig.doc || t.description || "not described"));
+    box.appendChild(outp);
+
+    // Examples: inputs -> output, from the tests it passed
+    var ex = h("div", "dt-sec");
+    ex.appendChild(h("div", "dt-h", "Examples it passed (inputs → output)"));
+    if ((t.tests || []).length) {
+      var tbl = h("table", "dt-ex");
+      var hr = h("tr");
+      (sig.params.length ? sig.params.filter(function (p) { return p.charAt(0) !== "&"; }) : ["call"]).concat(["output"])
+        .forEach(function (c) { hr.appendChild(h("th", "", c)); });
+      tbl.appendChild(hr);
+      var cols = hr.children.length - 1;
+      (t.tests || []).forEach(function (x) {
+        var tr = h("tr");
+        var args = callArgs(x.call, t.name);
+        if (args && args.length === cols && sig.params.length) {
+          args.forEach(function (a) { tr.appendChild(h("td", "dt-code", a)); });
+        } else {
+          var td = h("td", "dt-code", x.call);
+          td.colSpan = cols;
+          tr.appendChild(td);
+        }
+        tr.appendChild(h("td", "dt-code good", x.expect));
+        tbl.appendChild(tr);
+      });
+      var wrap = h("div", "dt-scroll");
+      wrap.appendChild(tbl);
+      ex.appendChild(wrap);
+    } else {
+      ex.appendChild(h("div", "muted", "no recorded tests"));
+    }
+    box.appendChild(ex);
+
+    chipRow(box, "Ancestors (functions this one is built from)", levels(t.name, callsOf),
+      "none: it uses only built-in Lisp");
+    chipRow(box, "Used by (functions built on this one)", levels(t.name, callersOf),
+      "nothing calls it yet");
+
+    var def = h("div", "dt-sec");
+    def.appendChild(h("div", "dt-h", "Definition"));
+    def.appendChild(h("pre", "dt-src", t.definition || ""));
+    box.appendChild(def);
   }
 
   // ----------------------------------------------------------- REPL pane
@@ -1042,6 +1981,23 @@
     state.waitEl.textContent = state.waitText + " (" + sec + "s" + (sec > 25 ? ", still working: hard retries think longer" : "") + ")";
   }
 
+  // Shown before the first model call: what the sandbox cannot do for this goal.
+  // Text goes in through textContent (h), so goal text is never parsed as HTML.
+  function renderCapNotice(gaps) {
+    var box = $("ag-capnotice");
+    clear(box);
+    box.hidden = !(gaps && gaps.length);
+    if (box.hidden) return;
+    box.appendChild(h("div", "cap-t", "How this goal maps onto pure Lisp functions"));
+    gaps.forEach(function (g) { box.appendChild(h("div", "cap-l", g.need + " → " + g.instead)); });
+  }
+
+  // "a", "a and b", "a, b and c"
+  function joinWords(words) {
+    if (words.length < 2) return words.join("");
+    return words.slice(0, -1).join(", ") + " and " + words[words.length - 1];
+  }
+
   // The clean end-of-run card: what happened, what was built, what it cost.
   function renderSummary(m) {
     var box = $("ag-summary");
@@ -1060,6 +2016,13 @@
       title = "\u2717 Couldn\u2019t finish this one";
     }
     box.appendChild(h("div", "sum-t", title));
+    if (m.capability_gaps && m.capability_gaps.length) {
+      box.appendChild(h("div", "sum-l cap-sum",
+        (m.outcome === "success" ? "Built as pure functions. For " : "This goal needs ") +
+        joinWords(m.capability_gaps.map(function (g) { return g.need; })) +
+        (m.outcome === "success" ? ", see the notice above; use Run server in the project bar to try a web app."
+                                 : ", which pure functions only provide as described in the notice above.")));
+    }
     if (m.outcome === "success" && m.answer && m.answer.ok) {
       var v = String(m.answer.value == null ? "" : m.answer.value);
       var oneLine = v.indexOf("\n") < 0;
@@ -1095,15 +2058,19 @@
     RUNTIME_ERROR: "the code crashed",
     IMPLEMENTATION_WRONG: "the code gives a different value",
     TEST_WRONG: "the expected value looks like a guess",
+    TEST_CALL_INVALID: "a test call is not valid Lisp; the code itself was never the problem",
+    REGRESSION: "the change breaks a tool that already worked",
     AMBIGUOUS: "expected values keep changing",
     SPEC_INCONSISTENT: "the tests contradict each other",
     REPEATED_CANDIDATE: "same code as a failed attempt"
   };
 
   function onEvent(ev) {
+    gEvent(ev);
     switch (ev.kind) {
       case "goal":
         clear(repl); clear($("ag-log")); clear($("ag-stages")); $("ag-summary").hidden = true;
+        renderCapNotice([]);
         $("ag-answer").textContent = "…"; $("ag-answer-call").textContent = "working";
         say("Goal: " + ev.prompt, "goal");
         replLine("c", ";; session " + (state.session || "") + " — " + ev.mode + " model");
@@ -1122,6 +2089,9 @@
         break;
       case "model_wait":
         say(ev.message, "fail");
+        break;
+      case "capability_notice":
+        renderCapNotice(ev.gaps);
         break;
       case "summary":
         renderSummary(ev);
@@ -1166,6 +2136,21 @@
       case "oracle_reference":
         say("Independent check: the " + ev.algo + " reference says " + ev.call + " is " + ev.expected + " but the code returned " + ev.got + ". The code is wrong here.", "fail");
         break;
+      case "bad_reply":
+        say("The model's reply was unreadable even after retries. That attempt is skipped; trying again.", "fail");
+        break;
+      case "kit_seeded":
+        say("Added the web kit to this project (" + ev.tools.length + " tested helper tools such as " + ev.tools.slice(0, 3).join(", ") + "). No tokens used.", "build");
+        break;
+      case "retired":
+        (ev.tools || []).forEach(function (t) {
+          say("Retired the leftover function " + t.name + ": it " + t.reason + ". It is kept on disk but no longer offered to the model.", "build");
+        });
+        reloadTools();
+        break;
+      case "test_call_repair":
+        say("The test call is broken, not the code. Keeping the code and asking the model to fix only the tests.", "build");
+        break;
       case "repeat_candidate":
         say("The model sent the same code as a failed attempt; skipping it instead of re-running.", "fail");
         break;
@@ -1185,8 +2170,7 @@
         break;
       case "promoted":
         say("Saved “" + ev.name + "” to the tool registry", "pass");
-        state.ghost = null; state.hot = ev.name;
-        api("GET", "/api/agent/tools?mode=" + state.mode).then(function (r) { state.tools = r.data.tools || []; drawGraph(); });
+        state.ghost = null; state.hot = ev.name;   // gEvent reloads the tools and animates the new node
         break;
       case "result":
         say("Answer: " + (ev.ok ? ev.value : "failed — " + ev.error), ev.ok ? "answer" : "fail");
@@ -1216,38 +2200,321 @@
     }
   }
 
+  // ------------------------------------------- live build choreography (events -> graph)
+  // Per-step run facts live in G.rs (keyed by name) so they survive until the node exists.
+  function rs(name) { return G.rs[name] || (G.rs[name] = { repairs: 0, phase: "", flashN: 0 }); }
+  function markDirty() { G.dirty = true; }
+  function flushSync() { if (G.dirty) { G.dirty = false; syncGraph(); } }
+  function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
+
+  function resetRunState() {
+    G.plan = []; G.failed = {}; G.promoted = {}; G.spawn = {}; G.animate = {}; G.split = {}; G.rs = {};
+    G.active = null; G.stepI = 0; G.stepN = 0; G.stepSub = false; G.splitOf = null; G.kitNew = null;
+    G.note = ""; G.noteBad = false; G.running = false; G.finished = false; G.lit = null; G.lastSaved = null;
+  }
+  var PHASE_NOTE = { thinking: "asking the model", testing: "running tests", repairing: "tests failed, repairing", splitting: "splitting into smaller functions", passed: "tests passed" };
+  function buildNote() {
+    var name = G.active;
+    if (!name) return;
+    var r = rs(name);
+    var s = "Building " + name + (G.stepN ? " (" + G.stepI + " of " + G.stepN + ")" : "");
+    if (G.stepSub && G.splitOf && G.splitOf !== name) s += " — part of " + G.splitOf;
+    if (r.repairs) s += " · attempt " + (r.repairs + 1);
+    if (PHASE_NOTE[r.phase]) s += " · " + PHASE_NOTE[r.phase];
+    G.note = s;
+  }
+
+  function finishRun(ev) {
+    if (!G.running && G.finished) return;
+    var built = Object.keys(G.promoted).length, planned = G.plan.length, failed = Object.keys(G.failed).length;
+    G.running = false; G.finished = true; G.active = null;
+    Object.keys(G.rs).forEach(function (k) { G.rs[k].phase = ""; });
+    var ok = !ev || ev.state === "done" || ev.state == null;
+    if (ok && !failed) {
+      G.noteBad = false;
+      G.note = built ? "Finished — saved " + (planned > built ? built + " of " + planned + " planned functions" : plural(built, "function")) + " this run."
+                     : "Finished — answered with functions that already exist.";
+    } else {
+      G.noteBad = true;
+      G.note = "Stopped — " + (planned ? built + " of " + planned + " planned functions saved; the dashed ones were not built." : (built ? plural(built, "function") + " saved." : "nothing new was saved."));
+    }
+    markDirty();
+  }
+
+  function gEvent(ev) {
+    var name = G.active;
+    switch (ev.kind) {
+      case "goal":
+        resetRunState();
+        G.running = true;
+        G.note = "Reading your goal…";
+        if (!G.dragging) { state.vpTouched = false; G.lastFit = ""; }
+        break;
+      case "kit_seeded":
+        G.kitNew = (ev.tools || []).slice();
+        G.note = "Adding the web kit: " + plural(G.kitNew.length, "helper function") + ", no tokens used.";
+        reloadTools();
+        break;
+      case "plan":
+        var steps = ev.steps || [], sub = !!ev.sub;
+        if (!sub) { G.plan = []; G.split = {}; }
+        var D = Math.min(Math.max(steps.length - 1, 0), 4);
+        var parent = sub && G.active ? G.nodes[G.active] : null;
+        var ph = parent ? Math.max(0, (parent.depth || 0) - 1) : 0;
+        steps.forEach(function (s, i) {
+          var nm = s.name || ("step-" + (i + 1));
+          var have = G.plan.filter(function (p) { return p.name === nm; })[0];
+          if (have) { have.spec = s.spec || have.spec; return; }
+          G.plan.push({ name: nm, spec: s.spec || "", hint: sub ? ph : (steps.length <= 1 ? 0 : Math.round(i * D / (steps.length - 1))) });
+        });
+        if (!G.dragging) { state.vpTouched = false; G.lastFit = ""; }
+        G.note = sub ? "Splitting " + (G.splitOf || "a step") + " into " + plural(steps.length, "smaller function") + "…"
+                     : "Planning " + plural(steps.length, "function") + "…";
+        break;
+      case "step":
+        G.active = ev.name || ("step-" + ev.i);
+        G.stepI = ev.i || 0; G.stepN = ev.n || 0; G.stepSub = !!ev.sub;
+        rs(G.active).phase = "building";
+        if (!G.plan.some(function (p) { return p.name === G.active; }) && !toolByName(G.active)) {
+          G.plan.push({ name: G.active, spec: ev.spec || "", hint: ev.n > 1 ? Math.round((ev.i - 1) * Math.min(ev.n - 1, 4) / (ev.n - 1)) : 0 });
+        }
+        delete G.failed[G.active];
+        buildNote();
+        break;
+      case "model_call":
+        if (name) { rs(name).phase = "thinking"; buildNote(); }
+        else if (G.running && !G.plan.length) G.note = "Asking the model…";
+        break;
+      case "model_reply":
+        if (name && rs(name).phase === "thinking") { rs(name).phase = "testing"; buildNote(); }
+        break;
+      case "verdict":
+        if (name) {
+          var r = rs(name);
+          if (ev.ok) r.phase = "passed";
+          else { r.flashN++; r.phase = "repairing"; }
+          buildNote();
+        }
+        break;
+      case "repair":
+      case "test_call_repair":
+        if (name) { var q = rs(name); q.repairs++; q.phase = "thinking"; buildNote(); }
+        break;
+      case "replan":
+        if (name) { rs(name).phase = "splitting"; G.split[name] = true; G.splitOf = name; buildNote(); }
+        break;
+      case "promoted":
+        G.promoted[ev.name] = true; delete G.failed[ev.name]; delete G.split[ev.name];
+        if (G.rs[ev.name]) G.rs[ev.name].phase = "";
+        if (!G.replay) { G.spawn[ev.name] = true; G.animate[ev.name] = { at: nowMs() + 380, i: 0 }; }
+        G.lastSaved = ev.name;
+        G.note = "Saved " + ev.name;
+        reloadTools().then(function () {
+          var n = G.nodes[ev.name];
+          if (G.lastSaved === ev.name && n && n.tool && G.note.indexOf("Saved " + ev.name) === 0) {
+            G.note = "Saved " + ev.name + " · " + (n.calls.length ? "connected to " + plural(n.calls.length, "function") : "calls no other function");
+            renderStatus();
+          }
+        });
+        break;
+      case "gave_up":
+        if (name) { G.failed[name] = true; rs(name).phase = ""; }
+        G.noteBad = true;
+        G.note = "Gave up on " + (name || "this step") + (ev.attempts ? " after " + plural(ev.attempts, "attempt") : "") + " — nothing was saved for it.";
+        break;
+      case "error":
+        if (name) G.failed[name] = true;
+        G.noteBad = true;
+        G.note = "Stopped by an error.";
+        break;
+      case "done":
+        finishRun(ev);
+        break;
+      default:
+        return;
+    }
+    markDirty();
+  }
+
+  // Reloads the tool list; calls arriving while one is in flight are merged into one follow-up.
+  function reloadTools() {
+    if (G.reloading) { G.reloadAgain = true; return G.reloadP; }
+    var pid = state.project;
+    G.reloading = true;
+    G.reloadP = api("GET", "/api/agent/tools?mode=" + state.mode + "&" + projectQuery()).then(function (r) {
+      if (pid === state.project && r.status === 200 && r.data && r.data.tools) { state.tools = r.data.tools; drawGraph(); showDetail(); }
+    }).catch(function () { /* the next event retries */ }).then(function () {
+      G.reloading = false;
+      if (G.reloadAgain) { G.reloadAgain = false; return reloadTools(); }
+    });
+    return G.reloadP;
+  }
+
+  // ------------------------------------------------ prompt draft, continue, re-attach
+  var DRAFT_KEY = "gg.draft.", DISMISS_KEY = "gg.resumeDismissed.";
+  function lsGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { if (v) window.localStorage.setItem(k, v); else window.localStorage.removeItem(k); } catch (e) { /* storage blocked: nothing is remembered */ } }
+  function saveDraft() { lsSet(DRAFT_KEY + state.project, $("ag-prompt").value); }
+  function setPrompt(v) { $("ag-prompt").value = v; saveDraft(); }
+
+  function lastUnfinished() {
+    var mains = state.history.filter(function (r) { return r.arm !== "nomem" && !r.oracle && r.prompt; });
+    var last = mains[mains.length - 1];
+    if (!last || last.state === "done") return null;
+    if (state.session && last.session_id === state.session && (state.busy || G.running)) return null;
+    return last;
+  }
+  function updateResume() {
+    var box = $("ag-resume");
+    var last = state.activeChecked ? lastUnfinished() : null;
+    if (last && lsGet(DISMISS_KEY + state.project) === last.session_id) last = null;
+    box.hidden = !last;
+    if (!last) return;
+    state.resumeRow = last;
+    var p = $("ag-resume-p");
+    clear(p);
+    var q = h("q", "", trunc(last.prompt, 90));
+    q.title = last.prompt;
+    p.appendChild(q);
+    p.appendChild(h("span", "muted", " (" + (last.mode === "live" ? "Live" : "Demo") + " model)"));
+    var go = $("ag-resume-go"), blocked = last.mode === "live" && !state.liveOk;
+    go.disabled = state.busy || blocked;
+    go.title = blocked ? "This build used the Live model, which is not available right now." : "";
+  }
+
+  function checkActive() {
+    if (window.location.protocol === "file:") return Promise.resolve();
+    return api("GET", "/api/agent/active").then(function (r) {
+      state.activeChecked = true;
+      var a = r.status === 200 && r.data && r.data.session_id ? r.data : null;
+      renderActiveNote(a);
+      if (a && a.project === state.project && !state.busy && state.session !== a.session_id) attach(a);
+    }).catch(function () { state.activeChecked = true; }).then(updateResume);
+  }
+  function renderActiveNote(a) {
+    var box = $("ag-active-note");
+    clear(box);
+    var other = a && a.project !== state.project ? a : null;
+    box.hidden = !other;
+    if (!other) return;
+    var proj = findProject(other.project);
+    box.appendChild(h("span", "", "A build is running in " + (proj ? "project “" + proj.name + "”" : "another project") + ": “" + trunc(other.prompt || "", 70) + "”. "));
+    if (proj) {
+      var b = h("button", "ag-ghost", "Switch to it");
+      b.type = "button";
+      b.addEventListener("click", function () { switchProject(proj.id); checkActive(); });
+      box.appendChild(b);
+    }
+  }
+  // Re-attach to a run already in progress: replay its events from the start so the graph and log rebuild.
+  function attach(a) {
+    var opt = $("ag-mode");
+    if (a.mode && a.mode !== state.mode && Array.prototype.some.call(opt.options, function (o) { return o.value === a.mode && !o.disabled; })) {
+      opt.value = a.mode; setModeNote();
+    }
+    state.view = "session"; state.picked = true; state.pick = null;
+    state.session = a.session_id; state.next = 0; state.attaching = true; state.attached = true;
+    setBusy(true);
+    if (state.timer) clearInterval(state.timer);
+    state.timer = setInterval(function () { poll(); }, POLL_MS);
+    poll();
+  }
+
+  // ---------------------------------------------------------- command box (CLI apps)
+  function splitArgs(text) {
+    var out = [], cur = "", inq = false, has = false, i, c;
+    text = String(text).replace(/[“”]/g, '"');
+    for (i = 0; i < text.length; i++) {
+      c = text.charAt(i);
+      if (c === '"') { inq = !inq; has = true; }
+      else if (c === "\\" && inq && text.charAt(i + 1) === '"') { cur += '"'; i++; }
+      else if (/\s/.test(c) && !inq) { if (has || cur) out.push(cur); cur = ""; has = false; }
+      else cur += c;
+    }
+    if (has || cur) out.push(cur);
+    return out;
+  }
+  function updateCmdBox() {
+    var f = $("ag-cmd");
+    var has = state.tools.some(function (t) { return t.name === "handle-command"; });
+    if (f.hidden === has) f.hidden = !has;
+    if (!has) $("ag-cmd-out").hidden = true;
+  }
+  function runCommand(e) {
+    e.preventDefault();
+    var inp = $("ag-cmd-in"), out = $("ag-cmd-out"), btn = $("ag-cmd-run");
+    var text = inp.value.trim();
+    if (!text) { inp.focus(); return; }
+    var pid = state.project;
+    btn.disabled = true; out.hidden = false; out.className = "ag-cmd-out"; out.textContent = "running…";
+    function fail(msg) { out.className = "ag-cmd-out bad"; out.textContent = msg; }
+    api("POST", "/api/agent/projects/" + encodeURIComponent(pid) + "/command", { args: splitArgs(text) }).then(function (r) {
+      if (pid !== state.project) return;
+      var d = r.data || {};
+      if (r.status === 200 && d.ok) out.textContent = d.output == null || d.output === "" ? "(no output)" : String(d.output);
+      else fail(d.error ? String(d.error) : "The command did not run (HTTP " + r.status + ").");
+    }, function () {
+      if (pid === state.project) fail("Could not run the command: this dashboard server may not support commands yet.");
+    }).then(function () { btn.disabled = false; });
+  }
+
   // --------------------------------------------------------- run control
   function setBusy(b) {
     state.busy = b;
     $("ag-send").disabled = b;
     $("ag-demo").disabled = b;
+    setProjectLock(b);
+    updateResume();
   }
 
+  var POLL_MS = 150;
   function poll(done) {
-    if (!state.session) return;
-    api("GET", "/api/agent/sessions/" + state.session + "?since=" + state.next).then(function (r) {
-      if (r.status !== 200) return;
-      var s = r.data;
-      s.events.forEach(onEvent);
+    if (!state.session || state.pollBusy) return;
+    var sid = state.session;
+    state.pollBusy = true;
+    api("GET", "/api/agent/sessions/" + sid + "?since=" + state.next).then(function (r) {
+      state.pollBusy = false;
+      if (sid !== state.session || r.status !== 200) return;
+      var s = r.data, evs = s.events || [];
+      if (evs.length) {
+        G.replay = !!state.attaching;   // a re-attached run replays quietly: no animations
+        evs.forEach(onEvent);
+        G.replay = false;
+        flushSync();
+      }
+      state.attaching = false;
       tickWait();
       state.next = s.next;
       if (s.state !== "running") {
         if (s.compare !== "running") {
           clearInterval(state.timer); state.timer = null;
+          if (G.running) { finishRun(null); flushSync(); }
           setTimeout(function () { state.hot = null; drawGraph(); }, 2500);
-          refresh().then(function () { if (done) done(true); });
+          loadProjects();
+          refresh().then(function () {
+            if (done) done(true);
+            else if (state.attached) { state.attached = false; setBusy(false); }
+          });
         } else {
           $("ag-compare-note").textContent = "Checking against a no-memory run…";
         }
       }
-    });
+    }, function () { state.pollBusy = false; });
   }
 
   function refresh() {
-    var a = api("GET", "/api/agent/tools?mode=" + state.mode).then(function (r) { state.tools = r.data.tools || []; drawGraph(); showDetail(); });
-    var b = api("GET", "/api/agent/history").then(function (r) { state.history = r.data.sessions || []; });
+    var pid = state.project;   // a reply for a project the user has since left is ignored
+    var a = api("GET", "/api/agent/tools?mode=" + state.mode + "&" + projectQuery()).then(function (r) {
+      if (pid !== state.project) return;
+      state.tools = r.data.tools || []; drawGraph(); showDetail();
+    });
+    var b = api("GET", "/api/agent/history?" + projectQuery()).then(function (r) {
+      if (pid !== state.project) return;
+      state.history = r.data.sessions || [];
+    });
     return Promise.all([a, b]).then(function () {
-      redrawEvidence(); $("ag-compare-note").textContent = "";
+      if (pid !== state.project) return;
+      redrawEvidence(); $("ag-compare-note").textContent = ""; updateResume();
       var mains = state.history.filter(function (r) { return r.arm !== "nomem" && r.state !== "running"; });
       var last = mains[mains.length - 1];
       if (last && !state.session && last.result != null) {
@@ -1260,13 +2527,13 @@
   function runPrompt(prompt, mode, compare, expected, oracle) {
     state.view = "session"; state.picked = true; state.pick = null;
     setBusy(true);
-    return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle }).then(function (r) {
+    return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle, project: state.project }).then(function (r) {
       if (r.status !== 200) { setBusy(false); throw new Error((r.data && r.data.error) || "request failed"); }
       state.session = r.data.session_id; state.next = 0;
-      $("ag-prompt").value = prompt;
+      setPrompt(prompt);
       return new Promise(function (resolve) {
         if (state.timer) clearInterval(state.timer);
-        state.timer = setInterval(function () { poll(function () { resolve(); }); }, 400);
+        state.timer = setInterval(function () { poll(function () { resolve(); }); }, POLL_MS);
       });
     });
   }
@@ -1290,9 +2557,15 @@
   ];
   function guidedDemo() {
     if ($("ag-demo").disabled) return;
+    // The demo and its evidence belong to the builtin project: leave a custom project first.
+    if (!currentProject().builtin) {
+      var from = currentProject().name;
+      selectProjectLocal(findBuiltin().id);
+      $("ag-demo-cost").textContent = "Switched to " + findBuiltin().name + " first: the guided demo runs there, so “" + from + "” is not touched.";
+    }
     state.view = "session"; state.picked = true;
     setBusy(true);
-    api("POST", "/api/agent/reset").then(function () {
+    api("POST", "/api/agent/reset", { project: state.project }).then(function () {
       state.tools = []; state.history = []; state.sel = null; state.view = "session"; showDetail();
       drawGraph(); redrawEvidence();
       var chain = Promise.resolve();
@@ -1307,8 +2580,251 @@
       .then(function () {
         setBusy(false);
         $("ag-demo").textContent = "▶ Run guided demo";
+        $("ag-demo-cost").textContent = demoCostText();
       });
   }
+
+  // ------------------------------------------------------------- projects
+  // A project is its own tool registry, prompt log and history; every call that
+  // reads or writes tools sends state.project. Switching, editing and deleting
+  // are locked while a run is in progress (setBusy calls setProjectLock).
+  var PROJ_KEY = "gg.project";
+  var BUILTIN_FALLBACK = { id: "scratch", name: "Scratchpad", description: "", created: 0, updated: 0, tools: 0, builtin: true };
+  function findProject(id) { return state.projects.filter(function (p) { return p.id === id; })[0] || null; }
+  function findBuiltin() { return state.projects.filter(function (p) { return p.builtin; })[0] || BUILTIN_FALLBACK; }
+  function currentProject() { return findProject(state.project) || findBuiltin(); }
+  function projectQuery() { return "project=" + encodeURIComponent(state.project); }
+  function savedProject() { try { return window.localStorage.getItem(PROJ_KEY); } catch (e) { return null; } }
+  function saveProject(id) { try { window.localStorage.setItem(PROJ_KEY, id); } catch (e) { /* storage blocked: the choice lasts this page only */ } }
+  function setProjErr(msg) { var e = $("ag-proj-err"); e.textContent = msg || ""; e.hidden = !msg; }
+  function focusCurrentChip() { var b = $("ag-proj-chips").querySelector('button[aria-pressed="true"]'); if (b) b.focus(); }
+
+  function demoCostText() {
+    var live = $("ag-mode").value === "live";
+    var base = live
+      ? "Runs the live model: 7 prompts, about 2 min, roughly 1 cent of real tokens"
+      : "Runs the scripted demo model: 7 prompts, about 1 min, free, estimated tokens";
+    var cur = currentProject();
+    return cur.builtin ? base : base + ". It runs in " + findBuiltin().name + ", not in " + cur.name + ".";
+  }
+
+  // Disables everything that would change the project while a run owns the pane.
+  function setProjectLock(b) {
+    Array.prototype.forEach.call($("ag-proj-chips").querySelectorAll("button"), function (x) { x.disabled = b; });
+    $("ag-proj-new").disabled = b;
+    $("ag-proj-edit").disabled = b;
+    $("ag-proj-delete").disabled = b;
+    $("ag-proj-save").disabled = b || state.projPending;
+    $("ag-proj-delgo").disabled = b || state.projPending;
+    $("ag-proj-note").textContent = b ? "A run is in progress. Switching, editing and deleting projects unlock when it finishes." : "";
+  }
+
+  // Text that names the current project: Ask heading, helper line, tools heading, forget button.
+  function updateProjectText() {
+    var n = currentProject().name;
+    $("ag-ask-h").textContent = "Ask the agent — in " + n;
+    $("ag-proj-hint").textContent = state.tools.length
+      ? "Follow-up prompts build on this project's tools. Ask to add a feature, or to change one (for example: make post titles link to the post)."
+      : (currentProject().tools
+          ? "This project has " + currentProject().tools + " tools built with the other model. Switch the model selector to " +
+            (state.mode === "live" ? "Demo" : "Live") + " to see and build on them."
+          : "This project is empty. Describe what to build.");
+    $("ag-tools-h").textContent = "Tools in " + n;
+    $("ag-reset").textContent = "Forget this project's tools";
+  }
+
+  function renderProjects() {
+    var cur = currentProject();
+    var box = $("ag-proj-chips");
+    var list = state.projects.length ? state.projects : [cur];
+    clear(box);
+    list.forEach(function (p) {
+      var b = h("button", "ag-proj-chip");
+      b.type = "button";
+      b.setAttribute("aria-pressed", p.id === cur.id ? "true" : "false");
+      b.title = p.description || p.name;
+      b.appendChild(h("span", "ag-proj-cname", p.name));
+      b.appendChild(h("span", "ag-proj-cn", (p.tools || 0) + (p.tools === 1 ? " tool" : " tools")));
+      b.addEventListener("click", function () { switchProject(p.id); });
+      box.appendChild(b);
+    });
+    $("ag-proj-name").textContent = cur.name;
+    $("ag-proj-desc").textContent = cur.description ? "— " + cur.description : "";
+    $("ag-proj-edit").hidden = !!cur.builtin;
+    $("ag-proj-delete").hidden = !!cur.builtin;
+    $("ag-proj-edit").setAttribute("aria-label", "Edit project " + cur.name);
+    $("ag-proj-delete").setAttribute("aria-label", "Delete project " + cur.name);
+    setProjectLock(state.busy);
+    updateProjectText();
+    renderServer();
+  }
+
+  // Server row: the harness mounts this project's Lisp (handle-request request state) on a port.
+  function renderServer() {
+    var cur = currentProject();
+    var m = cur.mount;
+    var st = $("ag-srv-state"), link = $("ag-srv-link"), btn = $("ag-srv-toggle");
+    st.textContent = m ? "running" : "stopped";
+    st.className = "ag-srv-state" + (m ? " on" : "");
+    link.hidden = !m;
+    if (m) { link.href = m.url; link.textContent = m.url; }
+    btn.textContent = m ? "Stop server" : "Run server";
+    btn.setAttribute("aria-label", (m ? "Stop the server for " : "Run the server for ") + cur.name);
+    btn.disabled = !!state.srvPending;
+    $("ag-srv-info").textContent = m
+      ? "Each request calls this project's Lisp tool handle-request (Live tools); its state is saved in SQLite."
+      : "Mounts this project's Lisp tool handle-request on a local port. Build it first with a prompt such as: make this a web app.";
+  }
+
+  function toggleServer() {
+    var cur = currentProject();
+    state.srvPending = true;
+    renderServer();
+    api(cur.mount ? "DELETE" : "POST", "/api/agent/projects/" + encodeURIComponent(cur.id) + "/mount")
+      .then(function (r) {
+        state.srvPending = false;
+        if (r.status !== 200) { setProjErr((r.data && r.data.error) || "Could not change the server."); }
+        return loadProjects();
+      }, function () {
+        state.srvPending = false;
+        setProjErr("Could not reach the dashboard to change the server.");
+        renderServer();
+      });
+  }
+
+  function loadProjects() {
+    return api("GET", "/api/agent/projects").then(function (r) {
+      if (r.status === 200 && r.data && r.data.projects) {
+        state.projects = r.data.projects;
+        if (!findProject(state.project)) { state.project = findBuiltin().id; saveProject(state.project); }
+      } else {
+        setProjErr((r.data && r.data.error) || "Could not load the projects.");
+      }
+      renderProjects();
+    }, function () {
+      setProjErr("Could not reach the server to load the projects.");
+      renderProjects();
+    });
+  }
+
+  // Clears everything that belongs to the previous project so none of it stays on screen.
+  function selectProjectLocal(id) {
+    state.project = id; saveProject(id);
+    state.tools = []; state.history = []; state.sel = null; state.ghost = null; state.hot = null;
+    state.session = null; state.pick = null; state.vpTouched = false;
+    resetRunState(); state.attached = false; state.attaching = false;
+    $("ag-prompt").value = lsGet(DRAFT_KEY + state.project) || "";
+    $("ag-cmd-out").hidden = true; $("ag-cmd-in").value = "";
+    closeProjForm(false); closeProjDel(false); setProjErr("");
+    $("ag-answer").textContent = "—";
+    $("ag-answer-call").textContent = "Run a prompt to see its Lisp, tests and REPL output here.";
+    $("ag-capnotice").hidden = true; clear($("ag-capnotice"));
+    $("ag-summary").hidden = true; clear($("ag-summary"));
+    clear($("ag-stages")); clear($("ag-log")); clear(repl);
+    $("ag-barinfo").hidden = true; $("ag-compare-note").textContent = "";
+    $("ag-callout").textContent = "";
+    $("ag-demo-cost").textContent = demoCostText();
+    renderProjects(); drawGraph(); redrawEvidence(); showDetail();
+    replLine("c", ";; project: " + currentProject().name);
+  }
+
+  function switchProject(id) {
+    if (state.busy || id === state.project || !findProject(id)) return;
+    selectProjectLocal(id);
+    refresh();
+  }
+
+  function openProjForm(mode) {
+    if (state.busy) return;
+    if (mode === "edit" && currentProject().builtin) return;
+    closeProjDel(false);
+    var creating = mode === "new", cur = currentProject();
+    state.projMode = mode;
+    $("ag-proj-form-h").textContent = creating ? "New project" : "Edit " + cur.name;
+    $("ag-proj-name-in").value = creating ? "" : cur.name;
+    $("ag-proj-desc-in").value = creating ? "" : (cur.description || "");
+    $("ag-proj-save").textContent = creating ? "Create" : "Save";
+    setProjErr("");
+    $("ag-proj-form").hidden = false;
+    $("ag-proj-name-in").focus();
+  }
+  function closeProjForm(back) {
+    var form = $("ag-proj-form");
+    if (form.hidden) return;
+    var opener = state.projMode === "edit" ? "ag-proj-edit" : "ag-proj-new";
+    form.hidden = true; state.projMode = null; setProjErr("");
+    if (back) $(opener).focus();
+  }
+
+  function openProjDel() {
+    var cur = currentProject();
+    if (state.busy || cur.builtin) return;
+    closeProjForm(false);
+    setProjErr("");
+    $("ag-proj-deltext").textContent = "Delete “" + cur.name + "”? Its saved tools and prompt log are moved to a trash folder on disk, not erased. You will switch to " + findBuiltin().name + ".";
+    $("ag-proj-delrow").hidden = false;
+    $("ag-proj-delcancel").focus();   // Cancel gets focus, so Enter cannot delete by accident
+  }
+  function closeProjDel(back) {
+    if ($("ag-proj-delrow").hidden) return;
+    $("ag-proj-delrow").hidden = true;
+    if (back) $("ag-proj-delete").focus();
+  }
+
+  $("ag-proj-new").addEventListener("click", function () { openProjForm("new"); });
+  $("ag-proj-edit").addEventListener("click", function () { openProjForm("edit"); });
+  $("ag-proj-delete").addEventListener("click", function () { openProjDel(); });
+  $("ag-proj-cancel").addEventListener("click", function () { closeProjForm(true); });
+  $("ag-proj-delcancel").addEventListener("click", function () { closeProjDel(true); });
+  $("ag-proj-bar").addEventListener("keydown", function (e) {
+    if (e.key !== "Escape") return;
+    if (!$("ag-proj-form").hidden) { e.preventDefault(); closeProjForm(true); }
+    else if (!$("ag-proj-delrow").hidden) { e.preventDefault(); closeProjDel(true); }
+  });
+
+  $("ag-proj-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (state.busy || state.projPending) return;
+    var name = $("ag-proj-name-in").value.trim();
+    var desc = $("ag-proj-desc-in").value.trim();
+    if (!name) { setProjErr("Give the project a name."); $("ag-proj-name-in").focus(); return; }
+    if (name.length > 60) { setProjErr("The name can be at most 60 characters."); $("ag-proj-name-in").focus(); return; }
+    if (desc.length > 200) { setProjErr("The description can be at most 200 characters."); $("ag-proj-desc-in").focus(); return; }
+    var creating = state.projMode === "new";
+    var path = creating ? "/api/agent/projects" : "/api/agent/projects/" + encodeURIComponent(currentProject().id);
+    state.projPending = true; setProjErr(""); setProjectLock(state.busy);
+    api("POST", path, { name: name, description: desc }).then(function (r) {
+      if (r.status !== 200 || !r.data || !r.data.project) {
+        setProjErr((r.data && r.data.error) || "Could not save the project.");
+        return;
+      }
+      var p = r.data.project;
+      closeProjForm(false);
+      return loadProjects().then(function () {
+        if (creating) { selectProjectLocal(p.id); refresh(); focusCurrentChip(); }
+      });
+    }, function () {
+      setProjErr("Could not reach the server.");
+    }).then(function () { state.projPending = false; setProjectLock(state.busy); });
+  });
+
+  $("ag-proj-delgo").addEventListener("click", function () {
+    var cur = currentProject();
+    if (state.busy || state.projPending || cur.builtin) return;
+    state.projPending = true; setProjErr(""); setProjectLock(state.busy);
+    api("DELETE", "/api/agent/projects/" + encodeURIComponent(cur.id)).then(function (r) {
+      if (r.status !== 200 || !(r.data && r.data.ok)) {
+        setProjErr((r.data && r.data.error) || "Could not delete the project.");
+        return;
+      }
+      closeProjDel(false);
+      return loadProjects().then(function () {
+        selectProjectLocal(findBuiltin().id); refresh(); focusCurrentChip();
+      });
+    }, function () {
+      setProjErr("Could not reach the server.");
+    }).then(function () { state.projPending = false; setProjectLock(state.busy); });
+  });
 
   // ----------------------------------------------------------------- init
   var NOTES = {
@@ -1319,9 +2835,7 @@
     var m = $("ag-mode").value; state.mode = m;
     $("ag-mode-note").textContent = NOTES[m];
     $("ag-hero-note").textContent = $("ag-hero-note").textContent || "";
-    $("ag-demo-cost").textContent = m === "demo"
-      ? "Runs the scripted demo model: 7 prompts, about 1 min, free, estimated tokens"
-      : "Runs the live model: 7 prompts, about 2 min, roughly 1 cent of real tokens";
+    $("ag-demo-cost").textContent = demoCostText();
     $("ag-compare").checked = m === "demo";
     if (state.snapshots) refresh();
     $("ag-send").textContent = m === "live" ? "Send prompt (about \u00bd\u00a2)" : "Send prompt";
@@ -1339,7 +2853,7 @@
     badge.textContent = "Showing: " + (rec ? "recorded live run" : "your session") + " \u00b7 " + (est ? "scripted model, estimated tokens" : "real tokens");
   }
   function loadConfig() {
-    api("GET", "/api/agent/config").then(function (r) {
+    return api("GET", "/api/agent/config").then(function (r) {
       var live = (r.data || {}).live || {};
       state.liveOk = !!live.available;
       if (!live.available) {
@@ -1357,13 +2871,14 @@
     var out = $("ag-callout");
     if (!text) { $("ag-call").focus(); return; }
     out.className = "ag-callout"; out.textContent = "running…";
-    api("POST", "/api/agent/call", { call: text, mode: state.mode }).then(function (r) {
+    api("POST", "/api/agent/call", { call: text, mode: state.mode, project: state.project }).then(function (r) {
       var d = r.data || {};
       out.className = "ag-callout " + (d.ok ? "ok" : "bad");
       out.textContent = d.ok ? "=> " + d.value + "   (0 tokens, " + Math.round(d.elapsed_ms || 0) + " ms)" : (d.error || "failed");
     });
   }
   $("ag-callbtn").addEventListener("click", tryCall);
+  $("ag-srv-toggle").addEventListener("click", toggleServer);
   $("ag-call").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); tryCall(); } });
   var fab = $("ag-fab");
   if (fab && "IntersectionObserver" in window) {
@@ -1383,7 +2898,7 @@
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
   Array.prototype.forEach.call(document.querySelectorAll(".ag-chip"), function (c) {
-    c.addEventListener("click", function () { $("ag-prompt").value = c.getAttribute("data-p"); $("ag-prompt").focus(); });
+    c.addEventListener("click", function () { if (c.getAttribute("data-p") == null) return; setPrompt(c.getAttribute("data-p")); $("ag-prompt").focus(); });
   });
   $("ag-mode").addEventListener("change", setModeNote);
   var lastW = window.innerWidth, rt = null;
@@ -1395,25 +2910,52 @@
     }, 150);
   });
   $("ag-reset").addEventListener("click", function () {
-    if (!window.confirm("Forget all learned tools and the prompt log? This cannot be undone.")) return;
-    api("POST", "/api/agent/reset").then(function () {
+    var pid = state.project;
+    if (!window.confirm("Forget the tools in " + currentProject().name + " and its prompt log? Other projects are not touched. This cannot be undone.")) return;
+    api("POST", "/api/agent/reset", { project: pid }).then(function () {
+      if (pid !== state.project) return;
       state.tools = []; state.history = []; state.sel = null; showDetail(); drawGraph(); redrawEvidence();
+      loadProjects();
     });
   });
-  document.querySelector('nav button[data-view="agent"]').addEventListener("click", refresh);
+  document.querySelector('nav button[data-view="agent"]').addEventListener("click", function () { refresh(); checkActive(); });
+  $("ag-prompt").addEventListener("input", saveDraft);
+  $("ag-cmd").addEventListener("submit", runCommand);
+  $("ag-resume-x").addEventListener("click", function () {
+    if (state.resumeRow) lsSet(DISMISS_KEY + state.project, state.resumeRow.session_id);
+    updateResume(); $("ag-prompt").focus();
+  });
+  $("ag-resume-go").addEventListener("click", function () {
+    var row = state.resumeRow;
+    if (!row || state.busy) return;
+    var sel = $("ag-mode");
+    if (row.mode && Array.prototype.some.call(sel.options, function (o) { return o.value === row.mode && !o.disabled; })) { sel.value = row.mode; setModeNote(); }
+    setPrompt(row.prompt);
+    send();
+  });
   // Thesis tab buttons: jump to the Agent tab, optionally fill a prompt or start the demo.
   Array.prototype.forEach.call(document.querySelectorAll("[data-goto]"), function (b) {
     b.addEventListener("click", function () {
       document.querySelector('nav button[data-view="' + b.getAttribute("data-goto") + '"]').click();
       var p = b.getAttribute("data-p");
-      if (p) { $("ag-prompt").value = p; $("ag-prompt").focus(); }
+      if (p) { setPrompt(p); $("ag-prompt").focus(); }
       if (b.getAttribute("data-action") === "demo") guidedDemo();
       window.scrollTo(0, 0);
     });
   });
 
   initGraphView();
+  renderProjects();   // draws the project bar even when opened as a file (no server)
   drawGraph(); redrawEvidence();
   replLine("c", ";; REPL output appears here when you send a prompt or run the demo.");
-  if (window.location.protocol !== "file:") { refresh(); loadConfig(); loadSnapshots(); }
+  if (window.location.protocol !== "file:") {
+    // Restore the saved project (loadProjects falls back to the builtin one if it is gone), then load its data.
+    state.project = savedProject() || "scratch";
+    $("ag-prompt").value = lsGet(DRAFT_KEY + state.project) || "";
+    loadProjects().then(function () {
+      var cfg = loadConfig();
+      refresh(); loadSnapshots();
+      return cfg;
+    }).then(checkActive, checkActive);
+  }
 })();

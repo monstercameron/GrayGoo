@@ -33,7 +33,7 @@ Cerebras client dependencies, so Live mode would be unavailable).
 - Tabs switch between your session, the shipped recorded live runs
   (`dashboard/evidence/*.json`) and runs you pin.
 - Modes: **Demo** is a scripted offline model (free, estimated tokens, example chips
-  only). **Live** calls Cerebras Qwen (real tokens); a hard `$0.15` spend cap per
+  only). **Live** calls Cerebras Qwen (real tokens); a hard `$1.00` spend cap per
   server process applies (`LIVE_SPEND_CAP_USD` in `agent_session.py`).
 - `python evidence_run.py --runs 3 --cap 0.14` repeats the live guided and held-out
   runs and rewrites `dashboard/evidence/live-repeat-runs.json` (paid, capped).

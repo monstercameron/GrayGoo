@@ -417,10 +417,69 @@ def dispatch(method, path, body, ctx):
     agent = getattr(ctx, "agent", None)
     if agent is not None and clean_path.startswith("/api/agent/"):
         sub = clean_path[len("/api/agent/"):]
+        mounts = _mounts(ctx)
         if method == "GET" and sub == "tools":
             qs = parse_qs(urlparse(path).query)
             mode = (qs.get("mode") or [None])[0]
-            return 200, {"tools": agent.tools(mode if mode in ("demo", "live") else None)}
+            return 200, {"tools": agent.tools(mode if mode in ("demo", "live") else None,
+                                              (qs.get("project") or [None])[0])}
+        if sub == "projects" or sub.startswith("projects/"):
+            pid = sub[len("projects/"):] if sub.startswith("projects/") else None
+            if pid and pid.endswith("/command"):
+                pid = pid[:-len("/command")]
+                if not agent.projects.exists(pid):
+                    return 404, {"error": "unknown project"}
+                if method != "POST":
+                    return 404, {"error": "unknown endpoint"}
+                try:
+                    payload = json.loads(body.decode("utf-8") if body else "{}")
+                except (ValueError, UnicodeDecodeError):
+                    return 400, {"error": "invalid JSON body"}
+                return 200, mounts.command(pid, payload.get("args")
+                                           if isinstance(payload, dict) else None)
+            if pid and pid.endswith("/mount"):
+                pid = pid[:-len("/mount")]
+                if not agent.projects.exists(pid):
+                    return 404, {"error": "unknown project"}
+                if method == "GET":
+                    return 200, {"mount": mounts.info(pid), "report": mounts.report(pid)}
+                if method == "POST":
+                    info, err = mounts.start(pid)
+                    return (400, {"error": err}) if err else (200, {"mount": info})
+                if method == "DELETE":
+                    mounts.stop(pid)
+                    return 200, {"mount": None}
+                return 404, {"error": "unknown endpoint"}
+            payload = {}
+            if method == "POST":
+                try:
+                    payload = json.loads(body.decode("utf-8") if body else "{}")
+                except (ValueError, UnicodeDecodeError):
+                    return 400, {"error": "invalid JSON body"}
+                if not isinstance(payload, dict):
+                    return 400, {"error": "invalid JSON body"}
+            if method == "GET" and pid is None:
+                return 200, {"projects": [dict(p, mount=mounts.info(p["id"]))
+                                          for p in agent.projects.list()]}
+            if method == "POST" and pid is None:
+                project, err = agent.projects.create(payload.get("name"),
+                                                     payload.get("description") or "")
+                return (400, {"error": err}) if err else (200, {"project": project})
+            if pid and not agent.projects.exists(pid):
+                return 404, {"error": "unknown project"}
+            if method == "POST" and pid:
+                project, err = agent.projects.update(pid, payload.get("name"),
+                                                     payload.get("description"))
+                return (400, {"error": err}) if err else (200, {"project": project})
+            if method == "DELETE" and pid:
+                if agent.busy():
+                    return 409, {"error": "a session is running; wait for it to finish"}
+                mounts.stop(pid)
+                ok, err = agent.projects.delete(pid)
+                return (400, {"error": err}) if err else (200, {"ok": True})
+            return 404, {"error": "unknown endpoint"}
+        if method == "GET" and sub == "active":
+            return 200, agent.active()
         if method == "GET" and sub == "config":
             import agent_session
             status = agent_session.live_status()
@@ -447,7 +506,8 @@ def dispatch(method, path, body, ctx):
                 return 400, {"error": err}
             return 200, {"id": "pinned:" + slug}
         if method == "GET" and sub == "history":
-            return 200, {"sessions": agent.history()}
+            qs = parse_qs(urlparse(path).query)
+            return 200, {"sessions": agent.history(project=(qs.get("project") or [None])[0])}
         if method == "POST" and sub == "call":
             try:
                 payload = json.loads(body.decode("utf-8") if body else "{}")
@@ -455,9 +515,15 @@ def dispatch(method, path, body, ctx):
                 return 400, {"error": "invalid JSON body"}
             mode = payload.get("mode")
             return 200, agent.call_tool(payload.get("call"),
-                                        mode if mode in ("demo", "live") else None)
+                                        mode if mode in ("demo", "live") else None,
+                                        payload.get("project"))
         if method == "POST" and sub == "reset":
-            agent.registry.clear()
+            try:
+                payload = json.loads(body.decode("utf-8") if body else "{}")
+            except (ValueError, UnicodeDecodeError):
+                payload = {}
+            agent.registry_for(payload.get("project") if isinstance(payload, dict)
+                               else None).clear()
             return 200, {"tools": []}
         if method == "POST" and sub == "prompt":
             try:
@@ -468,7 +534,8 @@ def dispatch(method, path, body, ctx):
                                    payload.get("mode", "demo"),
                                    bool(payload.get("compare")),
                                    payload.get("expected"),
-                                   payload.get("oracle"))
+                                   payload.get("oracle"),
+                                   payload.get("project"))
             if err == "busy":
                 return 409, {"error": "a session is already running"}
             if err:
@@ -569,6 +636,10 @@ class Handler(BaseHTTPRequestHandler):
         status, payload = dispatch("POST", self.path, body, self.ctx)
         self._send_json(status, payload)
 
+    def do_DELETE(self):
+        status, payload = dispatch("DELETE", self.path, b"", self.ctx)
+        self._send_json(status, payload)
+
     def _send_events(self):
         """Minimal SSE: job snapshots every 2s for up to ~60s."""
         self.send_response(200)
@@ -587,6 +658,15 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(2)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+
+def _mounts(ctx):
+    """The context's MountManager, created on first use."""
+    if getattr(ctx, "mounts", None) is None:
+        import mount
+        ctx.mounts = mount.MountManager(ctx.agent.registry.path.parent,
+                                        ctx.agent.registry_for)
+    return ctx.mounts
 
 
 def serve(port, manager=None):
