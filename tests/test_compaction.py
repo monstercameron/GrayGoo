@@ -1,13 +1,15 @@
 """Edit replies and partial builds are turned back into full plans; bad edits fail in plain words."""
 import copy
+import hashlib
 import sys
+import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from compaction import EditFailed, apply_edits, merge_reply  # noqa: E402
+from compaction import EditFailed, apply_edits, check_definition, definition_sha, merge_reply  # noqa: E402
 
 DEF = '(defun render-home (x)\n  (list "old" x))'
 TESTS = [{"call": "(render-home 1)", "expect": '"hi"'}]
@@ -292,6 +294,202 @@ class MergeReplyPassThroughTests(unittest.TestCase):
         for previous in ({"name": "render-home"}, {"name": "f", "definition": ""}, None):
             with self.subTest(previous=previous):
                 self.assertIs(merge_reply(previous, reply), reply)
+
+
+DEF_SHA = definition_sha(DEF)
+STALE_SHA = "0123456789abcdef"
+STALE_MESSAGE = (
+    "the function changed since this edit was written (expected version %s, found %s); "
+    "send the edit again against the current text" % (STALE_SHA, DEF_SHA))
+
+
+class DefinitionShaTests(unittest.TestCase):
+    def test_stable_across_line_endings_and_trailing_whitespace(self):
+        lf = "(defun f ()\n  1)"
+        self.assertEqual(definition_sha("(defun f ()\r\n  1)"), definition_sha(lf))
+        self.assertEqual(definition_sha("(defun f ()   \n  1)\t \n"), definition_sha(lf))
+
+    def test_differs_for_different_text(self):
+        self.assertNotEqual(
+            definition_sha("(defun f () 1)"), definition_sha("(defun f () 2)"))
+
+    def test_is_first_16_hex_characters_of_sha256(self):
+        expected = hashlib.sha256(b"(defun f ()\n  1)").hexdigest()[:16]
+        self.assertEqual(len(definition_sha("(defun f ()\n  1)")), 16)
+        self.assertEqual(definition_sha("(defun f ()\n  1)"), expected)
+
+    def test_non_string_gives_empty_string(self):
+        for value in (None, 42, ["(defun f () 1)"]):
+            with self.subTest(value=value):
+                self.assertEqual(definition_sha(value), "")
+
+
+class VersionCheckTests(unittest.TestCase):
+    def test_matching_expect_sha_passes_for_edit(self):
+        merged = merge_reply(PREVIOUS, edit_reply({"old": '"old"', "new": '"new"'}),
+                             expect_sha=DEF_SHA)
+        self.assertEqual(merged["definition"], '(defun render-home (x)\n  (list "new" x))')
+
+    def test_mismatched_expect_sha_raises_for_edit(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": '"old"', "new": '"new"'}),
+                        expect_sha=STALE_SHA)
+        self.assertEqual(str(ctx.exception), STALE_MESSAGE)
+
+    def test_mismatched_expect_sha_raises_for_partial_build_without_definition(self):
+        reply = {"action": "build", "name": "render-home", "call": "(render-home 2)"}
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, reply, expect_sha=STALE_SHA)
+        self.assertEqual(str(ctx.exception), STALE_MESSAGE)
+
+    def test_expect_sha_ignored_for_complete_build(self):
+        new_definition = '(defun render-home (x)\n  (list "new" x))'
+        reply = {"action": "build", "name": "render-home", "definition": new_definition}
+        merged = merge_reply(PREVIOUS, reply, expect_sha=STALE_SHA)
+        self.assertEqual(merged["definition"], new_definition)
+        self.assertNotIn("base_sha", merged)
+
+    def test_reply_base_honoured_for_edit(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": '"old"', "new": '"new"'},
+                                             base=STALE_SHA))
+        self.assertEqual(str(ctx.exception), STALE_MESSAGE)
+
+    def test_reply_base_matching_current_version_passes(self):
+        merged = merge_reply(PREVIOUS, edit_reply({"old": '"old"', "new": '"new"'},
+                                                  base=DEF_SHA))
+        self.assertEqual(merged["base_sha"], DEF_SHA)
+
+    def test_reply_base_disagreeing_with_expect_sha_raises(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": '"old"', "new": '"new"'},
+                                             base="aaaaaaaaaaaaaaaa"),
+                        expect_sha="bbbbbbbbbbbbbbbb")
+        self.assertEqual(
+            str(ctx.exception),
+            "the edit names version aaaaaaaaaaaaaaaa, but the harness expected bbbbbbbbbbbbbbbb")
+
+    def test_no_expect_sha_and_no_base_skips_the_check(self):
+        merged = merge_reply(PREVIOUS, edit_reply({"old": '"old"', "new": '"new"'}))
+        self.assertEqual(merged["edited"], 1)
+
+    def test_partial_build_keeping_definition_sets_base_sha(self):
+        merged = merge_reply(PREVIOUS, {"action": "build", "name": "render-home",
+                                        "call": "(render-home 2)"},
+                             expect_sha=DEF_SHA)
+        self.assertIn("definition", merged["kept"])
+        self.assertEqual(merged["base_sha"], DEF_SHA)
+
+
+class StructureAfterEditTests(unittest.TestCase):
+    def test_dropped_closing_paren_is_unbalanced_with_count(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": "x))", "new": "x)"}))
+        self.assertEqual(
+            str(ctx.exception),
+            "the edit leaves the definition with unbalanced parentheses (1 unclosed)")
+
+    def test_extra_closing_paren_is_unbalanced_with_count(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": "x))", "new": "x)))"}))
+        self.assertEqual(
+            str(ctx.exception),
+            "the edit leaves the definition with unbalanced parentheses (1 too many closing)")
+
+    def test_second_top_level_form_raises(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply(
+                {"old": '(list "old" x))', "new": '(list "old" x)) (list 2)'}))
+        self.assertEqual(
+            str(ctx.exception),
+            "the edit leaves 2 top-level forms; a tool is exactly one defun")
+
+    def test_rename_raises(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": "render-home", "new": "render-other"}))
+        self.assertEqual(
+            str(ctx.exception),
+            'the edit changes the function\'s name from "render-home" to "render-other"')
+
+    def test_defun_turned_into_something_else_raises(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply(
+                {"old": "(defun render-home (x)", "new": "(defvar render-home (x)"}))
+        self.assertEqual(str(ctx.exception), "the edit leaves something that is not a defun")
+
+    def test_parameter_list_removed_raises(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": "(x)", "new": "x"}))
+        self.assertEqual(str(ctx.exception), "the edit removes the parameter list")
+
+    def test_changed_parameter_list_raises(self):
+        with self.assertRaises(EditFailed) as ctx:
+            merge_reply(PREVIOUS, edit_reply({"old": "(x)", "new": "(x y)"}))
+        self.assertEqual(
+            str(ctx.exception),
+            "the edit changes the parameters from (x) to (x y); callers and tests depend "
+            "on them, so send a full build to change them")
+
+    def test_legitimate_multi_edit_returns_plan_with_base_sha(self):
+        merged = merge_reply(PREVIOUS, edit_reply(
+            {"old": '"old"', "new": '"new"'}, {"old": "(list", "new": "(vector"}))
+        self.assertEqual(merged["definition"], '(defun render-home (x)\n  (vector "new" x))')
+        self.assertEqual(merged["edited"], 2)
+        self.assertEqual(merged["base_sha"], definition_sha(DEF))
+
+
+class LexicalTests(unittest.TestCase):
+    def test_parens_inside_string_do_not_count(self):
+        check_definition('(defun f (x)\n  "(((  )))"\n  x)', "f")
+
+    def test_escaped_quote_inside_string_does_not_end_it(self):
+        check_definition('(defun f (x)\n  "say \\"(\\""\n  x)', "f")
+
+    def test_paren_in_character_literal_does_not_count(self):
+        check_definition('(defun f (x)\n  (list x #\\())', "f")
+
+    def test_paren_after_semicolon_does_not_count(self):
+        check_definition("(defun f (x)  ; note: (see below\n  x)", "f")
+
+    def test_real_missing_paren_is_still_caught_beside_string(self):
+        with self.assertRaises(EditFailed) as ctx:
+            check_definition('(defun f (x)\n  "((("\n  x', "f")
+        self.assertIn("unbalanced parentheses (1 unclosed)", str(ctx.exception))
+
+
+class CheckDefinitionTests(unittest.TestCase):
+    def test_good_definition_passes(self):
+        check_definition(DEF, "render-home")
+        check_definition(DEF)
+        check_definition(DEF, "RENDER-HOME")
+
+    def test_bad_definitions_raise(self):
+        cases = [
+            ("", None, "the edit leaves 0 top-level forms; a tool is exactly one defun"),
+            ('(defun render-home (x) 1) foo', None,
+             "the edit leaves 2 top-level forms; a tool is exactly one defun"),
+            ("foo", None, "the edit leaves something that is not a defun"),
+            ("(defvar render-home (x) 1)", None, "the edit leaves something that is not a defun"),
+            ("(defun render-home)", None, "the edit removes the parameter list"),
+            (DEF, "render-other",
+             'the edit changes the function\'s name from "render-other" to "render-home"'),
+        ]
+        for definition, name, message in cases:
+            with self.subTest(definition=definition, name=name):
+                with self.assertRaises(EditFailed) as ctx:
+                    check_definition(definition, name)
+                self.assertEqual(str(ctx.exception), message)
+
+
+class CheckDefinitionPerformanceTests(unittest.TestCase):
+    def test_check_definition_on_200000_characters_is_fast(self):
+        head = '(defun big-one (x)\n  "'
+        tail = '")'
+        big = head + "a" * (200000 - len(head) - len(tail)) + tail
+        self.assertEqual(len(big), 200000)
+        start = time.perf_counter()
+        check_definition(big, "big-one")
+        self.assertLess(time.perf_counter() - start, 1.0)
 
 
 if __name__ == "__main__":

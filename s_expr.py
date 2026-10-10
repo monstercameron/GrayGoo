@@ -164,7 +164,7 @@ def tokenize(text):
             )
         elif ch == "'":
             # Quote sugar: 'x -> (quote x)
-            tokens.append(_Token("atom", "quote-marker", i))
+            tokens.append(_Token("quote", "'", i))
             i += 1
         else:
             start = i
@@ -215,7 +215,7 @@ def _parse_tokens(tokens, text):
             auto.pop()
             openers.pop()
             close_completed_quotes()
-        elif tok.value == "quote-marker":
+        elif tok.kind == "quote":
             # Quote sugar: 'x -> (quote x). The frame auto-closes once
             # the next complete value lands inside it.
             if len(stack) - 1 >= MAX_DEPTH:

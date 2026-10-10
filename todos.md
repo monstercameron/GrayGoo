@@ -390,7 +390,23 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [ ] Live-verify the class agreement: that a styling prompt on pcrm (20 page classes without a rule at the time of writing) ends with every used class styled, and what the lint costs in repair calls
   - [ ] Live-verify this round: the timeouts, the longer replies and the two-round screenshot loop (needs paid runs)
   - [ ] The planner still renames functions across follow-up prompts (render-products-page next to products-page-html); the note against it is new and unproven
-  - [ ] Password hashing for mounted apps is still open: the screenshot sign-in relies on the plain user rows the generated apps keep
+  - [x] Password hashing for mounted apps: `hash-password` and `password-matches-p` in the web kit, required by the contract, and a free check that fails a build whose password is readable in its users table (`tests/test_webkit_auth.py`)
+  - [x] The 15 prioritized pipeline issues of `issues.md` (2026-10-10): each row there has a Status; summary in `documents/issues-triage.md`, Round 11
+  - [x] A finished app is tried like a visitor without a model call (`acceptance.py`, 9 checks) and its functions are compared with each other (`interfaces.py`); what fails gets one guarded round of fixes
+  - [x] A round of fixes is undone when the app answers worse, a passing check fails or the screenshots show more problems (`visual_rollback`)
+  - [x] One build stops at $0.40 or 300 s and says which limit it reached; Continue is the go-ahead to spend more
+  - [x] Candidates may not touch functions they do not own (`lispstyle.trust_problems`); the warm process detects a changed trusted function, restores it and restarts (`tamper`)
+  - [x] Cancel is honoured at every stage (4 bugs fixed, `tests/test_cancel_stages.py`); registry, request log, project and app-server races fixed (6 bugs, `tests/test_concurrency_evidence.py`)
+  - [x] The end-of-run card is never squeezed away: short by default with "Show full report", and "Checked by the harness itself" at the top
+  - [ ] Live-verify this round on pcrm: the free checks report seven real faults there (logout does not end the session, plain-text password, Edit and Delete buttons that call functions no script defines, a form posting to a missing route, a POST form and a GET link the router does not handle); follow-up prompts should clear them (needs paid runs)
+  - [x] `interfaces.py` reports a form or link that uses a method the router does not handle for that path (`method-mismatch`, 16 tests)
+  - [x] Visitor checks for update and delete flows (they run on a throwaway state, so delete is safe to click); a button whose onclick calls a function no script defines is reported as a fault
+  - [x] Machinery evidence, like-for-like: `replay_evidence.py` runs every logged live reply as written and again after today's free repairs (763 replies: 29% pass as written, 40% after; first drafts 32% to 44%; 78 rescued, none broken)
+  - [x] Machinery evidence from the logs: `specialization.py` (what each mechanism saved, measured or labelled as an estimate; periods over app-sized builds) and a Thesis tab section "The machinery specialises too" fed by `GET /api/agent/machinery`
+  - [ ] The logs do NOT yet show a saved function getting cheaper over time: among app-sized builds, paid repairs per function fell from 2.53 to 1.54 since Oct 9 while free repairs rose from 0.73 to 1.05, but dollars per function stayed near $0.013. A fixed set of prompts rebuilt after each harness change would settle it (needs paid runs)
+  - [ ] Re-run `uv run python replay_evidence.py` after new live builds or new normalisers (about 3 minutes, no model calls); the dashboard shows the saved result
+  - [ ] Show `economics.py` per-project figures in the dashboard (command line only today)
+  - [ ] A production key-derivation function for mounted apps (salted SHA-256 with 1,000 rounds is a demo-grade stand-in)
   - [ ] Live-verify lanes and thinking over more builds: wall time per app build, 429 count, and whether thought-out plans need fewer repairs (needs a paid run)
   - [ ] Watch a live build to confirm the node spawn and edge-draw animations (not observable in the automated browser pane)
   - [ ] Live-verify the shortened system prompt and the cheaper rewrite settings against first-try pass rate

@@ -739,7 +739,7 @@
                   state.snapshots.filter(function (x) { return x.kind === "recorded"; })[0];
         if (rec) state.view = rec.id;
       }
-      redrawEvidence(); thesisStrip(); sampleRepl();
+      redrawEvidence(); thesisStrip(); machinerySection(); sampleRepl();
     });
   }
 
@@ -854,6 +854,214 @@
     $("th-k4").textContent = m.hn ? m.hok + " / " + m.hn : "\u2014";
     $("th-k4").className = m.hn && m.hok === m.hn ? "good" : (m.hn && m.hok / m.hn >= 0.8 ? "warn" : "");
     $("th-k4s").textContent = m.hn ? m.hn + " prompts not in the demo, answers from independent Python; misses are shown, not hidden" : "not run";
+  }
+
+  // ------------------------------------------------- machinery section (Thesis)
+  // "The machinery specialises too": block A replays the harness's free repairs on
+  // logged replies, block B shows what one saved function cost by period, block C
+  // what each specialization saved. Every figure comes from /api/agent/machinery.
+  var mxSeq = 0;
+  var MX_BASIS = { measured: ["measured", "mx-b-measured"], estimate: ["estimate", "mx-b-estimate"], count: ["counted", "mx-b-counted"] };
+  function mxInt(n) { return typeof n === "number" ? Math.round(n).toLocaleString("en-US") : "—"; }
+  function mxPct(x) { return typeof x === "number" ? Math.round(100 * x) + "%" : "—"; }
+  function mxPl(n, one, many) { return n === 1 ? one : many; }
+  function mxClamp(p) { return typeof p === "number" && isFinite(p) ? Math.max(0, Math.min(100, p)) : 0; }
+  // Dollars: two decimals from 10 cents up, four below (a per-function cost is a fraction of a cent).
+  function mxUsd(v) { return typeof v === "number" ? "$" + v.toFixed(v >= 0.1 ? 2 : 4) : "—"; }
+  // Seconds: "40 s" under 90 s, otherwise minutes with one decimal.
+  function mxSec(s) { return typeof s === "number" ? (s < 90 ? Math.round(s) + " s" : (s / 60).toFixed(1) + " min") : "—"; }
+  function mxBlock(title, nodes) {
+    var b = h("div", "mx-block");
+    b.appendChild(h("h3", "mx-sub", title));
+    nodes.forEach(function (n) { b.appendChild(n); });
+    return b;
+  }
+  function mxBarRow(label, rate, cls) {
+    var row = h("div", "mx-bar");
+    row.appendChild(h("div", "mx-bar-label", label));
+    var track = h("div", "mx-track");
+    track.setAttribute("role", "img");
+    track.setAttribute("aria-label", label);
+    var fill = h("span", "mx-fill " + cls);
+    fill.style.width = mxClamp(typeof rate === "number" ? 100 * rate : 0) + "%";
+    track.appendChild(fill);
+    row.appendChild(track);
+    return row;
+  }
+  // Block A: both bars share one 0-100% scale, each labelled in words.
+  function mxReplay(rp) {
+    if (!rp) return [h("p", "muted", "Not measured yet. Run: uv run python replay_evidence.py")];
+    var out = [];
+    var bars = h("div", "mx-bars");
+    bars.appendChild(mxBarRow("As the model wrote them: " + mxPct(rp.raw_rate) + " pass their own tests (" + mxInt(rp.raw_pass) + " of " + mxInt(rp.cases) + ")", rp.raw_rate, "mx-fill-raw"));
+    bars.appendChild(mxBarRow("After today’s free repairs: " + mxPct(rp.fixed_rate) + " pass (" + mxInt(rp.fixed_pass) + " of " + mxInt(rp.cases) + ")", rp.fixed_rate, "mx-fill-after"));
+    var axis = h("div", "mx-axis");
+    axis.setAttribute("aria-hidden", "true");
+    axis.appendChild(h("span", "", "0%"));
+    axis.appendChild(h("span", "", "100%"));
+    bars.appendChild(axis);
+    out.push(bars);
+    var rescued = rp.rescued || 0, broken = rp.broken || 0;
+    out.push(h("p", "mx-note", mxInt(rescued) + " " + mxPl(rescued, "reply was", "replies were") + " rescued without a model call, worth about " + mxUsd(rp.rescued_usd) + " of repair calls."));
+    if (broken > 0) {
+      var caution = h("p", "mx-caution");
+      caution.appendChild(h("span", "mx-tag", "Defect to fix"));
+      caution.appendChild(document.createTextNode(mxInt(broken) + " " + mxPl(broken, "reply passed", "replies passed") + " as written and " + mxPl(broken, "fails", "fail") + " after repair."));
+      out.push(caution);
+    }
+    var fd = rp.by_kind && rp.by_kind["first drafts"];
+    if (fd && fd.cases > 0) {
+      out.push(h("p", "mx-note", "First drafts alone: " + mxPct(fd.raw_pass / fd.cases) + " pass as written, " + mxPct(fd.fixed_pass / fd.cases) +
+        " after the free repairs (" + mxInt(fd.cases) + " replies)."));
+    }
+    // a docstring added by the harness cannot change a test result, so it is not listed as a rescuer
+    var fixes = (rp.by_fix || []).filter(function (f) { return f.fix !== "added-docstring"; }).sort(function (a, b) { return (b.rescued || 0) - (a.rescued || 0); }).slice(0, 6);
+    if (fixes.length) {
+      out.push(h("h4", "mx-kicker", "Which repairs were on the rescued replies (a reply can get several)"));
+      var list = h("ul", "mx-fixlist");
+      fixes.forEach(function (f) {
+        var li = h("li");
+        li.appendChild(h("code", "", String(f.fix)));
+        li.appendChild(document.createTextNode(" " + mxInt(f.rescued) + " rescued "));
+        li.appendChild(h("span", "muted", "of " + mxInt(f.cases) + " cases"));
+        list.appendChild(li);
+      });
+      out.push(list);
+    }
+    out.push(h("p", "muted mx-src", mxInt(rp.cases) + " replies from " + mxInt(rp.sessions) + " builds, each judged as written and again after the free repairs."));
+    return out;
+  }
+  // One cell: the number with its unit, and (for per-function columns) a thin bar under it.
+  function mxCell(label, text, frac) {
+    var td = h("td", "mx-num");
+    td.setAttribute("data-label", label);
+    var cell = h("span", "mx-cell");
+    cell.appendChild(h("span", "mx-val", text));
+    if (typeof frac === "number") {
+      var meter = h("span", "mx-meter");
+      meter.setAttribute("aria-hidden", "true");
+      var fill = h("span", "mx-meter-fill");
+      fill.style.width = mxClamp(100 * frac) + "%";
+      meter.appendChild(fill);
+      cell.appendChild(meter);
+    }
+    td.appendChild(cell);
+    return td;
+  }
+  // Block B: a real table; each per-function column is scaled to its own maximum.
+  function mxPeriods(rep) {
+    if (!rep) return [h("p", "muted", "No live builds logged yet.")];
+    // app-sized builds only: early one-function builds would otherwise set the baseline
+    var ps = rep.app_periods || [];
+    if (ps.length < 2) return [h("p", "muted", "Too few app-sized builds to compare periods yet.")];
+    var top = { paid: 0, free: 0, usd: 0 };
+    ps.forEach(function (p) {
+      top.paid = Math.max(top.paid, p.repairs_per_function || 0);
+      top.free = Math.max(top.free, p.free_repairs_per_function || 0);
+      top.usd = Math.max(top.usd, p.usd_per_function || 0);
+    });
+    function fracOf(v, max) { return typeof v === "number" && max > 0 ? v / max : null; }
+    function per(v, unit) { return typeof v === "number" ? v.toFixed(2) + " " + unit : "\u2014"; }
+    var COLS = ["Period", "Builds", "Functions saved", "Paid repair calls per function", "Free repairs per function",
+                "Dollars per function", "Passed first try"];
+    var head = h("tr");
+    COLS.forEach(function (name, i) {
+      var th = h("th", i ? "mx-num" : "", name);
+      th.setAttribute("scope", "col");
+      head.appendChild(th);
+    });
+    var tbody = h("tbody");
+    ps.forEach(function (p) {
+      var tr = h("tr");
+      var rowHead = h("th", "", String(p.label));
+      rowHead.setAttribute("scope", "row");
+      tr.appendChild(rowHead);
+      tr.appendChild(mxCell(COLS[1], mxInt(p.builds) + " " + mxPl(p.builds, "build", "builds"), null));
+      tr.appendChild(mxCell(COLS[2], mxInt(p.functions_saved) + " " + mxPl(p.functions_saved, "function", "functions"), null));
+      tr.appendChild(mxCell(COLS[3], per(p.repairs_per_function, "calls"), fracOf(p.repairs_per_function, top.paid)));
+      tr.appendChild(mxCell(COLS[4], per(p.free_repairs_per_function, "repairs"), fracOf(p.free_repairs_per_function, top.free)));
+      tr.appendChild(mxCell(COLS[5], mxUsd(p.usd_per_function), fracOf(p.usd_per_function, top.usd)));
+      tr.appendChild(mxCell(COLS[6], mxPct(p.first_try_rate), null));
+      tbody.appendChild(tr);
+    });
+    var thead = h("thead");
+    thead.appendChild(head);
+    var table = h("table", "mx-table");
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    var wrap = h("div", "mx-scroll");
+    wrap.tabIndex = 0;
+    wrap.setAttribute("role", "region");
+    wrap.setAttribute("aria-label", "What one saved function cost, period by period");
+    wrap.appendChild(table);
+    return [wrap, h("p", "muted mx-src", "Builds that saved three or more functions, oldest first. A paid repair is a model call that fixes a failed function; " +
+      "a free repair is one the harness made itself. The prompts differ from period to period, so this table describes the builds and does not prove a trend. " +
+      "The like-for-like evidence is the replay above.")];
+  }
+  // Block C: one row per specialization, then the total from report.saved.
+  function mxMechanisms(rep) {
+    if (!rep) return [h("p", "muted", "No live builds logged yet.")];
+    var out = [h("p", "muted mx-src", "Across " + mxInt(rep.builds) + " " + mxPl(rep.builds, "build", "builds") + ": " + mxInt(rep.model_calls) + " model calls, " + mxUsd(rep.spent_usd) + " spent and " + mxSec(rep.seconds) + " of model time.")];
+    var ms = rep.mechanisms || [];
+    if (!ms.length) {
+      out.push(h("p", "muted", "No specialization has logged a saving yet."));
+    } else {
+      var list = h("ul", "mx-mech");
+      ms.forEach(function (m) {
+        var li = h("li", "mx-mech-row");
+        var main = h("div");
+        var name = h("div", "mx-mech-name");
+        name.appendChild(h("b", "", String(m.label)));
+        var basis = MX_BASIS[m.basis] || [String(m.basis || "unknown"), "mx-b-counted"];
+        name.appendChild(h("span", "mx-basis " + basis[1], basis[0]));
+        main.appendChild(name);
+        if (m.how) main.appendChild(h("p", "muted mx-how", String(m.how)));
+        li.appendChild(main);
+        var nums = h("div", "mx-mech-nums");
+        nums.appendChild(h("span", "mx-n", mxInt(m.events) + " " + mxPl(m.events, "event", "events")));
+        if (typeof m.saved_calls === "number") nums.appendChild(h("span", "mx-n", mxInt(m.saved_calls) + " " + mxPl(m.saved_calls, "call", "calls")));
+        if (typeof m.saved_usd === "number") nums.appendChild(h("span", "mx-n", mxUsd(m.saved_usd)));
+        if (typeof m.saved_seconds === "number") nums.appendChild(h("span", "mx-n", mxSec(m.saved_seconds)));
+        if (m.saved_calls == null && m.saved_usd == null && m.saved_seconds == null) nums.appendChild(h("span", "muted", "no saving figure"));
+        li.appendChild(nums);
+        list.appendChild(li);
+      });
+      out.push(list);
+    }
+    var sv = rep.saved || {};
+    var parts = [];
+    if (typeof sv.calls === "number") parts.push(mxInt(sv.calls) + " model " + mxPl(sv.calls, "call", "calls"));
+    if (typeof sv.usd === "number") parts.push(mxUsd(sv.usd));
+    if (typeof sv.seconds === "number") parts.push(mxSec(sv.seconds));
+    if (parts.length) {
+      var total = parts.length > 1 ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1] : parts[0];
+      out.push(h("p", "mx-total", "Together: about " + total + " not spent."));
+    }
+    return out;
+  }
+  function paintMachinery(sec, rep, rp, failed) {
+    clear(sec);
+    var title = h("h2", "", "The machinery specialises too");
+    title.id = "mx-title";
+    sec.appendChild(title);
+    if (failed) { sec.appendChild(h("p", "muted", "Could not load these figures from the dashboard server.")); return; }
+    if (!rep && !rp) { sec.appendChild(h("p", "muted", "No live builds logged yet.")); return; }
+    sec.appendChild(h("p", "mx-lede", "Each failure the harness has seen became a free repair, a shorter prompt or a faster check. These figures are read from the logs of real builds. A figure that is an estimate says so."));
+    sec.appendChild(mxBlock("Same replies, with and without the harness’s repairs", mxReplay(rp)));
+    sec.appendChild(mxBlock("What one saved function cost, period by period", mxPeriods(rep)));
+    sec.appendChild(mxBlock("What each specialization saved", mxMechanisms(rep)));
+  }
+  function machinerySection() {
+    var sec = $("th-machinery");
+    if (!sec) return;
+    var my = ++mxSeq;   // a slower earlier response must not overwrite a newer one
+    api("GET", "/api/agent/machinery").then(function (r) {
+      if (my !== mxSeq) return;
+      var d = (r && r.data) || {};
+      paintMachinery(sec, d.report || null, d.replay || null, false);
+    }, function () {
+      if (my === mxSeq) paintMachinery(sec, null, null, true);
+    });
   }
 
   function sampleRepl() {
@@ -2020,7 +2228,8 @@
     if (/^All tests passed/.test(t)) return ["passed", "PASSED"];
     if (/^Tests FAILED|^Why\b/.test(t)) return ["failed", "FAILED"];
     if (/^Repair round|^Repaired |kept failing|split it into|Stopping code|same code as|test call is broken|^Retired|unreadable/.test(t)) return ["repair", "REPAIR"];
-    if (/^Independent check/.test(t)) return cls === "fail" ? ["failed", "FAILED"] : ["check", "CHECK"];
+    if (/^Independent check|^Tried the app like a visitor|^Checked that the functions fit together/.test(t)) return cls === "fail" ? ["failed", "FAILED"] : ["check", "CHECK"];
+    if (/^Failed: |^The functions do not fit together/.test(t)) return ["failed", "FAILED"];
     if (/rate limiting us|model API is busy/.test(t)) return ["repair", "WAIT"];
     if (/^Screenshot check found|^Could not take a screenshot/.test(t)) return ["failed", "LOOK"];
     if (/^Screenshot|^Taking screenshots|^Fixing what the screenshots/.test(t)) return ["check", "LOOK"];
@@ -2171,6 +2380,39 @@
     x.focus();
   }
 
+  // Rows for the "How this build was checked" block. A mark means the harness checked that level itself.
+  function verificationRows(v) {
+    var rows = [], OK = "✓", BAD = "✗", NA = "–";
+    function row(mark, cls, text) { rows.push({ mark: mark, cls: cls, text: text }); }
+    function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+    var ft = typeof v.function_tests === "number" ? v.function_tests : 0;
+    if (ft > 0) row(OK, "v-ok", plural(ft, "test", "tests") + " of the individual functions passed");
+    else row(NA, "v-muted", "no function tests ran");
+    if (v.app_answers === true) row(OK, "v-ok", "the finished app answers a request");
+    else if (v.app_answers === false) row(BAD, "v-warn", "the finished app did not answer a request");
+    else row(NA, "v-muted", "the app as a whole was not started");
+    var sc = v.scenarios && typeof v.scenarios === "object" ? v.scenarios : null;
+    if (!sc) row(NA, "v-muted", "the app was not tried like a visitor");
+    else {
+      var scF = Number(sc.failed) || 0, scP = Number(sc.passed) || 0, scS = Number(sc.skipped) || 0;
+      var scLabels = Array.isArray(sc.failed_labels) ? sc.failed_labels.filter(Boolean).map(String) : [];
+      if (scF > 0) row(BAD, "v-warn", "tried like a visitor: " + plural(scF, "check", "checks") + " failed" + (scLabels.length ? " (" + scLabels.join("; ") + ")" : ""));
+      else if (scP > 0) row(OK, "v-ok", "tried like a visitor: " + plural(scP, "check", "checks") + " passed" + (scS > 0 ? ", " + scS + " not applicable" : ""));
+      else row(NA, "v-muted", "tried like a visitor: nothing applicable to check");
+    }
+    if (typeof v.interfaces !== "number") row(NA, "v-muted", "the functions were not compared with each other");
+    else if (v.interfaces === 0) row(OK, "v-ok", "the functions fit together (calls, routes, tables)");
+    else row(BAD, "v-warn", plural(v.interfaces, "mismatch between functions", "mismatches between functions"));
+    if (typeof v.style_missing === "number") {
+      if (v.style_missing === 0) row(OK, "v-ok", "every CSS class the pages use has a rule");
+      else row(BAD, "v-warn", plural(v.style_missing, "CSS class the pages use has no rule", "CSS classes the pages use have no rule"));
+    }
+    if (v.screens === true) row(OK, "v-ok", "screenshots match what was asked for");
+    else if (v.screens === false) row(BAD, "v-warn", "screenshots still show problems");
+    else row(NA, "v-muted", "no screenshots were checked");
+    return rows;
+  }
+
   // The clean end-of-run card: what happened, what was built, what it cost.
   function renderSummary(m) {
     var box = $("ag-summary");
@@ -2180,8 +2422,11 @@
     var unused = Array.isArray(m.unused_functions) ? m.unused_functions.filter(Boolean).map(String) : [];
     var smoke = m.smoke && typeof m.smoke === "object" ? m.smoke : null;
     var vis = m.visual && typeof m.visual === "object" ? m.visual : null;
-    // a finished run with missing features, a failed self-check or unfixed screenshot problems is not a plain success
-    var incomplete = m.outcome === "success" && (missing.length > 0 || (!!smoke && smoke.ok === false) || (!!vis && vis.done === false));
+    var ver = m.verification && typeof m.verification === "object" ? m.verification : null;
+    var verRows = ver ? verificationRows(ver) : [];
+    var verBad = verRows.some(function (r) { return r.mark === "✗"; });
+    // a finished run with missing features, a failed self-check, unfixed screenshot problems or a failed independent check is not a plain success
+    var incomplete = m.outcome === "success" && (missing.length > 0 || (!!smoke && smoke.ok === false) || (!!vis && vis.done === false) || verBad);
     box.className = "ag-sumcard " + (incomplete || m.outcome === "cancelled" ? "warn" : m.outcome === "success" ? "ok" : "bad");
     var title;
     if (incomplete) {
@@ -2198,8 +2443,26 @@
     } else {
       title = "\u2717 Couldn\u2019t finish this one";
     }
-    box.appendChild(h("div", "sum-t", title));
+    var head = h("div", "sum-head");
+    head.appendChild(h("div", "sum-t", title));
+    var more = h("button", "sum-more", "");
+    more.type = "button";
+    more.hidden = true;
+    head.appendChild(more);
+    box.appendChild(head);
     if (m.outcome === "cancelled") box.appendChild(h("div", "sum-l", "You stopped this build. What was saved before that is kept; Continue picks it up from there."));
+    if (missing.length) box.appendChild(h("div", "sum-l sum-miss", "Not built yet: " + joinWords(missing) + ". Send a follow-up prompt for these."));
+    if (ver) {
+      box.appendChild(h("div", "sum-v-t", "Checked by the harness itself"));
+      var verBox = h("div", "sum-v");
+      verRows.forEach(function (r) {
+        var rowEl = h("div", "sum-v-r");
+        rowEl.appendChild(h("span", "sum-v-m " + r.cls, r.mark));
+        rowEl.appendChild(h("span", "sum-v-x", r.text));
+        verBox.appendChild(rowEl);
+      });
+      box.appendChild(verBox);
+    }
     if (m.capability_gaps && m.capability_gaps.length) {
       box.appendChild(h("div", "sum-l cap-sum",
         (m.outcome === "success" ? "Built as pure functions. For " : "This goal needs ") +
@@ -2207,7 +2470,6 @@
         (m.outcome === "success" ? ", see the notice above; use Run server in the project bar to try a web app."
                                  : ", which pure functions only provide as described in the notice above.")));
     }
-    if (missing.length) box.appendChild(h("div", "sum-l sum-miss", "Not built yet: " + joinWords(missing) + ". Send a follow-up prompt for these."));
     if (unused.length) box.appendChild(h("div", "sum-l", "Written but never used: " + unused.join(", ") + "."));
     if (smoke && smoke.ok === true) box.appendChild(h("div", "sum-l smoke-ok", "Checked: the app answered " + (smoke.call || "the check") +
       (smoke.status != null ? " with status " + smoke.status : "") + "."));
@@ -2219,6 +2481,7 @@
       box.appendChild(h("div", "sum-l sum-miss", "Screenshots checked: " + visProblems.length + " problem(s) still visible: " + visProblems.join("; ") + ". Send a follow-up prompt naming what to fix."));
     }
     if (vis && vis.skipped) box.appendChild(h("div", "sum-l muted", "Screenshot check skipped: " + String(vis.skipped)));
+    if (ver) box.appendChild(h("div", "sum-l muted", "The marks above are checks the harness ran itself. What the model says about its own work is not counted."));
     if (m.outcome === "success" && m.answer && m.answer.ok) {
       var v = String(m.answer.value == null ? "" : m.answer.value);
       var oneLine = v.indexOf("\n") < 0;
@@ -2261,6 +2524,17 @@
     chip(fmt(m.tokens) + " tokens" + (m.cost_usd ? " \u00b7 $" + m.cost_usd.toFixed(4) : ""));
     chip(m.seconds + " s");
     box.appendChild(chips);
+    // The card stays short beside the log; the switch shows all of it. It appears only
+    // when there is more than fits, and keeps its setting from one run to the next.
+    function fitSummary() {
+      box.classList.toggle("open", !!state.sumOpen);
+      var cut = !state.sumOpen && box.scrollHeight > box.clientHeight + 6;
+      more.hidden = !(cut || state.sumOpen);
+      more.textContent = state.sumOpen ? "Show less" : "Show full report";
+      more.setAttribute("aria-expanded", state.sumOpen ? "true" : "false");
+    }
+    more.onclick = function () { state.sumOpen = !state.sumOpen; fitSummary(); };
+    fitSummary();
   }
 
   var CLASS_TEXT = {
@@ -2491,6 +2765,39 @@
       case "smoke":
         say(ev.ok ? "Checked the finished app with " + ev.call + ": it answered with status " + ev.status + ". No model call needed."
                   : "The finished app failed its own check (" + ev.call + "): " + (ev.error || "no answer"), ev.ok ? "pass" : "fail");
+        break;
+      case "acceptance":
+        // the harness drove the finished app like a visitor; a failed check is shown with its detail
+        var accRes = Array.isArray(ev.results) ? ev.results.filter(Boolean) : [];
+        var accP = typeof ev.passed === "number" ? ev.passed : accRes.filter(function (r) { return r.ok === true; }).length;
+        var accF = typeof ev.failed === "number" ? ev.failed : accRes.filter(function (r) { return r.ok === false; }).length;
+        if (accF > 0) {
+          say("Tried the app like a visitor: " + accF + " of " + (accP + accF) + " checks failed.", "fail");
+          accRes.filter(function (r) { return r.ok === false; }).forEach(function (r) {
+            say("Failed: " + String(r.label || r.id || "a check") + (r.detail ? " — " + String(r.detail) : ""), "fail");
+          });
+        } else if (accP > 0) {
+          var accNames = accRes.filter(function (r) { return r.ok === true; }).slice(0, 3).map(function (r) { return String(r.label || r.id || ""); }).join("; ");
+          say("Tried the app like a visitor: all " + accP + " checks passed" + (accNames ? " (" + accNames + ")" : "") + ".", "pass");
+        }
+        break;
+      case "interface_check":
+        var ifProb = Array.isArray(ev.problems) ? ev.problems.filter(Boolean) : [];
+        if (!ifProb.length) say("Checked that the functions fit together: no mismatch found.", "pass");
+        else {
+          say("The functions do not fit together in " + ifProb.length + " place(s):", "fail");
+          ifProb.slice(0, 6).forEach(function (p) { say(String(p.detail || p.where || ""), "fail"); });
+          if (ifProb.length > 6) say("…and " + (ifProb.length - 6) + " more", "fail");
+        }
+        break;
+      case "visual_rollback":
+        say("Undid the last round of visual fixes" + (ev.reason ? ": " + String(ev.reason).replace(/\.\s*$/, "") : "") +
+          ". The app is back to the version before it.", "fail");
+        break;
+      case "tamper":
+        var tChanged = Array.isArray(ev.changed) ? ev.changed.filter(Boolean).map(String) : [];
+        say("Rejected " + (ev.name || "a candidate function") + ": it changed a function it does not own (" + tChanged.join(", ") +
+          "). The Lisp process was restarted from the saved functions.", "fail");
         break;
       case "retired":
         (ev.tools || []).forEach(function (t) {
@@ -3417,6 +3724,7 @@
     });
   });
   document.querySelector('nav button[data-view="agent"]').addEventListener("click", function () { refresh(); checkActive(); });
+  document.querySelector('nav button[data-view="thesis"]').addEventListener("click", machinerySection);
   $("ag-prompt").addEventListener("input", saveDraft);
   $("ag-cmd").addEventListener("submit", runCommand);
   $("ag-resume-x").addEventListener("click", function () {

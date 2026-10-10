@@ -319,12 +319,17 @@ class MountedApp:
     def _write_log(self, entry):
         if not self.log_path:
             return
+        line = json.dumps(entry) + "\n"
         try:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.log_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry) + "\n")
+            with _LOG_LOCK:                 # one whole line per request, never interleaved
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.log_path, "a", encoding="utf-8") as fh:
+                    fh.write(line)
         except OSError:
             pass
+
+
+_LOG_LOCK = threading.Lock()
 
 
 def _page(title, text):
@@ -458,6 +463,7 @@ class MountManager:
         self._servers = {}
         self._lock = threading.Lock()
         self._disk_lock = threading.Lock()
+        self._start_lock = threading.Lock()     # one start at a time: one server per project
         if restore:
             self.restore()
 
@@ -488,29 +494,35 @@ class MountManager:
             remembered = read_mounts(self.mounts_path).get(project_id)
             candidates = ([remembered] if remembered else []) + [None]
         last = None
+        # On Windows, address reuse lets a second server bind a port that is in use,
+        # so "the port must be free" has to be asked for explicitly there.
+        server_class = type("AppServer", (ThreadingHTTPServer,),
+                            {"allow_reuse_address": os.name != "nt"})
         for candidate in candidates:
             try:
-                return ThreadingHTTPServer(("127.0.0.1", candidate or free_port()),
-                                           handler), None
+                return server_class(("127.0.0.1", candidate or free_port()), handler), None
             except OSError as exc:
                 last = exc
         return None, "could not open the port: %s" % last
 
     def start(self, project_id, port=None):
         """``(info, error)``. Starting an already mounted project returns its info."""
-        if self.info(project_id):
+        with self._start_lock:
+            # checked and stored as one step: concurrent starts used to open a
+            # server each, and the extra ones kept listening after stop()
+            if self.info(project_id):
+                return self.info(project_id), None
+            state_db, log = paths_for(self.agent_dir, project_id)
+            app = MountedApp(self.registry_for(project_id).for_mode(self.mode),
+                             StateStore(state_db), log_path=log)
+            server, err = self._open_server(project_id, make_handler(app), port)
+            if err:
+                return None, err
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            with self._lock:
+                self._servers[project_id] = (server, server.server_address[1])
+            self._remember(project_id, server.server_address[1])
             return self.info(project_id), None
-        state_db, log = paths_for(self.agent_dir, project_id)
-        app = MountedApp(self.registry_for(project_id).for_mode(self.mode),
-                         StateStore(state_db), log_path=log)
-        server, err = self._open_server(project_id, make_handler(app), port)
-        if err:
-            return None, err
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        with self._lock:
-            self._servers[project_id] = (server, server.server_address[1])
-        self._remember(project_id, server.server_address[1])
-        return self.info(project_id), None
 
     def stop(self, project_id):
         with self._lock:

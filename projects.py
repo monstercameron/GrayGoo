@@ -172,11 +172,14 @@ class ProjectStore:
 
     def touch(self, project_id):
         """Record activity so the newest work sorts and shows correctly."""
-        if project_id != BUILTIN and self.exists(project_id):
-            cur = self.get(project_id)
-            self._save(project_id, {"name": cur["name"], "description": cur["description"],
-                                    "created": cur["created"],
-                                    "updated": round(time.time(), 3)})
+        if project_id == BUILTIN:
+            return
+        with self._lock:                    # read and write as one step: a rename in between stays
+            cur = self.get(project_id) if self.exists(project_id) else None
+            if cur:
+                self._save(project_id, {"name": cur["name"], "description": cur["description"],
+                                        "created": cur["created"],
+                                        "updated": round(time.time(), 3)})
 
     def delete(self, project_id):
         """``(ok, error)``. Moves the folder to ``.trash``; nothing is erased."""

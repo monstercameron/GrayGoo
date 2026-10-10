@@ -129,7 +129,7 @@ class RealBrowserTest(unittest.TestCase):
         profile = [a[len("--user-data-dir="):] for a in cmd if a.startswith("--user-data-dir=")]
         self.assertEqual(len(profile), 1)
         # the browser may hold its profile open for a moment: removal is then finished in the background
-        for _ in range(60):
+        for _ in range(160):                 # up to 40 s: the full suite keeps the machine busy
             if not os.path.exists(profile[0]):
                 break
             time.sleep(0.25)

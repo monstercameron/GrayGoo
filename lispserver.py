@@ -23,6 +23,8 @@ import atexit
 import binascii
 import os
 import queue
+import re
+import secrets
 import subprocess
 import tempfile
 import threading
@@ -70,6 +72,74 @@ def _unhex(hexed):
     return binascii.unhexlify(hexed).decode("utf-8", errors="replace")
 
 
+# The wire loop is trusted code too: a candidate that redefined the reply
+# writer could forge answers, so its functions are recorded with the prelude.
+_PROTOCOL_NAMES = ("gg-hex", "gg-unhex", "gg-reply", "gg-serve")
+_DEFUN_RE = re.compile(r"^\(defun\s+([^\s()]+)", re.M)
+_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _prelude_names(text):
+    """The names of the top-level ``(defun NAME`` forms in TEXT, in order."""
+    return _DEFUN_RE.findall(text or "")
+
+
+def _quoted_strings(printed):
+    """The strings in a PRIN1 list such as ``("a" "b")``, unescaped."""
+    return [re.sub(r"\\(.)", r"\1", raw) for raw in _STRING_RE.findall(printed)]
+
+
+def _lisp_string(text):
+    return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _recorder_install(pkg, sym):
+    """Lisp that creates package PKG and stores the checker closure as SYM's value.
+
+    The closure keeps its table of (name symbol function) entries in a lexical
+    variable, reachable only by calling the closure. It takes ``:record`` with a
+    list of names (each name is trusted at its CURRENT function object) or
+    ``:check`` (returns the names whose function object no longer matches).
+    """
+    return (
+        "(progn (make-package \"%s\" :use nil)\n"
+        " (setf (symbol-value (intern \"%s\" \"%s\"))\n"
+        "  (let ((table nil)\n"
+        "        (bound-p #'fboundp)\n"
+        "        (fn-of #'fdefinition)\n"
+        "        (user-pkg (find-package \"COMMON-LISP-USER\")))\n"
+        "    (labels ((sym-of (name)\n"
+        "               (let ((*package* user-pkg) (*read-eval* nil))\n"
+        "                 (read-from-string name)))\n"
+        "             (now (sym)\n"
+        "               (and (funcall bound-p sym) (funcall fn-of sym))))\n"
+        "      (lambda (op names)\n"
+        "        (ecase op\n"
+        "          (:record\n"
+        "           (dolist (name names t)\n"
+        "             (let* ((sym (sym-of name))\n"
+        "                    (cell (find sym table :key #'second)))\n"
+        "               (if cell\n"
+        "                   (setf (third cell) (now sym))\n"
+        "                   (push (list name sym (now sym)) table)))))\n"
+        "          (:check\n"
+        "           (loop for (name sym fn) in (reverse table)\n"
+        "                 unless (eq (now sym) fn) collect name))))))))"
+    ) % (pkg, sym, pkg)
+
+
+def _recorder_call(pkg, sym, op, names=()):
+    """Lisp that calls the checker closure with OP (``record`` or ``check``)."""
+    return '(funcall (symbol-value (find-symbol "%s" "%s")) :%s (list %s))' % (
+        sym, pkg, op, " ".join(_lisp_string(name) for name in names))
+
+
+def _guarded(form):
+    """FORM, with a failure recorded as a load error instead of stopping the child."""
+    return ("(handler-case %s\n  (error (c) (setf *gg-load-error* (princ-to-string c))))"
+            % form)
+
+
 class LispServer:
     """One SBCL child with PRELUDE loaded; ``eval`` runs one form in it."""
 
@@ -83,6 +153,8 @@ class LispServer:
         self._files = []
         self._lock = threading.Lock()
         self._load_error = ""
+        self._pkg = None          # random per child: package and symbol of the checker
+        self._sym = None
         atexit.register(self.close)
 
     # -- child lifecycle ---------------------------------------------------
@@ -108,14 +180,22 @@ class LispServer:
                   "  (load \"%s/src/worker/worker.lisp\"))" % (root, root)) if guard else ""
         # The guard forbids LOAD once installed, so the definitions are read from
         # text and evaluated form by form, the way the worker treats candidate code.
+        # The checker is installed before the prelude and records the names after
+        # it, so a prelude that fails part-way is still recorded (and reported).
+        self._pkg = "GG-PKG-" + secrets.token_hex(12).upper()
+        self._sym = "GG-TRUSTED-" + secrets.token_hex(12).upper()
+        names = list(_PROTOCOL_NAMES) + _prelude_names(self.prelude)
         script = self._write(
-            "%s\n%s\n%s\n(handler-case\n"
+            "%s\n%s\n%s\n%s\n(handler-case\n"
             "    (with-input-from-string (in \"%s\")\n"
             "      (let ((*read-eval* nil))\n"
             "        (loop for form = (read in nil :gg-eof)\n"
             "              until (eq form :gg-eof) do (eval form))))\n"
-            "  (error (c) (setf *gg-load-error* (princ-to-string c))))\n(gg-serve)\n"
-            % (_LOOP, kernel, guard, workers._lisp_escape(self.prelude or "")))
+            "  (error (c) (setf *gg-load-error* (princ-to-string c))))\n"
+            "%s\n(gg-serve)\n"
+            % (_LOOP, kernel, guard, _guarded(_recorder_install(self._pkg, self._sym)),
+               workers._lisp_escape(self.prelude or ""),
+               _guarded(_recorder_call(self._pkg, self._sym, "record", names))))
         try:
             self.proc = subprocess.Popen(
                 [exe, "--dynamic-space-size", "512", "--no-userinit", "--no-sysinit",
@@ -180,8 +260,18 @@ class LispServer:
         self._files = []
 
     # -- public ------------------------------------------------------------
-    def eval(self, code, fresh=False):
-        """Evaluate one form; same envelope keys as ``workers.run_lisp``."""
+    def eval(self, code, fresh=False, restore=None):
+        """Evaluate one form; same envelope keys as ``workers.run_lisp``.
+
+        ``restore`` is the design for a candidate's own redefinition: a list of
+        trusted function names this call legitimately changes (usually the
+        candidate's name). After the form has run, the child takes their CURRENT
+        function objects as the new trusted baseline, whatever the form returned,
+        so a later ``intact()`` does not report that expected change. Any other
+        trusted function the same form touched is still reported. To put a saved
+        version back, call ``eval(saved_defun, restore=[name])``: the baseline
+        then is the restored object, and ``intact()`` is clean again.
+        """
         started = time.perf_counter()
 
         def result(ok, value="", error="", stdout="", timed_out=False):
@@ -209,6 +299,8 @@ class LispServer:
                     return result(False, error="the Lisp server stopped during the call")
                 return result(False, error="wall-clock timeout after %gs; server restarted"
                               % self.timeout_s, timed_out=True)
+            if restore:
+                self._record_locked(list(restore))
             tag, text, printed = reply
             if tag == "ok":
                 return result(True, value=text, stdout=printed)
@@ -220,6 +312,7 @@ class LispServer:
         The prelude grows either way, so a later restart (timeout, crash) loads
         everything. On any trouble the child is stopped and the next call starts
         a clean one from the full prelude; nothing half-loaded is ever served.
+        The functions it defines become trusted (recorded) once it has loaded.
         """
         with self._lock:
             self.prelude = (self.prelude or "") + more
@@ -227,23 +320,77 @@ class LispServer:
                 self._stop()
                 self._load_error = ""
                 return False
-            try:
-                self.proc.stdin.write((_hex("(progn %s\n t)" % more) + "\n").encode("ascii"))
-                self.proc.stdin.flush()
-                reply = self._read(self.timeout_s)
-            except OSError:
-                reply = None
+            reply = self._send("(progn %s\n t)" % more)
             if reply is None or reply[0] != "ok":
                 self._stop()
                 return False
-            return True
+            return self._record_locked(_prelude_names(more))
 
     def reload(self, prelude):
         """Replace the loaded definitions (restarts the child on the next call)."""
         with self._lock:
             self.prelude = prelude
-            self._load_error = ""
+            self._restart_locked()
+
+    def restart(self):
+        """Stop the child now; the next call starts a fresh one from ``self.prelude``.
+
+        ``self.prelude`` is the canonical state: the prelude plus every successful
+        ``extend``. A fresh child has no globals, no candidate redefinitions and
+        a new trusted baseline.
+        """
+        with self._lock:
+            self._restart_locked()
+
+    def intact(self):
+        """Whether every trusted function is still the object the prelude defined.
+
+        Returns ``{"ok": bool, "changed": [names]}``. ``changed`` names each
+        recorded function (the prelude's ``defun``s and the protocol functions)
+        that was redefined, replaced with ``setf``/``fdefinition`` or made
+        unbound since it was recorded. A child that is not running is started
+        first, and the check then runs on it. If the check itself fails (timeout,
+        dead child) the answer is ``{"ok": False, "changed": ["?"]}`` and the
+        child is stopped, so the next call starts clean.
+
+        The check calls the recorder closure directly through a random symbol
+        name chosen at server start. It never evaluates a name that candidate
+        code could have redefined. Expected redefinitions are declared with
+        ``eval(..., restore=[names])``, not here.
+        """
+        with self._lock:
+            if self.proc is None or self.proc.poll() is not None:
+                if self._start():
+                    return {"ok": False, "changed": ["?"]}
+            reply = self._send(_recorder_call(self._pkg, self._sym, "check"))
+            if reply is None or reply[0] != "ok":
+                self._stop()
+                return {"ok": False, "changed": ["?"]}
+            changed = _quoted_strings(reply[1])
+            return {"ok": not changed, "changed": changed}
+
+    def _restart_locked(self):
+        self._load_error = ""
+        self._stop()
+
+    def _send(self, form):
+        """One form to the running child: its framed reply, or None if none came."""
+        try:
+            self.proc.stdin.write((_hex(form) + "\n").encode("ascii"))
+            self.proc.stdin.flush()
+        except OSError:
+            return None
+        return self._read(self.timeout_s)
+
+    def _record_locked(self, names):
+        """Trust the CURRENT function objects of NAMES. False (child stopped) on failure."""
+        if not names:
+            return True
+        reply = self._send(_recorder_call(self._pkg, self._sym, "record", names))
+        if reply is None or reply[0] != "ok":
             self._stop()
+            return False
+        return True
 
     def close(self):
         with self._lock:

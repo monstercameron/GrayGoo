@@ -38,7 +38,9 @@ import webkit
 import goalcheck
 import lispserver
 import lispstyle
+import acceptance
 import compaction
+import interfaces
 import modelgate
 import screenshot
 import visualcheck
@@ -156,6 +158,14 @@ GG_CHECK = (
     "(gg-resp got want) (gg-near got want)) (and (eq want t) got)) "
     "t (list :got got)))")
 LIVE_SPEND_CAP_USD = 1.00   # per server process; live sessions refuse past it
+# One build may make up to MAX_MODEL_CALLS_PLAN calls, so it also gets a spend and
+# a time limit of its own. Reaching one stops the build with what is saved so
+# far; sending the prompt again (Continue) is the explicit go-ahead to spend more.
+MAX_SESSION_USD = 0.40
+# A goal with one of these words is also looked at on a phone-sized screen.
+PHONE_GOAL = re.compile(r"\b(?:responsive|mobile|phones?|small screens?|narrow screens?)\b", re.I)
+PHONE_SIZE = (390, 844)
+MAX_SESSION_SECONDS = 300
 WORKER_TIMEOUT_S = 15.0
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 
@@ -323,6 +333,19 @@ def _sig(t):
     return "%s %s" % (t["name"], signature(t["definition"]).split(" ", 1)[1][:-1])
 
 
+_STOP_WORDS = frozenset(
+    "about after again along already always because before being between could every first "
+    "from given giving have having into itself list lists make makes more must only other "
+    "over plain returns return should some state string strings such takes taking text than "
+    "that their them then there these they this those through under using value values "
+    "when where which while with within without would request response".split())
+
+
+def _content_words(text):
+    """The words of TEXT that say what it is about (five letters or more, no filler)."""
+    return {w for w in re.findall(r"[a-z]{5,}", (text or "").lower()) if w not in _STOP_WORDS}
+
+
 def compact_registry(tools, focus=None, budget=None):
     """``(text, level)``: the REGISTRY block made to fit BUDGET characters.
 
@@ -359,9 +382,15 @@ def compact_registry(tools, focus=None, budget=None):
     levels = [(tool_line, _sig),
               (lambda t: tool_line(t, with_example=False), _sig),
               (lambda t: "TOOL " + _sig(t), lambda t: t["name"])]
+    words = _content_words(focus)
+    related = {t["name"] for t in own if t["name"] not in named and
+               len(_content_words(t.get("description") or "") & words) >= 2}
     for n, (full, brief) in enumerate(levels, 1):
         parts = [full(t) for t in tools if t["name"] in named]
-        rest = [brief(t) for t in own if t["name"] not in named]
+        # an older tool the call does not name but clearly concerns keeps its
+        # description at the first level, so it is not rebuilt for want of knowing it
+        rest = [compact_line(t) if n == 1 and t["name"] in related else brief(t)
+                for t in own if t["name"] not in named]
         helpers = [brief(t) for t in kit if t["name"] not in named]
         if rest:
             parts.append("OTHER SAVED TOOLS (callable the same way): " + "; ".join(rest))
@@ -409,6 +438,20 @@ def signature(definition):
     m = re.match(r"\s*\(defun\s+(\S+)\s+(\([^)]*\))", definition or "")
     return "(%s %s)" % (m.group(1), m.group(2)) if m else "(?)"
 
+_REGISTRY_LOCKS = {}                    # one lock per registry file, whoever opens it
+_REGISTRY_LOCKS_GUARD = threading.Lock()
+
+
+def _registry_lock(path):
+    """The lock of the registry file at PATH, shared by every object that opens it."""
+    try:
+        key = str(Path(path).resolve()).lower()
+    except OSError:
+        key = str(path).lower()
+    with _REGISTRY_LOCKS_GUARD:
+        return _REGISTRY_LOCKS.setdefault(key, threading.RLock())
+
+
 class ToolRegistry:
     """Persistent store of promoted Lisp tools (JSON file).
 
@@ -420,29 +463,60 @@ class ToolRegistry:
     def __init__(self, path=None, mode=None):
         self.path = Path(path) if path else AGENT_DIR / "tools.json"
         self.mode = mode
-        self._lock = threading.Lock()
+        # per file, not per object: two registries on one path (the dashboard's and
+        # a session's) used to lose each other's adds
+        self._lock = _registry_lock(self.path)
 
     def for_mode(self, mode):
-        clone = ToolRegistry(self.path, mode)
-        clone._lock = self._lock
-        return clone
+        return ToolRegistry(self.path, mode)
 
     @staticmethod
     def _mode_of(tool):
         return tool.get("mode") or "demo"
 
     def _raw(self):
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # under the file's lock, so a read never lands in the middle of a replace
+        # (which on Windows read as "no tools at all" and failed the writer)
+        with self._lock:
+            for attempt in range(4):
+                try:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    return []
+                except PermissionError:          # another process is replacing the file
+                    time.sleep(0.01 * (attempt + 1))
+                    continue
+                except (OSError, ValueError):
+                    return []
+                return data if isinstance(data, list) else []
             return []
-        return data if isinstance(data, list) else []
 
     def _write(self, tools):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(tools, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(tools, indent=2), encoding="utf-8")
+            for attempt in range(6):
+                try:
+                    tmp.replace(self.path)
+                    return
+                except PermissionError:          # a reader in another process holds the file
+                    if attempt == 5:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
+
+    def snapshot(self):
+        """Everything in the registry file, all modes: pass it to ``restore`` to go back."""
+        with self._lock:
+            return json.loads(json.dumps(self._raw()))
+
+    def restore(self, snapshot):
+        """Put back a ``snapshot``; returns the names whose definition this changed or removed."""
+        with self._lock:
+            now = {(t.get("name"), self._mode_of(t)): t.get("definition") for t in self._raw()}
+            then = {(t.get("name"), self._mode_of(t)): t.get("definition") for t in snapshot}
+            self._write(snapshot)
+        return sorted({k[0] for k in set(now) | set(then) if now.get(k) != then.get(k)})
 
     def _mine(self, tool):
         return not self.mode or self._mode_of(tool) == self.mode
@@ -1527,7 +1601,11 @@ def normalize_plan(plan):
 
 
 class BudgetExhausted(RuntimeError):
-    """The session reached its model-call limit."""
+    """The session reached a limit of its own: model calls, spend or time."""
+
+    def __init__(self, message, limit=None):
+        super().__init__(message)
+        self.limit = limit              # plain words for the report, e.g. "the spend limit of $0.40"
 
 
 class Cancelled(RuntimeError):
@@ -1763,7 +1841,11 @@ WEB_APP_CONTRACT = (
     ":body \"<html>...</html>\" :state new-state). Leave :state out when "
     "nothing changed. Redirect with :status 303 and a (\"Location\" \"/\") "
     "header; set a cookie with a (\"Set-Cookie\" \"sid=VALUE; HttpOnly; Path=/\") "
-    "header. Stay pure: take the time from :now and randomness (session ids, "
+    "header. Passwords are never stored or compared as plain text: a user is a "
+    "(name salt hash) row made with hash-password and checked with "
+    "password-matches-p, and initial-state seeds one user named demo whose "
+    "password is demo so the app can be tried. "
+    "Stay pure: take the time from :now and randomness (session ids, "
     "salts) from :nonce. Wrap EVERY piece of stored or submitted text in "
     "(html-escape ...) before it goes into HTML. A page that lists items also "
     "shows the form to add one and links to the other pages; a POST handler "
@@ -1910,6 +1992,8 @@ class Session:
         self.input_tokens = 0
         self.output_tokens = 0
         self.max_calls = MAX_MODEL_CALLS
+        self.max_usd = MAX_SESSION_USD
+        self.max_seconds = MAX_SESSION_SECONDS
         self._deep_calls = 0
         self._built = []        # tools saved by this session: (name, tests)
         self._t0 = time.time()
@@ -1948,6 +2032,10 @@ class Session:
         self._style_gaps = {"undefined": [], "defined": [], "framework": False}
         self._plan_note = ""              # what the planner was told about this goal
         self._smoke_ok = False
+        self._smoke_ran = False
+        self._accept = None               # what trying the app like a visitor showed
+        self._iface = []                  # mismatches between the saved functions
+        self._behaviour_fixed = False
         self._incomplete = False          # the app answers but a planned function is missing
         self._log_path = Path(log_path) if log_path else \
             AGENT_DIR / "sessions" / ("%s.jsonl" % self.id)
@@ -2046,6 +2134,12 @@ class Session:
         if self.model_calls >= self.max_calls:
             raise BudgetExhausted("model call budget (%d) exhausted"
                                   % self.max_calls)
+        if self.cost_usd >= self.max_usd:
+            raise BudgetExhausted("spend budget exhausted", limit=(
+                "the spend limit of $%.2f for one build" % self.max_usd))
+        if time.time() - self._t0 > self.max_seconds:
+            raise BudgetExhausted("time budget exhausted", limit=(
+                "the time limit of %d s for one build" % self.max_seconds))
         self.model_calls += 1
         if deep:
             if self._deep_calls >= MAX_DEEP_CALLS:
@@ -2141,6 +2235,7 @@ class Session:
                       cost_usd=res.get("cost_usd"),
                       latency_ms=res.get("latency_ms"),
                       finish_reason=res.get("finish_reason"))
+            self._check_cancel()        # nothing is built from a reply that outlived the cancel
             try:
                 if res.get("finish_reason") == "length":
                     raise ValueError("the reply was cut off at the token limit")
@@ -2265,18 +2360,19 @@ class Session:
     def _run_guarded(self):
         try:
             self._run()
+            self._check_cancel()        # asked for during the last check: still a cancel
         except Cancelled:
             # the user's decision, not a failure: what was saved stays saved
             self.state = "cancelled"
             self.emit("cancelled", saved=list(dict.fromkeys(n for n, _ in self._built)))
-        except BudgetExhausted:
+        except BudgetExhausted as exc:
             # not a crash: the work so far is saved and the next prompt builds on it
-            names = [n for n, _ in self._built]
+            names = list(dict.fromkeys(n for n, _ in self._built))
             if self.lessons is not None:
                 self.lessons.record_harness("call-limit-reached")
             self.emit("gave_up", attempts=self.model_calls, detail=(
-                "Stopped at the limit of %d model calls. %s"
-                % (self.max_calls,
+                "Stopped at %s. %s"
+                % (getattr(exc, "limit", None) or "the limit of %d model calls" % self.max_calls,
                    "Saved so far: %s." % ", ".join(names) if names
                    else "No tool passed its tests yet.")),
                 hint=("Send the same prompt again to continue from the saved tools."
@@ -2398,6 +2494,24 @@ class Session:
             "kept": list(self._kept),
             "visual": dict(self._visual),
             "compaction": dict(self._ctx),
+            "verification": self._verification(),
+        }
+
+    def _verification(self):
+        """What the harness itself checked, level by level; None where a level did not run."""
+        facts = self._style_facts() if self._smoke_ran else None
+        accept = self._accept
+        return {
+            "function_tests": sum(t for _, t in {n: t for n, t in self._built}.items()),
+            "app_answers": bool(self._smoke_ok) if self._smoke_ran else None,
+            "scenarios": ({k: accept[k] for k in ("passed", "failed", "skipped", "failed_labels")}
+                          if accept else None),
+            # a function nothing calls is waste, not a fault: it is listed as unused instead
+            "interfaces": (len([p for p in self._iface if p.get("kind") != "unrouted-handler"])
+                           if self._smoke_ran and self._smoke_ok else None),
+            "style_missing": len(facts["missing"]) if facts else None,
+            "screens": self._visual["done"] if self._visual["checked"] else None,
+            "model_said_done": None,          # deliberately not counted
         }
 
     def _missing_now(self):
@@ -2406,8 +2520,14 @@ class Session:
             return []
         texts = ["%s %s %s" % (t["name"], t.get("description", ""), t.get("definition", ""))
                  for t in self.registry.load() if not t.get("kit")]
-        return [f["label"] for f in goalcheck.missing(self._features, texts)] + [
+        out = [f["label"] for f in goalcheck.missing(self._features, texts)] + [
             "the function %s (it kept failing its tests)" % n for n in self._failed_steps]
+        if self._accept:
+            # named in the code is not the same as working: trying the app decides
+            shown = acceptance.feature_evidence(self._features, self._accept["results"])
+            out += ["%s (the code has it, but trying the app showed it does not work)" % f["label"]
+                    for f in self._features if shown.get(f["key"]) is False and f["label"] not in out]
+        return out
 
     def _run(self):
         tools = self.registry.load()
@@ -2497,6 +2617,11 @@ class Session:
                         " These %d used classes have NO rule and render unstyled now: %s."
                         % (len(facts["missing"]), ", ".join(facts["missing"][:40]))
                         if facts["missing"] else "", facts["sheet"]))
+        if self._app and "handle-request" in names:
+            faults = interfaces.check(tools)
+            if faults:
+                note += (" INTERFACE FACTS, read from the saved code (fix them as part of the "
+                         "plan): " + " ".join(p["detail"] for p in faults[:6]))
         self._plan_note = note
         # the plan decides every later call: a large goal gets a thought-out one
         plan = self._ask(self._user_prompt(note, full=True), "plan", deep=(
@@ -2507,8 +2632,7 @@ class Session:
                 return
             if self._app and self._smoke():
                 if self._smoke_ok:
-                    self._style_repair()     # every class the pages use gets a rule
-                    self._visual_review()    # it answers: now look at what it shows
+                    self._finish_app()       # it answers: check it, style it, look at it
                 return                       # the app answered its own check: done
             plan = self._ask(self._user_prompt(
                 "All planned helper tools are built and saved. Now finish the "
@@ -2531,8 +2655,7 @@ class Session:
             # one function was changed, not a plan: the app is checked all the same.
             # (Three "fix the styling" prompts in a row each rewrote the stylesheet
             # alone, with new class names, and nothing looked at the result.)
-            self._style_repair()
-            self._visual_review()
+            self._finish_app()
 
     # -- planner: a big goal becomes a few small, individually tested tools ---
     # -- goal coverage ---------------------------------------------------
@@ -2612,6 +2735,9 @@ class Session:
             self.emit("gave_up", detail="The app was built but failed its own check (%s): %s"
                       % (call, error[:300]), hint="Send the prompt again to repair it.",
                       attempts=0, app=True)
+        self._smoke_ran = True
+        if ok:
+            self._check_app()
         return True
 
     def _take_shots(self, rnd):
@@ -2634,10 +2760,19 @@ class Session:
                       defined=len(gaps["defined"]))
         if not pages:
             return []
+        if PHONE_GOAL.search(" ".join([self.prompt] + list(self.prior_goals or []))):
+            # the goal asks for a small-screen layout: the front page is also shown at phone width
+            pages = pages + [dict(pages[0], label="%s at phone width (%d px)" % (pages[0]["label"], PHONE_SIZE[0]),
+                                  size=PHONE_SIZE)]
         outs = [self.shots_dir / ("r%d-%d.png" % (rnd, n)) for n in range(1, len(pages) + 1)]
+
+        def shoot(pair):
+            page, out = pair
+            if page.get("size"):
+                return self.capture_fn(page["html"], out, width=page["size"][0], height=page["size"][1])
+            return self.capture_fn(page["html"], out)
         with ThreadPoolExecutor(max_workers=len(pages)) as pool:    # one browser run each
-            results = list(pool.map(lambda pair: self.capture_fn(pair[0]["html"], pair[1]),
-                                    zip(pages, outs)))
+            results = list(pool.map(shoot, zip(pages, outs)))
         shots = []
         for n, (page, out, res) in enumerate(zip(pages, outs, results), 1):
             ok = bool(res.get("ok"))
@@ -2718,17 +2853,19 @@ class Session:
                                            "; ".join(problems))}]}
         if plan.get("action") != "plan":
             return
-        self._fixing = True
-        try:
-            built = self._run_steps(plan)
-        finally:
-            self._fixing = False
+        snapshot = self.registry.snapshot()
+        kept = self._guarded_fix(plan, "visual fixes")
         self._visual["unfixed"] = list(dict.fromkeys(self._fix_failed))
-        if not built:
+        if not kept or not self._smoke_ok:
             return
-        self._smoke()
-        if self._smoke_ok:
-            self._visual_review(rnd + 1)
+        seen = dict(self._visual, shots=list(self._visual["shots"]))
+        self._visual_review(rnd + 1)
+        if self._visual["checked"] and self._visual["rounds"] == rnd + 1 and \
+                len(self._visual["problems"]) > len(problems):
+            # the pictures got worse: the earlier version is the better one
+            self._roll_back(snapshot, "the screenshots showed %d problem(s) after the fixes "
+                            "and %d before" % (len(self._visual["problems"]), len(problems)))
+            self._visual.update(done=seen["done"], problems=seen["problems"])
 
     def _gap_note(self):
         """One sentence for the fix planner when the pages use classes no stylesheet rule covers."""
@@ -3027,6 +3164,115 @@ class Session:
                 "edit that adds the rules is enough"
                 % (len(facts["missing"]), ", ".join(facts["missing"][:40])))
 
+    def _fit_problem(self, plan):
+        """Why a candidate may not run beside the saved functions, or does not fit them.
+
+        It may not touch functions it does not own (the checker, the kit, the
+        other saved tools all live in the same Lisp process), and a call of a
+        saved function has to pass the number of arguments that function takes.
+        """
+        definition, name = plan.get("definition"), plan.get("name")
+        if not isinstance(definition, str) or not isinstance(name, str):
+            return None
+        tools = self.registry.load()
+        found = lispstyle.trust_problems(
+            definition, reserved=[t["name"] for t in tools if t["name"] != name])
+        if found:
+            return "not allowed beside the harness's own functions: " + found[0]
+        wrong = interfaces.call_arity_problems(definition, tools)
+        return wrong[0]["detail"] if wrong else None
+
+    def _check_app(self):
+        """Zero-token checks of the finished app as a whole.
+
+        It is tried the way a visitor would use it (sign in, a wrong password,
+        add something, follow the links), and its functions are compared with
+        each other (routes, call arities, state tables). A function called
+        handle-login proves nothing; a login that lets the demo user in and
+        keeps a wrong password out does.
+        """
+        import mount                               # mount imports this module
+        tools = self.registry.load()
+        if any(t["name"] == "handle-request" for t in tools):
+            folder = Path(tempfile.mkdtemp(prefix="gg-accept-"))
+            try:
+                app = mount.MountedApp(self.registry, mount.StateStore(folder / "state.sqlite"),
+                                       run_lisp=self.worker_fn)
+                results = acceptance.run_scenarios(app)
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+            self._accept = dict(acceptance.summarize(results), results=results)
+            self.emit("acceptance", **self._accept)
+        self._iface = interfaces.check(tools)
+        self.emit("interface_check", problems=self._iface[:20])
+
+    def _app_score(self):
+        """``(answers, failed visitor checks)``: what a round of fixes must not make worse."""
+        return (bool(self._smoke_ok), (self._accept or {}).get("failed", 0))
+
+    def _guarded_fix(self, plan, why):
+        """Build PLAN as a round of fixes and keep it only if the app did not get worse.
+
+        The registry is put back as it was when the app stops answering or a
+        visitor check that passed now fails. Returns True when the round was kept.
+        """
+        before, snapshot = self._app_score(), self.registry.snapshot()
+        self._fixing = True
+        try:
+            built = self._run_steps(plan)
+        finally:
+            self._fixing = False
+        if not built:
+            return False
+        self._smoke()
+        after = self._app_score()
+        if after[0] >= before[0] and after[1] <= before[1]:
+            return True
+        reason = ("the app stopped answering" if not after[0] else
+                  "%d check(s) that passed before the %s now fail: %s" % (
+                      after[1] - before[1], why,
+                      "; ".join((self._accept or {}).get("failed_labels", [])[:3])))
+        self._roll_back(snapshot, reason)
+        return False
+
+    def _roll_back(self, snapshot, reason):
+        restored = self.registry.restore(snapshot)
+        self.emit("visual_rollback", reason=reason, restored=restored)
+        self._visual["rolled_back"] = reason
+        self._built = [(n, t) for n, t in self._built if n not in restored]
+        self._smoke()                                # the checks describe the restored app again
+
+    def _behaviour_fix(self):
+        """One round of fixes for what the zero-token checks found broken."""
+        failed = [r for r in (self._accept or {}).get("results", []) if r.get("ok") is False]
+        faults = [p for p in self._iface if p.get("kind") in ("dead-route", "method-mismatch", "arity", "missing-helper")]
+        if self._behaviour_fixed or not (failed or faults) or self.model_calls >= self.max_calls:
+            return
+        self._behaviour_fixed = True
+        found = ["%s (%s)" % (r["label"], r["detail"]) for r in failed[:4]] + \
+            [p["detail"].rstrip(".") for p in faults[:4]]
+        self._look_problems = found
+        self.emit("behaviour_fix", problems=found)
+        plan = self._ask(self._user_prompt(
+            self._plan_note + " THE FINISHED APP WAS TRIED AND THESE CHECKS FAILED: %s. Plan "
+            "ONLY the changes that fix them (action plan, at most %d steps): name each saved "
+            "function to change with its SAME name, add new ones only if needed, and include "
+            "handle-request when a route is missing." % ("; ".join(found), self._max_steps),
+            full=True), "behaviour-fix", deep=True)
+        if plan.get("action") == "build":
+            plan = {"action": "plan", "steps": [{
+                "name": plan.get("name", ""),
+                "spec": "%s. Fixes: %s" % (plan.get("description") or plan.get("name") or "",
+                                           "; ".join(found))}]}
+        if plan.get("action") == "plan":
+            self._guarded_fix(plan, "fixes")
+
+    def _finish_app(self):
+        """After the app answers: fix what the free checks found, style it, look at it."""
+        self._behaviour_fix()
+        self._style_repair()
+        self._visual_review()
+
     def _style_repair(self):
         """After the app answers: give the stylesheet a rule for every class the pages use.
 
@@ -3176,7 +3422,8 @@ class Session:
         prev_got, defs_seen, rescued = {}, set(), False
         self._last_stuck = False
         for attempt in range(MAX_REPAIRS + 1):
-            problem = validate_build(plan, self._frozen) or self._style_problem(plan)
+            problem = validate_build(plan, self._frozen) or self._style_problem(plan) \
+                or self._fit_problem(plan)
             ndef = (orc.norm_definition(plan.get("definition")),
                     tuple((t.get("call"), t.get("expect"))
                           for t in (plan.get("tests") or [])
@@ -3248,7 +3495,7 @@ class Session:
                     % (saved["definition"], saved.get("name", "")),
                     goal=goal), "property-tests")
                 plan = compaction.merge_reply(saved, plan)
-                for key in ("kept", "edited", "saved_chars"):
+                for key in ("kept", "edited", "saved_chars", "base_sha"):
                     plan.pop(key, None) if isinstance(plan, dict) else None
                 self.emit("decision", action=plan.get("action"), plan=plan)
                 if plan.get("action") == "build" and \
@@ -3432,7 +3679,8 @@ class Session:
         function, so a clumsy edit costs one call and never a lost attempt.
         """
         try:
-            plan = compaction.merge_reply(kept, reply)
+            plan = compaction.merge_reply(kept, reply, expect_sha=compaction.definition_sha(
+                kept.get("definition")))
         except compaction.EditFailed as exc:
             self._ctx["edit_failures"] += 1
             self.emit("edit_failed", name=kept.get("name", ""), reason=str(exc)[:240])
@@ -3443,6 +3691,7 @@ class Session:
             plan = compaction.merge_reply(kept, again)
         if not isinstance(plan, dict):
             return plan
+        plan.pop("base_sha", None)
         edited, kept_fields = plan.pop("edited", 0), plan.pop("kept", [])
         saved = plan.pop("saved_chars", 0)
         if edited:
@@ -3474,7 +3723,8 @@ class Session:
         # In the warm REPL the candidate replaces the saved version for the
         # checks and the saved version goes back afterwards, whatever happens.
         server = self._session_repl()
-        swapped = server is not None and bool(server.eval(plan["definition"]).get("ok"))
+        swapped = server is not None and bool(
+            server.eval(plan["definition"], restore=[plan["name"]]).get("ok"))
         try:
             for dep in tools:
                 if dep["name"] == plan["name"] or not uses.search(dep["definition"]):
@@ -3491,7 +3741,7 @@ class Session:
                         broken.append("%s no longer gives %s" % (t["call"], t["expect"]))
         finally:
             if swapped:
-                server.eval(old["definition"])
+                server.eval(old["definition"], restore=[plan["name"]])
         return broken
 
     def _promote(self, plan):
@@ -3657,11 +3907,11 @@ class Session:
         # so the process is not started again after every promotion.
         base = "%s\n%s" % (GG_CHECK, prelude)
         server = lispserver.cached_server("rehearse:" + self.id, base, WORKER_TIMEOUT_S)
-        out = {}
+        out, own, tampered = {}, [plan["name"]], None
         try:
             for d, t in zip(direct, plan["tests"]):
                 env = server.eval("(progn %s\n(gg-check %s '%s))"
-                                  % (plan["definition"], t["call"], t["expect"]))
+                                  % (plan["definition"], t["call"], t["expect"]), restore=own)
                 if env.get("timed_out") or (env.get("error") or "").startswith(
                         ("the Lisp server", "sbcl executable", "failed to spawn",
                          "the definitions failed")):
@@ -3670,7 +3920,21 @@ class Session:
         finally:
             saved = next((x for x in self.registry.load() if x["name"] == plan["name"]), None)
             server.eval(saved["definition"] if saved
-                        else "(fmakunbound '%s)" % plan["name"])
+                        else "(fmakunbound '%s)" % plan["name"], restore=own)
+            # The candidate ran in the process that holds the checker, the kit and
+            # every saved tool. If it changed any of them, nothing it "passed" counts
+            # and the process starts again from the saved definitions.
+            state = server.intact()
+            if not state.get("ok"):
+                tampered = [n for n in (state.get("changed") or ["?"])
+                            if n.lower() != plan["name"].lower()] or None
+                server.restart()
+        if tampered:
+            self.emit("tamper", name=plan["name"], changed=tampered)
+            why = ("the candidate changed a function it does not own (%s): a tool may only "
+                   "define itself" % ", ".join(tampered))
+            return {d["code"]: {"ok": False, "stdout": "", "return_value": "", "error": why,
+                                "timed_out": False, "elapsed_ms": 0.0} for d in direct}
         return out
 
     def _run_side_by_side(self, codes):
@@ -4184,6 +4448,7 @@ class SessionManager:
         self.generators = generators or {"demo": demo_generate,
                                          "live": live_generate}
         self._sessions = {}
+        self._twin = None               # the no-memory comparison build, while it runs
         self._busy = False
         self.lessons = orc.LessonStore(AGENT_DIR / "lessons.json")
         self.live_spend = 0.0
@@ -4253,6 +4518,8 @@ class SessionManager:
             sess.project = self.projects.resolve(project)
             sess.project_note = self.project_note(project)
             sess.visual = sess.visual and bool(visual)
+            if mode == "live":          # never more than what is left of the process cap
+                sess.max_usd = min(MAX_SESSION_USD, max(0.02, LIVE_SPEND_CAP_USD - self.live_spend))
             if sess.project != projects.BUILTIN:
                 sess.prior_goals = [r.get("prompt") for r in self.history(60, sess.project)
                                     if r.get("mode") == mode and r.get("arm") == "main"]
@@ -4267,6 +4534,9 @@ class SessionManager:
         with self._lock:
             running = [x for x in self._sessions.values() if x.state == "running"
                        and (session_id is None or x.id == session_id)]
+            twin = self._twin
+            if twin is not None and twin.state == "running" and session_id in (None, twin.id, twin.pair):
+                running.append(twin)
         hit = [x.id for x in running if x.cancel()]
         return bool(hit), (hit[0] if hit else None)
 
@@ -4290,11 +4560,16 @@ class SessionManager:
                         postmortem_dir=AGENT_DIR / "postmortems")
                     twin.project = sess.project
                     twin.visual = False
+                    with self._lock:
+                        self._twin = twin
                     twin.run()
                     self.live_spend += twin.cost_usd if sess.mode == "live" else 0.0
                 finally:
+                    with self._lock:
+                        self._twin = None
                     shutil.rmtree(scratch, ignore_errors=True)
-                sess.compare = "done"
+                # a stopped comparison is no comparison
+                sess.compare = None if twin.state == "cancelled" else "done"
         finally:
             with self._lock:
                 self._busy = False

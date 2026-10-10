@@ -120,27 +120,52 @@ def _label(first, page, prefix=""):
                              "" if page["status"] == 200 else " (status %d)" % page["status"])
 
 
+DEMO_USER = ("demo", "demo")     # the account an app is asked to seed, so it can be tried
+
+
+def credentials(state_src):
+    """Name/password pairs worth trying on a login form, most likely first.
+
+    An app that stores passwords properly keeps a hash, so the password cannot
+    be read from its state; such apps are asked to seed the demo account. The
+    row's own second string is still tried first for apps that store plain text.
+    """
+    user, out = first_user(state_src), []
+    if user:
+        out += [user, (user[0], DEMO_USER[1]), (user[0], user[0]), (user[0], "password")]
+    out.append(DEMO_USER)
+    return list(dict.fromkeys(out))
+
+
 def _sign_in(app, page, jar, state_src):
-    """The page reached by filling the login form with the state's first user, or None."""
-    form, user = login_form(page["html"]), first_user(state_src)
-    if not form or not user:
+    """The page reached by signing in through the login form, or None.
+
+    Each candidate pair is tried with its own copy of the cookies; the first
+    that gets past the login page wins and its cookies are kept in JAR.
+    """
+    form = login_form(page["html"])
+    if not form:
         return None
-    data, named = {}, False
-    for f in form["fields"]:
-        if f["type"] == "password":
-            data[f["name"]] = user[1]
-        elif f["type"] in ("hidden", "submit", "button", "checkbox", "radio"):
-            if f["type"] == "hidden":
-                data[f["name"]] = f["value"]          # nonces and tokens travel back as sent
-        elif not named:
-            data[f["name"]], named = user[0], True
     action = urlsplit(urljoin(page["path"], form["action"] or page["path"]))
     target = (action.path or "/") + ("?" + action.query if action.query else "")
-    after = fetch(app, "POST" if form["method"] == "post" else "GET", target, jar, form=data)
-    if after["status"] != 200 or login_form(after["html"]) or not after["html"].strip():
-        return None                                   # still at the door: the sign-in did not work
-    after["user"] = user[0]
-    return after
+    for name, password in credentials(state_src)[:5]:
+        data, named = {}, False
+        for f in form["fields"]:
+            if f["type"] == "password":
+                data[f["name"]] = password
+            elif f["type"] in ("hidden", "submit", "button", "checkbox", "radio"):
+                if f["type"] == "hidden":
+                    data[f["name"]] = f["value"]      # nonces and tokens travel back as sent
+            elif not named:
+                data[f["name"]], named = name, True
+        trial = dict(jar)
+        after = fetch(app, "POST" if form["method"] == "post" else "GET", target, trial, form=data)
+        if after["status"] == 200 and after["html"].strip() and not login_form(after["html"]):
+            jar.clear()
+            jar.update(trial)
+            after["user"], after["password"] = name, password
+            return after
+    return None                                       # still at the door: no sign-in worked
 
 
 def collect_pages(app, limit=3, state_src=None):

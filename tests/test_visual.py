@@ -77,8 +77,25 @@ class PageWalkTests(unittest.TestCase):
         self.assertEqual([p["label"] for p in pages], ["GET / -> /login"])
 
     def test_a_sign_in_that_does_not_work_is_not_reported_as_one(self):
-        pages = visualcheck.collect_pages(FakeApp('(("users" (("user" "wrong"))))'), limit=3)
+        pages = visualcheck.collect_pages(FakeApp('(("users" (("other" "wrong"))))'), limit=3)
         self.assertEqual([p["label"] for p in pages], ["GET / -> /login"])
+
+    def test_hashed_passwords_are_no_obstacle_when_the_demo_account_is_seeded(self):
+        # the state holds (name salt hash): the password cannot be read from it
+        self.assertEqual(visualcheck.credentials('(("users" (("demo" "s1" "9f2c41aa"))))')[:2],
+                         [("demo", "s1"), ("demo", "demo")])
+        self.assertEqual(visualcheck.credentials("nil"), [("demo", "demo")])
+
+        class Hashed(FakeApp):
+            def handle(self, method, target, headers, body=b""):
+                if method == "POST" and target.split("?")[0] == "/login":
+                    ok = "username=demo" in body.decode() and "password=demo" in body.decode()
+                    self.seen.append((method, target, headers.get("Cookie", ""), body.decode()))
+                    return (303, [("Location", "/"), ("Set-Cookie", "sid=abc; Path=/")], "") if ok \
+                        else (200, [], LOGIN)
+                return super().handle(method, target, headers, body)
+        pages = visualcheck.collect_pages(Hashed('(("users" (("demo" "s1" "9f2c41aa"))))'), limit=2)
+        self.assertEqual([p["label"] for p in pages], ["GET / -> /login", "signed in as demo: GET /"])
 
     def test_small_helpers(self):
         self.assertEqual(visualcheck.first_user(STATE), ("user", "password"))

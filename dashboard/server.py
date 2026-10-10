@@ -13,6 +13,7 @@ Endpoints (JSON):
   POST /api/agent/prompt    {prompt, mode: demo|live} -> {session_id} (409 if busy)
   GET  /api/agent/sessions/{id}?since=N   incremental session events
   GET  /api/agent/tools, /api/agent/history; POST /api/agent/reset
+  GET  /api/agent/machinery[?project=]   {report, replay}: specialization + replay evidence, null if absent
   GET  /api/events         SSE job snapshots (optional; polling /api/jobs works too)
   GET  /, /index.html, /app.js, /styles.css   static frontend
 
@@ -389,6 +390,28 @@ class JobManager:
 # Request dispatch (pure layer; unit-tested without sockets)
 # ---------------------------------------------------------------------------
 
+def machinery_figures(project=None):
+    """Evidence for the Thesis section 'The machinery specialises too'.
+
+    Either part may be absent (no logs yet, the replay not run yet): a module that is
+    missing, or whose call raises (ImportError is an Exception), is reported as null.
+    The replay is read first because the report uses its measurement where it has one.
+    """
+    report = replay = None
+    try:
+        import replay_evidence
+        replay = replay_evidence.load()
+    except Exception:
+        replay = None
+    replay = replay if isinstance(replay, dict) else None
+    try:
+        import specialization
+        report = specialization.report(project=project, replay=replay)
+    except Exception:
+        report = None
+    return {"report": report if isinstance(report, dict) else None, "replay": replay}
+
+
 def dispatch(method, path, body, ctx):
     """Route one request. Returns (http_status, jsonable_payload)."""
     root = ctx.root
@@ -508,6 +531,9 @@ def dispatch(method, path, body, ctx):
         if method == "GET" and sub == "history":
             qs = parse_qs(urlparse(path).query)
             return 200, {"sessions": agent.history(project=(qs.get("project") or [None])[0])}
+        if method == "GET" and sub == "machinery":
+            qs = parse_qs(urlparse(path).query)
+            return 200, machinery_figures((qs.get("project") or [""])[0] or None)
         if method == "POST" and sub == "call":
             try:
                 payload = json.loads(body.decode("utf-8") if body else "{}")

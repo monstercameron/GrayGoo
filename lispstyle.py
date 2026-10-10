@@ -8,6 +8,8 @@ Pure Python and pure functions: text in, findings out. No model, no SBCL.
 * ``purity_problems``  - hard rules; a tool that breaks one is not saved.
 * ``case_problems``    - hard rule: CASE can never match a string key.
 * ``security_problems``- hard rules for tools that compare secrets.
+* ``trust_problems``    - hard rules: no redefining, removing or shadowing trusted
+  functions, no building code at run time, no package games.
 * ``style_notes``      - soft observations kept with the tool, never blocking.
 """
 import re
@@ -468,3 +470,234 @@ def fix_css_commas(definition):
     if "}" not in definition:
         return definition
     return _STRINGS.sub(lambda m: '"%s"' % _drop_css_commas(m.group(0)[1:-1]), definition)
+
+
+# ---- trust_problems: a tool may not change, or reach around, trusted code ----------
+
+# The reader's own rules, one token at a time, so that a quote inside a comment opens
+# nothing, a semicolon inside a string starts nothing, and a character such as #\"
+# is a character. (code_only is not enough here: it blanks strings first, so a quote
+# inside a comment would hide the code after it from the checks.) Each alternative is
+# a single linear scan; the only repetitions are plain character runs.
+_LEX = re.compile(
+    r'(?:"(?:[^"\\]|\\.)*(?:"|\Z))+'  # strings in a row, unterminated: to the end of the text
+    r"|;[^\n]*"                       # a line comment
+    r"|#\|.*?(?:\|#|\Z)"              # a block comment
+    r"|#\\."                          # a character: #\( or #\"
+    r"|(?:\|(?:[^|\\]|\\.)*(?:\||\Z))+"  # |symbol names| in a row, with their escapes
+    r"|(?:\\.)+"                      # backslash-escaped symbol characters in a row
+    r"|#+(?![\\|])"                   # hash marks that begin no comment or character
+    r'|[^"#;|\\]+'                    # ordinary code, in one run
+    r"|.", re.S)
+
+_NAME_END = r"(?![^\s()'`,;\"])"      # the name ends here
+_NAME_START = r"(?<![^\s()'`,])"      # the name starts here
+
+_DEFINER_NOUNS = {
+    "defun": "function", "defmacro": "macro", "defgeneric": "generic function",
+    "defmethod": "method", "defsetf": "setf expander", "define-setf-expander": "setf expander",
+    "define-modify-macro": "macro", "define-compiler-macro": "compiler macro",
+    "define-symbol-macro": "symbol macro", "deftype": "type", "defstruct": "structure",
+    "defclass": "class", "defpackage": "package", "in-package": "package",
+}
+
+
+def _alternatives(words):
+    return "|".join(sorted(words, key=len, reverse=True))
+
+
+_DEFINER = re.compile(r"\(\s*(" + _alternatives(_DEFINER_NOUNS) + ")" + _NAME_END, re.I)
+_NAME_AFTER = re.compile(r"\s*([^\s()'`,\"]*)")
+_REDEFINE_SETF = re.compile(r"\(\s*p?setf(?:\s*\(\s*|\s+)(symbol-function|fdefinition|"
+                            r"macro-function|compiler-macro-function|symbol-value|get)"
+                            + _NAME_END, re.I)
+_REDEFINE_NAMED = re.compile(_NAME_START + r"(fmakunbound|makunbound|unintern)" + _NAME_END, re.I)
+# A call has an argument: (load) with none is a lambda list naming a parameter LOAD.
+_HAS_ARG = r"(?=\s*[^\s)])"
+_TRACE = re.compile(r"\(\s*(trace|untrace)" + _NAME_END + _HAS_ARG, re.I)
+_SET_VALUE = re.compile(r"\(\s*set" + _NAME_END + _HAS_ARG, re.I)
+_LOCAL_FORM = re.compile(r"\(\s*(flet|labels|macrolet)" + _NAME_END, re.I)
+_SPACE = re.compile(r"\s*")
+_BINDING = re.compile(r"\(\s*([^\s()'`,\"]+)")
+_RUN_OPS = _alternatives(("eval", "compile", "compile-file", "load", "read", "read-from-string",
+                          "intern", "find-symbol", "symbol-function", "fdefinition",
+                          "macroexpand", "macroexpand-1"))
+_RUN_CALL = re.compile(r"\(\s*(" + _RUN_OPS + ")" + _NAME_END + _HAS_ARG, re.I)
+_RUN_QUOTED = re.compile(r"(?:'|\(\s*(?:quote|function)\s+)(" + _RUN_OPS + ")" + _NAME_END, re.I)
+_FUNCALL_COMPUTED = re.compile(r"\(\s*(funcall|apply)\s*\(\s*(?!(?:lambda|function)" + _NAME_END + ")",
+                               re.I)
+_COERCE_LAMBDA = re.compile(r"\(\s*coerce\s+['`]\(\s*lambda" + _NAME_END, re.I)
+_TOKEN = re.compile(r"[^\s()'`,\"]+")
+
+
+def _trust_code(definition):
+    """``(code, escapes)``: DEFINITION as the reader sees it, for the trust rules.
+
+    Strings and comments are blanked; a character such as ``#\\(`` becomes ``#x``.
+    A symbol written with ``|`` or a backslash keeps its length, with ``x`` in place
+    of its letters, so no parenthesis or quote hides in it; ESCAPES lists those
+    symbol names as written.
+    """
+    escapes = []
+
+    def blank(m):
+        tok = m.group(0)
+        if tok[0] == '"':
+            return '""'
+        if tok[0] == ";":
+            return ""
+        if tok.startswith("#|"):
+            return " "
+        if tok.startswith("#\\"):
+            return "#x"
+        if tok[0] in "|\\":
+            escapes.append(tok)
+            return "x" * len(tok)
+        return tok
+
+    return _LEX.sub(blank, definition or ""), escapes
+
+
+def _close_table(code):
+    """``{open: close}`` for every parenthesis pair in CODE, found in one pass."""
+    stack, table = [], {}
+    for i, c in enumerate(code):
+        if c == "(":
+            stack.append(i)
+        elif c == ")" and stack:
+            table[stack.pop()] = i
+    return table
+
+
+def _keyword_lookup(code, start, close):
+    """True for ``(intern x :keyword)`` or ``(find-symbol x :keyword)``, the call at START.
+
+    Only keywords are reached that way: a keyword is data, not a function a tool could call.
+    """
+    end = close.get(start)
+    if end is None:
+        return False
+    last = end
+    while last > 0 and code[last - 1].isspace():
+        last -= 1
+    first = last
+    while first > 0 and not code[first - 1].isspace() and code[first - 1] not in "()":
+        first -= 1
+    return code[first:last] == ":keyword"
+
+
+def _local_names(code):
+    """``[(name, position)]`` of each function or macro that FLET, LABELS or MACROLET binds."""
+    close = _close_table(code)
+    found = []
+    for m in _LOCAL_FORM.finditer(code):
+        i = _SPACE.match(code, m.end()).end()
+        if code[i:i + 1] != "(":
+            continue
+        i += 1
+        while True:
+            i = _SPACE.match(code, i).end()
+            if code[i:i + 1] != "(":
+                break
+            name = _BINDING.match(code, i)
+            if name:
+                found.append((name.group(1).lower(), i))
+            end = close.get(i)
+            if end is None:
+                break
+            i = end + 1
+    return found
+
+
+def trust_problems(definition, reserved=()):
+    """Why a candidate may not run next to the harness's trusted functions: a list of sentences.
+
+    RESERVED lists the function names the candidate does not own; names starting with
+    ``gg-`` are always reserved. Each rule contributes at most one sentence. Text inside
+    strings, comments and characters never triggers a rule or hides code from one.
+    """
+    code, escapes = _trust_code(definition)
+    taken = frozenset(str(name).lower() for name in reserved)
+
+    def reserved_name(name):
+        return name.startswith("gg-") or name in taken
+
+    out = []
+
+    # 1. The tool's own name.
+    head = re.match(r"\s*\(\s*defun\s+([^\s()'`,\"]+)", code, re.I)
+    top = len(code) - len(code.lstrip())          # where the top-level form opens
+    if head and head.group(1).lower().startswith("gg-"):
+        out.append("the name %s is reserved for the harness: pick another name"
+                   % head.group(1).lower())
+
+    # 2. Any other definition inside the tool.
+    for m in _DEFINER.finditer(code):
+        kind = m.group(1).lower()
+        if m.start() == top and kind == "defun":
+            continue
+        if kind == "in-package":
+            out.append("a tool is one function: it may not change the package inside itself")
+        else:
+            name = _NAME_AFTER.match(code, m.end()).group(1)
+            out.append("a tool is one function: it may not define a %s inside itself"
+                       % ("%s %s" % (_DEFINER_NOUNS[kind], name)).strip())
+        break
+
+    # 3. Redefining, removing or shadowing a function.
+    rule3 = []
+    m = _REDEFINE_SETF.search(code)
+    if m:
+        rule3.append((m.start(), "it may not redefine or remove functions (setf %s)"
+                      % m.group(1).lower()))
+    m = _REDEFINE_NAMED.search(code) or _TRACE.search(code)
+    if m:
+        rule3.append((m.start(), "it may not redefine or remove functions (%s)"
+                      % m.group(1).lower()))
+    m = _SET_VALUE.search(code)
+    if m:
+        rule3.append((m.start(), "it may not change the value of a global symbol (set)"))
+    for name, pos in (_local_names(code) if _LOCAL_FORM.search(code) else []):
+        if reserved_name(name):
+            rule3.append((pos, "it may not shadow the reserved function %s with a local "
+                          "definition" % name))
+    if rule3:
+        out.append(min(rule3)[1])
+
+    # 4. Building or looking up code at run time.
+    rule4 = []
+    closes = None
+    for m in _RUN_CALL.finditer(code):
+        op = m.group(1).lower()
+        if op in ("intern", "find-symbol"):
+            closes = _close_table(code) if closes is None else closes
+            if _keyword_lookup(code, m.start(), closes):
+                continue
+        rule4.append((m.start(), op))
+        break
+    m = _RUN_QUOTED.search(code)
+    if m:
+        rule4.append((m.start(), "'" + m.group(1).lower()))
+    m = _FUNCALL_COMPUTED.search(code)
+    if m:
+        rule4.append((m.start(), m.group(1).lower()))
+    m = _COERCE_LAMBDA.search(code)
+    if m:
+        rule4.append((m.start(), "coerce of a quoted lambda"))
+    if rule4:
+        out.append("it may not build or look up code at run time (%s)" % min(rule4)[1])
+
+    # 5. Package-qualified names, escaped symbol names, reader evaluation.
+    rule5 = None
+    for m in _TOKEN.finditer(code):
+        if ":" in m.group(0)[1:]:
+            rule5 = "it may not use package-qualified names (%s)" % m.group(0)
+            break
+    if rule5 is None and escapes:
+        rule5 = ("it may not use escaped symbol names (%s): write the plain name"
+                 % escapes[0][:40])
+    if rule5 is None and "#." in code:
+        rule5 = "reader evaluation (#.) is not allowed"
+    if rule5:
+        out.append(rule5)
+    return out

@@ -427,3 +427,48 @@ ACCEPTED, documented, not yet fixed:
   measurable per-check via `candidate_ms`; the sampler still uses
   envelope `elapsed_ms` (upper bound) — a one-line sampler switch is
   future work.
+
+## Round 11 (2026-10-10): the 15 prioritized pipeline issues
+
+The table appended to `issues.md` ("Prioritized issues to add") concerns the
+interactive agent pipeline, not the Lisp experiment. Each row now carries a
+Status column there. Summary:
+
+- FIXED, 11 rows: unrestricted forms in the warm process (trust lint +
+  tamper record), feature completion (visitor checks), integration,
+  contract drift (`interfaces.py`), process contamination, edit identity,
+  visual-repair regressions (snapshot and rollback), cancellation,
+  per-build budgets, concurrency evidence, completion reports.
+- FIXED IN PART, 4 rows: authentication (hashing adapter and a check that
+  fails plain-text storage; no production KDF), registry relevance (still
+  word overlap), visual coverage (no update/delete flows), lifecycle
+  economics (command line only).
+- Bugs found by the new tests and fixed in the same round: 4 in
+  cancellation, 6 in concurrency, 1 in the s-expression reader (a string
+  that reads `quote-marker` was taken for the quote sign).
+- Still open and unchanged: OS-level isolation of the warm SBCL process (#46).
+
+Verified offline only (scripted model, real SBCL, real headless browser).
+None of it has run against the live model yet.
+
+## Round 12 (2026-10-10): evidence that the machinery specialises
+
+Aim: test the claim "the surrounding development machinery can also become
+faster through specialization" against the logs of real builds, with no new
+model calls.
+
+- Like-for-like (`replay_evidence.py`): 763 logged live replies, each run as
+  the model wrote it and again after today's zero-cost repairs. Pass rate
+  29.4% -> 39.6% (first drafts 31.8% -> 44.0%). 78 replies pass only with the
+  repairs, none passes only without. At the median repair call that is about
+  $0.25 and 78 model calls not spent, out of $3.17 and 967 calls.
+- From the logs (`specialization.py`): compaction left out 328,357 prompt
+  characters (about $0.15, estimate), the kit stood in for 27 helper builds
+  (about $0.14, estimate), reuse about $0.08 (estimate).
+- NOT shown: a falling cost per saved function over time. Among app-sized
+  builds the paid repairs per function fall and the free ones rise since
+  Oct 9, but dollars per function do not fall, and the prompts differ
+  between periods. The claim holds for "fewer failures reach the model";
+  it is not yet shown for "a build costs less".
+- Closed from Round 11's open list: method mismatches in `interfaces.py`,
+  update and delete visitor checks, dead onclick buttons.
