@@ -642,6 +642,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type",
                          STATIC_TYPES.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(len(data)))
+        # the page's own files change with the code: a plain refresh must fetch them again
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(data)
 

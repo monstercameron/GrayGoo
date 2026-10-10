@@ -2413,6 +2413,24 @@
     return rows;
   }
 
+  // Continue from the end-of-run card: the same prompt again, in the same mode, on what is saved.
+  function continueRun() {
+    if (state.busy || !state.runPrompt) return;
+    var sel = $("ag-mode"), mode = state.runMode;
+    if (mode && Array.prototype.some.call(sel.options, function (o) { return o.value === mode && !o.disabled; })) { sel.value = mode; setModeNote(); }
+    setPrompt(state.runPrompt);
+    send();
+  }
+  // The card's Continue button waits for the build (and its no-memory comparison) to end.
+  function syncContinue() {
+    var b = $("ag-sum-continue");
+    if (!b) return;
+    b.disabled = !!state.busy;
+    b.textContent = state.busy ? "Continue (when this run ends)" : "Continue this build";
+    b.title = state.busy ? "The comparison run without memory is still going. Continue is available as soon as it ends."
+                         : "Sends the same prompt again and builds on the functions already saved.";
+  }
+
   // The clean end-of-run card: what happened, what was built, what it cost.
   function renderSummary(m) {
     var box = $("ag-summary");
@@ -2448,10 +2466,20 @@
     var more = h("button", "sum-more", "");
     more.type = "button";
     more.hidden = true;
+    // An unfinished build can be continued right here: the Continue box of the ask bar is
+    // out of sight once the page has scrolled down to the build.
+    if ((incomplete || (m.outcome !== "success" && m.outcome !== "error")) && state.runPrompt) {
+      var again = h("button", "sum-continue ag-primary", "Continue this build");
+      again.type = "button";
+      again.id = "ag-sum-continue";
+      again.addEventListener("click", continueRun);
+      head.appendChild(again);
+    }
     head.appendChild(more);
     box.appendChild(head);
+    syncContinue();
     if (m.outcome === "cancelled") box.appendChild(h("div", "sum-l", "You stopped this build. What was saved before that is kept; Continue picks it up from there."));
-    if (missing.length) box.appendChild(h("div", "sum-l sum-miss", "Not built yet: " + joinWords(missing) + ". Send a follow-up prompt for these."));
+    if (missing.length) box.appendChild(h("div", "sum-l sum-miss", "Not built yet: " + joinWords(missing) + ". Continue builds these on what is saved."));
     if (ver) {
       box.appendChild(h("div", "sum-v-t", "Checked by the harness itself"));
       var verBox = h("div", "sum-v");
@@ -2626,6 +2654,8 @@
     switch (ev.kind) {
       case "goal":
         clear(repl); clear($("ag-log")); clear($("ag-stages")); $("ag-summary").hidden = true; clearShots();
+        // a run re-attached after a reload was not sent from this page: take its prompt from the log
+        if (ev.prompt && ev.arm !== "nomem") { state.runPrompt = ev.prompt; state.runMode = ev.mode || state.runMode; }
         renderCapNotice([]);
         $("ag-answer").textContent = "…"; $("ag-answer-call").textContent = "working";
         forceWait(); state.parallelRun = false;
@@ -2957,7 +2987,7 @@
         break;
       case "plan":
         var steps = ev.steps || [], sub = !!ev.sub;
-        if (!sub) { G.plan = []; G.split = {}; }
+        if (!sub && !G.plan.length) G.split = {};
         var D = Math.min(Math.max(steps.length - 1, 0), 4);
         var pn = ev.lane || G.active;
         var parent = sub && pn ? G.nodes[pn] : null;
@@ -3192,6 +3222,7 @@
     restoreCancel();
     setProjectLock(b);
     updateResume();
+    syncContinue();
   }
   function restoreCancel() { var cx = $("ag-cancel"); cx.disabled = false; cx.textContent = "Cancel build"; }
   function setCancelling() { var cx = $("ag-cancel"); cx.disabled = true; cx.textContent = "Cancelling…"; }
@@ -3279,6 +3310,7 @@
     return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle, project: state.project, visual: visual }).then(function (r) {
       if (r.status !== 200) { setBusy(false); throw new Error((r.data && r.data.error) || "request failed"); }
       state.session = r.data.session_id; state.next = 0;
+      state.runPrompt = prompt; state.runMode = mode;
       setPrompt(prompt);
       return new Promise(function (resolve) {
         if (state.timer) clearInterval(state.timer);
