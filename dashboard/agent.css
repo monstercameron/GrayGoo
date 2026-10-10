@@ -815,3 +815,26 @@ details.ag-math[open] > summary { margin-bottom: .6rem; }
 .sum-head .sum-continue + .sum-more { margin-left: 0; }
 .sum-head { flex-wrap: wrap; row-gap: .3rem; }
 .sum-head .sum-t { flex: 1 1 11rem; }
+
+/* ---- the user's own requirements (2026-10-10) ---- */
+.ag-reqs { margin-top: .6rem; }
+.ag-reqs > summary { cursor: pointer; color: var(--ag-cyan); font-size: .85rem; }
+.ag-reqs > summary:focus-visible { outline: 2px solid var(--ag-cyan); outline-offset: 2px; }
+.ag-reqs-lede { margin: .4rem 0 .5rem; font-size: .84rem; line-height: 1.45; color: #d6dcec; max-width: 62rem; }
+.ag-reqs-label { display: block; font-size: .78rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #cfd6e8; margin-bottom: .25rem; }
+#ag-reqs-text { width: 100%; box-sizing: border-box; min-height: 6.5rem; resize: vertical; padding: .5rem .6rem; border: 1px solid #3a4260; border-radius: 6px; background: #0e1016; color: #f1f4fb; font: .82rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+#ag-reqs-text:focus-visible { outline: 2px solid var(--ag-cyan); outline-offset: 1px; }
+.ag-reqs-row { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .4rem; font-size: .84rem; }
+.ag-reqs-errors { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .82rem; line-height: 1.45; color: var(--ag-amber); }
+.ag-reqs-help { display: grid; gap: .2rem; margin-top: .6rem; padding: .5rem .7rem; border-left: 2px solid #3a4260; background: #10151f; border-radius: 0 6px 6px 0; font-size: .8rem; }
+.ag-reqs-help > code { font: .78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfe8ff; overflow-wrap: anywhere; }
+.ag-reqs-help .ag-inl { font: inherit; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfe8ff; }
+
+/* ---- live spending limit of this server run (2026-10-10) ---- */
+.ag-spendline { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .35rem; font-size: .84rem; color: #d6dcec; }
+.ag-spendline.low { padding: .45rem .7rem; border: 1px solid #8a6d1b; background: #2a2410; border-radius: 8px; color: #f1f4fb; }
+.ag-spendline .ag-ghost { padding: .15rem .6rem; font-size: .8rem; }
+.ag-paused { margin: .5rem 0; padding: .65rem .8rem; border: 1px solid #8a6d1b; background: #2a2410; border-radius: 8px; }
+.ag-paused-t { font-weight: 700; color: var(--ag-amber); margin-bottom: .2rem; }
+.ag-paused p { margin: 0 0 .5rem; font-size: .88rem; line-height: 1.45; color: #f1f4fb; }
+.ag-paused-row { display: flex; flex-wrap: wrap; gap: .5rem; }

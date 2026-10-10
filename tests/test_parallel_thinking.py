@@ -157,6 +157,8 @@ class LaneTests(unittest.TestCase):
         self.assertEqual((wait["name"], wait["on"]), ("quad", ["double"]))
         self.assertLess(at(sess, "promoted", name="double"), at(sess, "verdict", lane="quad"))
 
+    # the build's own recovery rounds are tested in test_recovery.py; here they are off
+    @mock.patch.object(ag, "MAX_RECOVERY_ROUNDS", 0)
     def test_a_failed_lane_does_not_stop_the_other_lanes_of_an_app(self):
         model = Model(PLAN, BODIES, delay=0.01)
         sess = run(model, run_worker=worker(["triple"]), app=True)

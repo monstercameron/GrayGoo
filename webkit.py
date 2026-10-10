@@ -21,7 +21,7 @@ KIT = [
      "definition": '(defun request-field (request key)\n'
                    '  "Value of KEY, a keyword such as :path, in the REQUEST plist."\n'
                    '  (getf request key))',
-     "tests": [("(request-field '(:method \"GET\" :path \"/posts\") :path)", '"/posts"'),
+     "tests": [("(request-field '(:method \"GET\" :path \"/notes\") :path)", '"/notes"'),
                ("(request-field '(:method \"GET\") :form)", "NIL")]},
     {"name": "pair-value",
      "description": "Value for the string NAME in PAIRS, a list of (name value) lists, or NIL",
@@ -36,8 +36,8 @@ KIT = [
      "definition": '(defun form-value (request name)\n'
                    '  "Value of the submitted form field NAME in the REQUEST plist, or NIL."\n'
                    "  (pair-value (getf request :form) name))",
-     "tests": [("(form-value '(:path \"/add\" :form ((\"title\" \"Hi\"))) \"title\")", '"Hi"'),
-               ("(form-value '(:path \"/add\" :form ()) \"title\")", "NIL")]},
+     "tests": [("(form-value '(:path \"/notes\" :form ((\"text\" \"Hello\"))) \"text\")", '"Hello"'),
+               ("(form-value '(:path \"/notes\" :form ()) \"text\")", "NIL")]},
     {"name": "query-value",
      "description": "Value of the URL query parameter NAME in REQUEST, or NIL",
      "definition": '(defun query-value (request name)\n'
@@ -50,17 +50,17 @@ KIT = [
      "definition": '(defun cookie-value (request name)\n'
                    '  "Value of the cookie NAME in the REQUEST plist, or NIL."\n'
                    "  (pair-value (getf request :cookies) name))",
-     "tests": [("(cookie-value '(:path \"/\" :cookies ((\"sid\" \"abc\"))) \"sid\")", '"abc"'),
-               ("(cookie-value '(:path \"/\" :cookies ()) \"sid\")", "NIL")]},
+     "tests": [("(cookie-value '(:path \"/\" :cookies ((\"seen\" \"abc\"))) \"seen\")", '"abc"'),
+               ("(cookie-value '(:path \"/\" :cookies ()) \"seen\")", "NIL")]},
     {"name": "table-rows",
      "description": "Rows of the table NAME in STATE, a list of (name rows) tables; NIL if absent",
      "definition": '(defun table-rows (state name)\n'
                    '  "Rows of the table NAME in STATE, a list of (name rows) tables; NIL if absent."\n'
                    "  (second (assoc name state :test #'string=)))",
-     "tests": [("(table-rows '((\"posts\" ((\"Hi\" \"text\"))) (\"users\" ())) \"posts\")",
-                '(("Hi" "text"))'),
-               ("(table-rows '((\"posts\" ())) \"users\")", "NIL"),
-               ("(table-rows '() \"posts\")", "NIL")]},
+     "tests": [("(table-rows '((\"notes\" ((\"Hello\" \"text\"))) (\"tags\" ())) \"notes\")",
+                '(("Hello" "text"))'),
+               ("(table-rows '((\"notes\" ())) \"tags\")", "NIL"),
+               ("(table-rows '() \"notes\")", "NIL")]},
     {"name": "with-table-rows",
      "description": "New STATE in which the table NAME holds ROWS (the table is added if absent)",
      "definition": '(defun with-table-rows (state name rows)\n'
@@ -70,9 +70,9 @@ KIT = [
                    "                (if (string= (first table) name) (list name rows) table))\n"
                    "              state)\n"
                    "      (append state (list (list name rows)))))",
-     "tests": [("(with-table-rows '((\"posts\" ()) (\"users\" ())) \"posts\" '((\"Hi\" \"text\")))",
-                '(("posts" (("Hi" "text"))) ("users" ()))'),
-               ("(with-table-rows '() \"posts\" '((\"a\" \"b\")))", '(("posts" (("a" "b"))))')]},
+     "tests": [("(with-table-rows '((\"notes\" ()) (\"tags\" ())) \"notes\" '((\"Hello\" \"text\")))",
+                '(("notes" (("Hello" "text"))) ("tags" ()))'),
+               ("(with-table-rows '() \"notes\" '((\"a\" \"b\")))", '(("notes" (("a" "b"))))')]},
     {"name": "html-escape",
      "description": "TEXT with & < > and both quote characters replaced by HTML entities",
      "definition": '(defun html-escape (text)\n'
@@ -111,8 +111,8 @@ KIT = [
      "definition": '(defun with-state (response state)\n'
                    '  "RESPONSE that also tells the harness to save STATE as the new app state."\n'
                    "  (append response (list :state state)))",
-     "tests": [("(with-state (redirect-to \"/\") '((\"posts\" ())))",
-                '(:status 303 :headers (("Location" "/")) :body "" :state (("posts" ())))')]},
+     "tests": [("(with-state (redirect-to \"/\") '((\"notes\" ())))",
+                '(:status 303 :headers (("Location" "/")) :body "" :state (("notes" ())))')]},
     {"name": "with-cookie",
      "description": "RESPONSE plist that also sets the cookie NAME to VALUE (HttpOnly, whole site)",
      "definition": '(defun with-cookie (response name value)\n'
@@ -124,9 +124,9 @@ KIT = [
                    "                                                     name value))))\n"
                    "                :body (getf response :body))\n"
                    "          (when (member :state response) (list :state (getf response :state)))))",
-     "tests": [('(with-cookie (redirect-to "/") "sid" "abc")',
+     "tests": [('(with-cookie (redirect-to "/") "seen" "abc")',
                 '(:status 303 :headers (("Location" "/") '
-                '("Set-Cookie" "sid=abc; HttpOnly; SameSite=Lax; Path=/")) :body "")'),
+                '("Set-Cookie" "seen=abc; HttpOnly; SameSite=Lax; Path=/")) :body "")'),
                ("(getf (with-cookie (with-state (redirect-to \"/\") '((\"t\" ()))) \"a\" \"b\") :state)",
                 '(("t" ()))')]},
     {"name": "join-strings",
@@ -136,7 +136,7 @@ KIT = [
                    "  (reduce (lambda (acc item) (concatenate 'string acc separator item))\n"
                    "          (rest strings)\n"
                    "          :initial-value (or (first strings) \"\")))",
-     "tests": [("(join-strings '(\"Buy\" \"milk\") \" \")", '"Buy milk"'),
+     "tests": [("(join-strings '(\"blue\" \"kite\") \" \")", '"blue kite"'),
                ("(join-strings '() \", \")", '""'),
                ("(join-strings '(\"solo\") \"-\")", '"solo"'),
                ("(join-strings '(\"a\" \"b\" \"c\") \" -- \")", '"a -- b -- c"')]},
@@ -248,21 +248,29 @@ NAMES =tuple(t["name"] for t in KIT)
 
 USAGE = (
     "WEB KIT - these tools are already in the REGISTRY, tested; call them and "
-    "do NOT rebuild them: (request-field request :path), (form-value request "
-    "\"title\"), (query-value request \"page\"), (cookie-value request \"sid\"), "
-    "(table-rows state \"posts\"), (with-table-rows state \"posts\" rows), "
-    "(html-escape text), (html-page 200 html), (redirect-to \"/\"), "
-    "(with-state response new-state), (with-cookie response \"sid\" value), "
-    "(join-strings strings separator), e.g. (join-strings '(\"a\" \"b\") \" \"). "
+    "do NOT rebuild them: (request-field request :path), (pair-value pairs name), "
+    "(form-value request \"text\"), (query-value request \"page\"), "
+    "(cookie-value request \"seen\"), (table-rows state \"notes\"), "
+    "(with-table-rows state \"notes\" rows), (html-escape text), (html-page 200 html), "
+    "(redirect-to \"/\"), (with-state response new-state), "
+    "(with-cookie response \"seen\" value), (join-strings strings separator), "
+    "e.g. (join-strings '(\"a\" \"b\") \" \"). "
     "REQUEST is a plist, never an alist: never use ASSOC on it. STATE is a list "
     "of (name rows) tables, so test data for it always starts with two opening "
-    "parentheses: '((\"posts\" ((\"Hi\" \"text\"))) (\"users\" ())). A typical "
-    "handler: (with-state (redirect-to \"/\") (with-table-rows state \"posts\" "
-    "(append (table-rows state \"posts\") (list (list title body))))). "
+    "parentheses: '((\"notes\" ((\"Hello\" \"text\"))) (\"tags\" ())). "
+)
+# Kept apart from USAGE: the handler example is advice on how to build, and the
+# account sentence is advice on login. An experiment without advice gets neither,
+# and a login sentence appears only when the goal or the project asks for login.
+USAGE_ADVICE = (
+    "A typical handler: (with-state (redirect-to \"/\") (with-table-rows state \"notes\" "
+    "(append (table-rows state \"notes\") (list (list text))))). "
+)
+USAGE_LOGIN = (
     "Users are stored as (name salt hash) rows made with (hash-password password salt) "
     "and checked with (password-matches-p password salt stored), the salt being the "
     "request's :nonce, e.g. (request-field request :nonce); a password is never stored "
-    "or compared as plain text."
+    "or compared as plain text. "
 )
 
 
@@ -503,17 +511,22 @@ def tools():
 
 
 STATE_NAMES = ("pair-value", "table-rows", "with-table-rows", "join-strings")   # what any stateful app needs
+LOGIN_NAMES = ("sha256-hex", "hash-password", "password-matches-p")   # only for an app that asks for login
 
 
-def seed(registry, names=None):
+def seed(registry, names=None, login=True):
     """Add the kit tools the registry does not have yet; returns the names added.
 
     NAMES limits the seeding (a command-line app needs only the state helpers).
+    LOGIN False leaves out the password helpers (LOGIN_NAMES) for an app that
+    asks for no login; the default keeps them.
     """
     have = {t["name"] for t in registry.load()}
     added = []
     for tool in tools():
         if names is not None and tool["name"] not in names:
+            continue
+        if not login and tool["name"] in LOGIN_NAMES:
             continue
         if tool["name"] not in have:
             registry.add(tool)

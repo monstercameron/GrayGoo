@@ -162,6 +162,12 @@ LIVE_SPEND_CAP_USD = 1.00   # per server process; live sessions refuse past it
 # a time limit of its own. Reaching one stops the build with what is saved so
 # far; sending the prompt again (Continue) is the explicit go-ahead to spend more.
 MAX_SESSION_USD = 0.40
+# Planned functions that could not be built are tried again by the build itself,
+# with what went wrong in front of the planner, instead of ending the build and
+# waiting for someone to press Continue. A round that builds none of them ends it.
+MAX_RECOVERY_ROUNDS = 2
+MIN_BUILD_USD = 0.10            # a build is not started with less than this left to spend
+RECOVERY_RESERVE_CALLS = 4      # a round is not started with fewer model calls left
 # A goal with one of these words is also looked at on a phone-sized screen.
 PHONE_GOAL = re.compile(r"\b(?:responsive|mobile|phones?|small screens?|narrow screens?)\b", re.I)
 PHONE_SIZE = (390, 844)
@@ -404,12 +410,12 @@ def compact_registry(tools, focus=None, budget=None):
 # One line for every non-planning call of a web app (the full contract goes to the planner).
 WEB_REMINDER = (
     "WEB APP: REQUEST is a plist (read it with the kit tools or GETF, never "
-    "ASSOC); STATE is a list of (name rows) tables, e.g. '((\"posts\" ()) "
-    "(\"users\" ())); responses are plists made with html-page, redirect-to, "
+    "ASSOC); STATE is a list of (name rows) tables, e.g. '((\"notes\" ()) "
+    "(\"tags\" ())); responses are plists made with html-page, redirect-to, "
     "with-state and with-cookie. TESTS of a page or handler: call it directly "
     "and expect a response plist holding only what matters, e.g. (:status 303 "
-    ":headers ((\"Location\" \"/login\"))) or (:status 200 :body "
-    "\"...Widget...\") where ... matches any text. Do not wrap the call in "
+    ":headers ((\"Location\" \"/notes\"))) or (:status 200 :body "
+    "\"...Hello...\") where ... matches any text. Do not wrap the call in "
     "LET, compare a whole page, or pick a response apart with ASSOC, SECOND or "
     "SUBSEQ. HTML needs no line breaks: never write \\n in a string (Lisp reads "
     "it as the letter n) and use ~% only inside a FORMAT control string. In "
@@ -1513,6 +1519,22 @@ def _usable_test(t, name):
         r"(?<![^\s('])%s(?![^\s)])" % re.escape(name), t["call"], re.I))
 
 
+def unescape_quotes(text):
+    """An expected value whose every quote mark carries a backslash, without them.
+
+    The model sometimes escapes a value twice, so its test expects the text
+    (:output \\"Saved\\") with the backslashes in it. Lisp then reads no strings
+    at all, the parentheses inside them count as code, and the value is rejected
+    as unbalanced (three functions of live build ae7bcff4ac). When no quote mark
+    is left unescaped the backslashes cannot have been meant.
+    """
+    if not isinstance(text, str) or '\\"' not in text:
+        return text
+    if '"' in text.replace('\\"', ""):
+        return text                      # a real string is in there: leave it alone
+    return text.replace('\\"', '"')
+
+
 def normalize_plan(plan):
     """Balance and quote every call in a build/use plan, in place.
 
@@ -1560,7 +1582,8 @@ def normalize_plan(plan):
 
     for t in plan.get("tests") or []:
         if isinstance(t, dict) and isinstance(t.get("expect"), str):
-            e = step("quoted-bare-expected-string", quote_bare_string, t["expect"])
+            e = step("unescaped-quotes-in-expected-value", unescape_quotes, t["expect"])
+            e = step("quoted-bare-expected-string", quote_bare_string, e)
             e = step("newline-escape-in-expected-string", newline_escapes, e)
             e = step("trimmed-surplus-paren-in-expected-value", trim_surplus_parens, e)
             t["expect"] = step("completed-paren-in-expected-value", complete_parens, e)
@@ -1784,8 +1807,8 @@ def candidate_text(plan):
 # misspellings listed are the ones seen in real prompts.
 _CAPABILITY_RULES = [
     ("database",
-     "the app's STATE value (a Lisp list of tables); the harness saves it in "
-     "SQLite between requests when the project is mounted",
+     "the app's STATE value; the harness saves it in SQLite between requests "
+     "when the project is mounted, and you choose what it holds",
      re.compile(r"\b(?:sqlite\d?|sql\s*-?\s*lite|sqllite|sqlight|postgres(?:ql)?|"
                 r"mysql|mariadb|data ?bas\w*|databse|sql|persist\w*)\b", re.I)),
     ("command line",
@@ -1803,8 +1826,7 @@ _CAPABILITY_RULES = [
                 r"(?:web|http|url|api)\s+routes?|websites?|web ?sites?|blogs?|"
                 r"web ?apps?|web ?pages?|served\s+(?:to|in)\s+(?:a\s+|the\s+)?browsers?)\b", re.I)),
     ("login security",
-     "login written in plain Lisp using the request's :nonce and :now; no "
-     "vetted password hashing — not safe for real accounts",
+     "no vetted password hashing in the sandbox, so the app is not safe for real accounts",
      re.compile(r"\b(?:log-?\s?ins?|sign-?\s?ins?|auth|authent\w*|authori[sz]\w*|"
                 r"passwords?|passwd|credentials?|security|"
                 r"sucurity|secuirty|securty|sercurity|sessions?|encrypt\w*|"
@@ -1824,67 +1846,136 @@ _CAPABILITY_RULES = [
 ]
 
 
+# What the model is told about an app has three separate parts, so that a result
+# can say which of them it had (see Session.harness and autonomy experiments):
+#   PLATFORM  the interface of the harness: what is called, with what, and what must
+#             come back. Without it nothing can be mounted; it prescribes no design.
+#   ADVICE    engineered guidance on how to build well. It was written by hand from
+#             failed builds, so it is harness knowledge, not something the model learned.
+#   KIT       helper functions the harness supplies ready-made (webkit.py).
 # The request/response contract of a mounted app (kept in step with mount.py).
-WEB_APP_CONTRACT = (
+WEB_PLATFORM = (
     "WEB APP CONTRACT - the harness mounts the app on a port; you write only "
     "pure functions. The top-level tool MUST be (handle-request request state). "
-    "REQUEST is a plist: (:method \"GET\" :path \"/posts\" :query ((\"k\" \"v\")) "
-    ":form ((\"title\" \"Hi\")) :cookies ((\"sid\" \"abc\")) :now 1791560000 "
+    "REQUEST is a plist: (:method \"GET\" :path \"/notes\" :query ((\"k\" \"v\")) "
+    ":form ((\"text\" \"Hello\")) :cookies ((\"seen\" \"abc\")) :now 1791560000 "
     ":nonce \"9f2c41aa\"). Read it with (getf request :path) and "
-    "(second (assoc \"title\" (getf request :form) :test #'string=)). "
+    "(second (assoc \"text\" (getf request :form) :test #'string=)). "
     "STATE is the app's whole data, a list of tables such as "
-    "'((\"posts\" ((\"Hi\" \"text\"))) (\"users\" ()) (\"sessions\" ())); it is "
+    "'((\"notes\" ((\"Hello\" \"text\"))) (\"tags\" ())); it is "
     "NIL on the very first request unless you also build a zero-argument tool "
     "initial-state. The harness saves the state you return in SQLite and "
     "passes it back on the next request. "
     "RETURN a plist: (:status 200 :headers ((\"Content-Type\" \"text/html\")) "
     ":body \"<html>...</html>\" :state new-state). Leave :state out when "
     "nothing changed. Redirect with :status 303 and a (\"Location\" \"/\") "
-    "header; set a cookie with a (\"Set-Cookie\" \"sid=VALUE; HttpOnly; Path=/\") "
-    "header. Passwords are never stored or compared as plain text: a user is a "
-    "(name salt hash) row made with hash-password and checked with "
-    "password-matches-p, and initial-state seeds one user named demo whose "
-    "password is demo so the app can be tried. "
-    "Stay pure: take the time from :now and randomness (session ids, "
-    "salts) from :nonce. Wrap EVERY piece of stored or submitted text in "
-    "(html-escape ...) before it goes into HTML. A page that lists items also "
+    "header; set a cookie with a (\"Set-Cookie\" \"seen=VALUE; HttpOnly; Path=/\") "
+    "header. "
+    "Stay pure: take the time from :now and randomness (for example a session "
+    "id) from :nonce. "
+    "TESTS and examples of pages never expect a whole page: "
+    "give the expected response as a plist with only what matters, such as "
+    "(page-fn request state) => (:status 200 :body \"...Hello...\") where "
+    "... matches any text, or (:status 303 :headers ((\"Location\" "
+    "\"/notes\"))). "
+)
+WEB_ADVICE = (
+    "A page that lists items also "
     "shows the form to add one and links to the other pages; a POST handler "
     "refuses empty required fields; pages put what the stylesheet function returns in "
     "<head>: bare CSS goes inside a <style> tag, but a result that already holds "
-    "tags (<style>, <script>, <link>) is inserted as it is, never wrapped again. TESTS and examples of pages never expect a whole page: "
-    "give the expected response as a plist with only what matters, such as "
-    "(page-fn request state) => (:status 200 :body \"...Widget...\") where "
-    "... matches any text, or (:status 303 :headers ((\"Location\" "
-    "\"/login\"))). "
+    "tags (<style>, <script>, <link>) is inserted as it is, never wrapped again. "
     "Keep handle-request small: it only routes on method and path to other "
     "tools, each of which is (request state) -> response plist or a helper. "
-) + webkit.USAGE
+)
+WEB_ADVICE_KIT = (
+    "Wrap EVERY piece of stored or submitted text in "
+    "(html-escape ...) before it goes into HTML. "
+)
+WEB_ADVICE_NO_KIT = (
+    "Escape every piece of stored or submitted text before it goes into HTML. "
+)
+# Login is advice as well, and it is said only when the goal or the project asks
+# for login (see app_contract). The kit sentence names the kit's helpers.
+WEB_LOGIN_KIT = (
+    "Passwords are never stored or compared as plain text: a user is a "
+    "(name salt hash) row made with hash-password and checked with "
+    "password-matches-p, and initial-state seeds one user named demo whose "
+    "password is demo so the app can be tried. "
+)
+WEB_LOGIN_NO_KIT = (
+    "Passwords are never stored or compared as plain text, and initial-state "
+    "seeds one user named demo whose password is demo so the app can be tried. "
+)
+NO_KIT_NOTE = ("No helper functions are supplied: every helper you call must be one "
+               "you build as its own tool. ")
 
 
-CLI_APP_CONTRACT = (
+CLI_PLATFORM = (
     "COMMAND-LINE APP CONTRACT - the harness runs the app; you write only pure "
     "functions. The top-level tool MUST be (handle-command args state now). ARGS "
-    "is the list of words the user typed, e.g. '(\"add\" \"Buy milk\") or "
-    "'(\"list\") or '(\"done\" \"2\"); numbers arrive as strings, so use "
-    "(parse-integer word :junk-allowed t). STATE is the app's whole data, a list "
-    "of (name rows) tables such as '((\"tasks\" ((1 \"Buy milk\" \"pending\" "
-    "1700000000)))); it is NIL on the first run unless you build a zero-argument "
+    "is the list of words the user typed, e.g. '(\"put\" \"blue kite\") or "
+    "'(\"show\") or '(\"drop\" \"2\"); numbers arrive as strings and must be parsed: "
+    "(parse-integer word :junk-allowed t) reads whole numbers only, so a value such as "
+    "\"6.5\" needs a function that also reads the part after the point. "
+    "STATE is the app's whole data, a list "
+    "of (name rows) tables such as '((\"entries\" ((1 \"blue kite\" 1700000000)))); "
+    "it is NIL on the first run unless you build a zero-argument "
     "tool initial-state. NOW is the current time in whole seconds, passed in by "
     "the harness: functions must never read the clock or random numbers "
     "themselves. RETURN a plist (:output \"text to show\" :state new-state); "
     "leave :state out when nothing changed. :output is everything the user "
     "sees, so format it as readable lines; an unknown command returns usage "
-    "help. These tested tools are already in the REGISTRY, use them and do NOT "
-    "rebuild them: (table-rows state \"tasks\"), (with-table-rows state \"tasks\" "
-    "rows), (join-strings strings separator). Test data for STATE always starts "
-    "with two opening parentheses. "
+    "help. "
+)
+CLI_KIT = (
+    "These tested tools are already in the REGISTRY, use them and do NOT "
+    "rebuild them: (table-rows state \"entries\"), (with-table-rows state \"entries\" "
+    "rows), (join-strings strings separator). "
+)
+CLI_STATE_NOTE = ("Test data for STATE always starts "
+                  "with two opening parentheses. ")
+CLI_ADVICE = (
     "COMMANDS: handle-command dispatches on (first args) and passes (rest args) "
     "to ONE tool per command, named cmd-<word>, with signature (cmd-<word> args "
     "state now) where ARGS holds only the words AFTER the command word, e.g. "
-    "(cmd-add '(\"Buy\" \"milk\") state now); cmd-add joins its title words with "
+    "(cmd-put '(\"blue\" \"kite\") state now); cmd-put joins its words with "
     "(join-strings args \" \"). Each cmd tool returns the same RETURN plist. "
     "Keep handle-command small: it only dispatches."
 )
+CLI_ADVICE_NO_KIT = (
+    "COMMANDS: handle-command dispatches on (first args) and passes (rest args) "
+    "to ONE tool per command, named cmd-<word>, with signature (cmd-<word> args "
+    "state now) where ARGS holds only the words AFTER the command word. Each cmd "
+    "tool returns the same RETURN plist. Keep handle-command small: it only dispatches."
+)
+def app_contract(kind, kit=True, advice=True, login=False):
+    """The text for a web ("web") or command-line ("cli") app with the given harness support.
+
+    KIT adds the kit's helper list; ADVICE adds the hand-written guidance. LOGIN
+    (web apps only; a command-line app has no login text) adds the password
+    sentences, which are advice too, so they need ADVICE on as well. The
+    handler example (USAGE_ADVICE) is advice and is dropped with ADVICE off.
+    """
+    if kind == "web":
+        head = WEB_PLATFORM
+        if advice:
+            if login:
+                head += WEB_LOGIN_KIT if kit else WEB_LOGIN_NO_KIT
+            head += (WEB_ADVICE_KIT if kit else WEB_ADVICE_NO_KIT) + WEB_ADVICE
+        if not kit:
+            return (head + NO_KIT_NOTE).strip()
+        tail = webkit.USAGE
+        if advice:
+            tail += webkit.USAGE_ADVICE + (webkit.USAGE_LOGIN if login else "")
+        return (head + tail).strip()
+    return (CLI_PLATFORM + (CLI_KIT if kit else NO_KIT_NOTE) + CLI_STATE_NOTE
+            + ((CLI_ADVICE if kit else CLI_ADVICE_NO_KIT) if advice else "")).strip()
+
+
+WEB_APP_CONTRACT = app_contract("web")                  # the default: no login text
+WEB_APP_CONTRACT_LOGIN = app_contract("web", login=True)   # for a goal or project that asks for login
+CLI_APP_CONTRACT = app_contract("cli")
 
 
 def stale_tools(tools):
@@ -1936,18 +2027,20 @@ def capability_gaps(prompt):
             for need, instead, pat in _CAPABILITY_RULES if pat.search(text)]
 
 
-def capability_note(gaps):
+def capability_note(gaps, kit=True, advice=True, login=False):
     """Planner-prompt paragraph telling the model what to substitute. Empty
-    when there are no gaps, so ordinary prompts are unchanged."""
+    when there are no gaps, so ordinary prompts are unchanged. A login gap
+    counts as asking for login, so the password sentences follow it."""
     if not gaps:
         return ""
     lines = "; ".join("%s: %s" % (g["need"], g["instead"]) for g in gaps)
     text = ("CAPABILITY LIMITS: your code cannot itself provide: " + lines + ". "
             "Build what is named after each colon and never claim more than that.")
+    login = login or any(g["need"] == "login security" for g in gaps)
     if any(g["need"] == "web server" for g in gaps):
-        text += " " + WEB_APP_CONTRACT
+        text += " " + app_contract("web", kit, advice, login)
     elif any(g["need"] == "command line" for g in gaps):
-        text += " " + CLI_APP_CONTRACT
+        text += " " + app_contract("cli", kit, advice, login)
     return text
 
 
@@ -1994,6 +2087,24 @@ class Session:
         self.max_calls = MAX_MODEL_CALLS
         self.max_usd = MAX_SESSION_USD
         self.max_seconds = MAX_SESSION_SECONDS
+        # Which harness support this build gets. Results must say so: a function the
+        # kit supplied, or a design the advice prescribed, is not the model's own.
+        self.use_kit = True               # ready-made helper functions (webkit.py)
+        self.use_advice = True            # hand-written guidance on how to build an app
+        self._memory_at_start = 0         # saved functions of its own the build started with
+        self._changes = {}                # function name -> what the harness changed in its replies
+        self._recovering = False          # a recovery round is running: a failed step is noted, not fatal
+        self._evidence = {}               # function name -> its last failing test, in plain words
+        # What the user says the app must do, in the small language of requirements.py.
+        # It is checked exactly as written against the finished app. Nothing in the
+        # harness rewrites, relaxes or drops a line of it.
+        self.requirements_text = ""
+        # At its spending limit an interactive build waits for the user; a build with
+        # nobody to ask (a test, an experiment, the no-memory twin) stops there instead.
+        self.pause_on_spend = False
+        self.paused = None                # {"spent_usd", "limit_usd", "since"} while it waits
+        self._resume = threading.Event()
+        self._reqs = None                 # the last check: {"fingerprint", "results", "summary"}
         self._deep_calls = 0
         self._built = []        # tools saved by this session: (name, tests)
         self._t0 = time.time()
@@ -2063,6 +2174,7 @@ class Session:
                     "mode": self.mode, "model_calls": self.model_calls,
                     "compare": self.compare, "arm": self.arm,
                     "cost_usd": round(self.cost_usd, 6),
+                    "max_usd": round(self.max_usd, 4), "paused": self.paused,
                     "input_tokens": self.input_tokens,
                     "output_tokens": self.output_tokens,
                     "events": self.events[since:], "next": len(self.events)}
@@ -2094,6 +2206,39 @@ class Session:
             self._ctx["saved_chars"] += saved
         return {"chars": len(user_text), "saved": saved,
                 "level": made.get("level", 0) if saved else 0}
+
+    def _wait_for_spend_ok(self):
+        """Hold the build at its spending limit until the user allows more, or cancels.
+
+        The limit is there so that money is not spent unseen. It is not a reason
+        to throw away a build that is under way: the build waits, keeps what it
+        has, and goes on when the user has acknowledged the figure. The time
+        spent waiting does not count against the build's time limit.
+        """
+        with self._lock:
+            first = self.paused is None
+            if first:
+                self.paused = {"spent_usd": round(self.cost_usd, 4), "limit_usd": round(self.max_usd, 4),
+                               "since": round(time.time(), 3)}
+                self._resume = threading.Event()
+            gate, started = self._resume, time.time()
+        if first:
+            self.emit("spend_pause", spent_usd=self.paused["spent_usd"], limit_usd=self.paused["limit_usd"])
+        while not gate.wait(0.2):
+            self._check_cancel()
+        with self._lock:
+            self._t0 += time.time() - started
+
+    def allow_more_spend(self, extra=None):
+        """The user's acknowledgement: the paused build may spend EXTRA more. True if it was paused."""
+        with self._lock:
+            if self.paused is None:
+                return False
+            self.max_usd = max(self.max_usd, self.cost_usd) + (MAX_SESSION_USD if extra is None else float(extra))
+            self.paused, gate = None, self._resume
+        self.emit("spend_resumed", limit_usd=round(self.max_usd, 4))
+        gate.set()
+        return True
 
     def cancel(self):
         """Ask the session to stop. It ends as soon as the calls in flight return."""
@@ -2135,8 +2280,10 @@ class Session:
             raise BudgetExhausted("model call budget (%d) exhausted"
                                   % self.max_calls)
         if self.cost_usd >= self.max_usd:
-            raise BudgetExhausted("spend budget exhausted", limit=(
-                "the spend limit of $%.2f for one build" % self.max_usd))
+            if not self.pause_on_spend:
+                raise BudgetExhausted("spend budget exhausted", limit=(
+                    "the spend limit of $%.2f for one build" % self.max_usd))
+            self._wait_for_spend_ok()
         if time.time() - self._t0 > self.max_seconds:
             raise BudgetExhausted("time budget exhausted", limit=(
                 "the time limit of %d s for one build" % self.max_seconds))
@@ -2270,7 +2417,29 @@ class Session:
                       dropped=plan.get("dropped_tests") or [])
             if self.lessons is not None:
                 self.lessons.record_fixes(fixes)
+            self._note_changes(plan.get("name"), fixes, dropped=plan.get("dropped_tests"))
         return plan
+
+    def _note_changes(self, name, ids, dropped=None, replaced=None):
+        """Remember what the harness changed in the replies for function NAME.
+
+        The ids are the ones listed in repairkinds.py. They are saved with the
+        function, so a later reader can tell a function the model got right
+        from one that was repaired, and can see every test whose expectation
+        was replaced or dropped instead of having it disappear silently.
+        """
+        if not isinstance(name, str) or not name:
+            return
+        with self._lock:
+            entry = self._changes.setdefault(name, {"fixes": [], "relaxed": []})
+            entry["fixes"] += [i for i in ids if i not in entry["fixes"]]
+            for why, tests in (("dropped-unusable-test", dropped), (ids[0] if ids else "", replaced)):
+                for test in tests or []:
+                    call = test.get("call") if isinstance(test, dict) else test
+                    if isinstance(call, str) and call:
+                        entry["relaxed"].append({
+                            "call": call, "why": why,
+                            "expect": test.get("expect") if isinstance(test, dict) else None})
 
     def _user_prompt(self, extra="", goal=None, full=False):
         """The user message of a model call, compacted to the call's budget.
@@ -2495,7 +2664,39 @@ class Session:
             "visual": dict(self._visual),
             "compaction": dict(self._ctx),
             "verification": self._verification(),
+            "harness": {"kit": bool(self.use_kit), "advice": bool(self.use_advice),
+                        "lessons": self.lessons is not None,
+                        "memory": self._memory_at_start},
+            "provenance": self._provenance(),
+            "recovery": {"rounds": count("recovery"),
+                         "rebuilt": sorted({n for e in ev if e["kind"] == "recovery_done"
+                                            for n in e.get("rebuilt") or []})},
         }
+
+    def _provenance(self):
+        """Who wrote what is saved: the model, or the harness (see provenance.py)."""
+        import provenance                          # provenance imports this module
+        try:
+            audit = provenance.audit(self.registry.load())
+        except Exception:  # noqa: BLE001 - a report must never fail a build
+            return None
+        return {"functions": audit["functions"], "agent_share": audit["agent_share"],
+                "harness_calls": audit["harness_reach"]["calls"], "statement": audit["statement"]}
+
+    def _relaxed(self):
+        """Functions this build saved after the harness changed what one of their tests expects."""
+        import repairkinds
+        mine = {n for n, _ in self._built}
+        out = []
+        for tool in self.registry.load():
+            if tool["name"] not in mine:
+                continue
+            ids = list(tool.get("harness_fixes") or []) + [t.get("why") for t in tool.get("relaxed_tests") or []]
+            weak = repairkinds.classify([i for i in ids if i])["weakening"]
+            if weak or tool.get("relaxed_tests"):
+                out.append({"name": tool["name"], "why": sorted(set(weak)),
+                            "tests": len(tool.get("relaxed_tests") or [])})
+        return out
 
     def _verification(self):
         """What the harness itself checked, level by level; None where a level did not run."""
@@ -2512,16 +2713,26 @@ class Session:
             "style_missing": len(facts["missing"]) if facts else None,
             "screens": self._visual["done"] if self._visual["checked"] else None,
             "model_said_done": None,          # deliberately not counted
+            # tests whose expectation the harness replaced or dropped on the way: the
+            # functions passed, but against something weaker than was first written
+            "tests_relaxed": self._relaxed(),
+            # what the user asked for in their own words, judged by behaviour alone
+            "requirements": (dict(self._reqs["summary"], fingerprint=self._reqs["fingerprint"])
+                             if self._reqs else None),
         }
 
     def _missing_now(self):
         """Labels of goal features that no SAVED function provides."""
-        if not self._features and not self._failed_steps:
+        if not self._features and not self._failed_steps and not self._unmet():
             return []
         texts = ["%s %s %s" % (t["name"], t.get("description", ""), t.get("definition", ""))
                  for t in self.registry.load() if not t.get("kit")]
         out = [f["label"] for f in goalcheck.missing(self._features, texts)] + [
             "the function %s (it kept failing its tests)" % n for n in self._failed_steps]
+        for r in self._unmet():
+            out.append("your requirement %s, %s: %s" % (
+                r.get("id") or "", "not met" if r.get("ok") is False else "could not be checked",
+                " ".join((r.get("text") or "").split())[:160]))
         if self._accept:
             # named in the code is not the same as working: trying the app decides
             shown = acceptance.feature_evidence(self._features, self._accept["results"])
@@ -2539,12 +2750,21 @@ class Session:
             self.emit("capability_notice", gaps=gaps)
         needs = {g["need"] for g in gaps}
         names = {t["name"] for t in tools}
-        if "web server" in needs or "handle-request" in names:
-            added = webkit.seed(self.registry)
+        # login text and password helpers only for a goal or project that asks for login
+        login = ("login security" in needs
+                 or any(f["key"] == "login" for f in goalcheck.goal_features(self.prompt))
+                 or any(not t.get("kit") and ("login" in t["name"].split("-") or re.search(
+                     r"\(\s*(?:hash-password|password-matches-p)(?=[\s)])",
+                     lispstyle.code_only(t.get("definition") or ""), re.I)) for t in tools))
+        if not self.use_kit:
+            added = []                   # this build gets no ready-made helpers
+        elif "web server" in needs or "handle-request" in names:
+            added = webkit.seed(self.registry, login=login)
         elif needs & {"command line", "database"} or "handle-command" in names:
-            added = webkit.seed(self.registry, webkit.STATE_NAMES)
+            added = webkit.seed(self.registry, webkit.STATE_NAMES, login=login)
         else:
             added = []
+        self._memory_at_start = len([t for t in tools if not t.get("kit")])
         if added:
             self.emit("kit_seeded", tools=added)
             tools = self.registry.load()
@@ -2585,13 +2805,13 @@ class Session:
                     self.registry.note_use(m.group(1), self.prompt, worked)
                 return
             self.emit("retrieval_miss", tools=[t["name"] for t in hits])
-        note = capability_note(gaps)
+        note = capability_note(gaps, self.use_kit, self.use_advice, login)
         if "WEB APP CONTRACT" not in note and \
                 any(t["name"] == "handle-request" for t in tools):
-            note = (note + " " + WEB_APP_CONTRACT).strip()   # follow-up on a web app
+            note = (note + " " + app_contract("web", self.use_kit, self.use_advice, login)).strip()   # follow-up on a web app
         elif "COMMAND-LINE APP CONTRACT" not in note and \
                 any(t["name"] == "handle-command" for t in tools):
-            note = (note + " " + CLI_APP_CONTRACT).strip()
+            note = (note + " " + app_contract("cli", self.use_kit, self.use_advice, login)).strip()
         earlier = [g for g in dict.fromkeys(self.prior_goals) if g and g != self.prompt][-3:]
         self._features = goalcheck.goal_features(" . ".join([self.prompt] + earlier))
         if earlier:
@@ -2617,6 +2837,11 @@ class Session:
                         " These %d used classes have NO rule and render unstyled now: %s."
                         % (len(facts["missing"]), ", ".join(facts["missing"][:40]))
                         if facts["missing"] else "", facts["sheet"]))
+        if (self.requirements_text or "").strip():
+            lines = [" ".join(x.split()) for x in self.requirements_text.splitlines()
+                     if x.strip() and not x.strip().startswith("#")]
+            note += (" USER REQUIREMENTS - the finished app is checked against these exactly as "
+                     "written, by sending the requests or typing the commands: " + " | ".join(lines)[:1800])
         if self._app and "handle-request" in names:
             faults = interfaces.check(tools)
             if faults:
@@ -2627,9 +2852,10 @@ class Session:
         plan = self._ask(self._user_prompt(note, full=True), "plan", deep=(
             self._app or len(self.prompt.split()) > THINK_PLAN_WORDS))
         if plan.get("action") == "plan":
-            plan = self._cover(plan, note)
+            plan = self._trim_repeat(self._cover(plan, note))
             if not self._run_steps(plan):
                 return
+            self._recover()                  # what failed is tried again, with the evidence
             if self._app and self._smoke():
                 if self._smoke_ok:
                     self._finish_app()       # it answers: check it, style it, look at it
@@ -2910,7 +3136,7 @@ class Session:
                 self._later = {(x.get("name") or "").lower() for x in steps[i:]}
                 if not self._build_step(step, 0):
                     fail = getattr(self, "_last_failure", {}) or {}
-                    if self._fixing or (self._app and i < len(steps)):
+                    if self._fixing or self._recovering or (self._app and i < len(steps)):
                         # One part failing must not leave the app unwired: note it,
                         # build the rest, and report the gap at the end. A change
                         # asked for by the screenshot check simply stays unmade.
@@ -3005,7 +3231,7 @@ class Session:
                 # a change asked for by the screenshot check: the saved version stays
                 self._fix_failed.append(names[i])
                 self.emit("step_failed", name=names[i], detail=(fail.get("detail") or "")[:400])
-            elif self._app and i < len(steps) - 1:
+            elif self._recovering or (self._app and i < len(steps) - 1):
                 # One part failing must not leave the app unwired: note it and
                 # report the gap at the end. The other lanes went on regardless.
                 self._failed_steps.append(names[i])
@@ -3079,16 +3305,32 @@ class Session:
     def _build_step(self, step, depth):
         """Build one planned tool; in a lane, tag everything it emits with its name."""
         if not getattr(self._tl, "turn", False):
-            return self._build_one(step, depth)
+            return self._build_guarded(step, depth)
         outer, ok = getattr(self._tl, "lane", None), False
         self._tl.lane = step.get("name") or outer
         try:
-            ok = self._build_one(step, depth)
+            ok = self._build_guarded(step, depth)
             return ok
         finally:
             if depth:                      # a top-level lane reports its own end
                 self.emit("step_done", name=step.get("name", ""), ok=bool(ok))
             self._tl.lane = outer
+
+    def _build_guarded(self, step, depth):
+        """``_build_one``, except that an unusable reply costs this function only.
+
+        Live build ae7bcff4ac ended as an error with five functions saved and
+        five more under way because the model answered one of them with nothing,
+        three times. That is one failed function (which a recovery round tries
+        again), not the end of the build.
+        """
+        try:
+            return self._build_one(step, depth)
+        except BadReply as exc:
+            detail = "the model gave no usable reply for this function (%s)" % str(exc)[:160]
+            self._last_failure = {"detail": detail, "hint": "", "attempts": 0}
+            self.emit("bad_reply", name=step.get("name", ""), reason=str(exc)[:200])
+            return False
 
     REPLACE_STEP = (" A tool named %s is ALREADY SAVED, and the user now asks: \"%s\". "
                     "This step CHANGES it: reply with action build and a new definition "
@@ -3164,6 +3406,104 @@ class Session:
                 "edit that adds the rules is enough"
                 % (len(facts["missing"]), ", ".join(facts["missing"][:40])))
 
+    ENTRY_POINTS = ("handle-request", "handle-command", "initial-state")
+
+    def _is_repeat(self):
+        """True when this exact prompt was already sent in this project (a Continue)."""
+        mine = normalize_prompt(self.prompt)
+        return any(normalize_prompt(g) == mine for g in self.prior_goals or [] if g)
+
+    def _trim_repeat(self, plan):
+        """On a prompt sent again, leave the functions that are already saved alone.
+
+        Continue means "finish it". The planner, shown the same goal, plans the
+        whole app again, and the build then spends its money rewriting helpers
+        that worked (live build 9503ef3968: eight of ten planned steps were saved
+        functions, and all ten failed). Steps for saved functions are dropped;
+        the entry points stay, because they may have to call something new. A
+        recovery round is not trimmed: fixing a saved helper is its purpose.
+        """
+        steps = plan.get("steps")
+        if self._recovering or not isinstance(steps, list) or not self._is_repeat():
+            return plan
+        saved = {t["name"].lower() for t in self.registry.load() if not t.get("kit")}
+        keep, dropped = [], []
+        for step in steps:
+            name = (step.get("name") or "").lower() if isinstance(step, dict) else ""
+            (dropped if name in saved and name not in self.ENTRY_POINTS else keep).append(step)
+        if not dropped or not keep:
+            return plan                  # nothing saved was planned, or nothing would be left to do
+        self.emit("plan_trimmed", kept_as_saved=[x.get("name") for x in dropped],
+                  planned=[x.get("name") for x in keep if isinstance(x, dict)])
+        return dict(plan, steps=keep)
+
+    def _budget_left(self):
+        """True while the build may still start a round of work of its own accord."""
+        return (self.model_calls + RECOVERY_RESERVE_CALLS <= self.max_calls
+                and self.cost_usd < 0.85 * self.max_usd
+                and time.time() - self._t0 < 0.8 * self.max_seconds)
+
+    def _recover(self):
+        """Try the planned functions that failed again, within this build's limits.
+
+        A build used to end at the first function it could not get right and
+        wait for Continue, which starts over with no memory of what went wrong.
+        Here the planner is shown each failed function with the values it
+        returned and the values its tests expected, and is asked to decide what
+        is really at fault before planning again: the test's hand-computed
+        figures, a saved function it calls, or the approach. A round that
+        builds none of the failed functions ends the recovery.
+        """
+        rounds = 0
+        while self._failed_steps and rounds < MAX_RECOVERY_ROUNDS and self._budget_left():
+            self._check_cancel()
+            rounds += 1
+            failed = list(dict.fromkeys(self._failed_steps))
+            notes = {}
+            for e in self.events:
+                if e.get("kind") == "step_failed" and e.get("name") in failed:
+                    notes[e["name"]] = " ".join((e.get("detail") or "").split())[:420]
+            for n in failed:                 # its own last telling failure outranks the closing one
+                if self._evidence.get(n.lower()):
+                    notes[n] = self._evidence[n.lower()]
+            self.emit("recovery", round=rounds, of=MAX_RECOVERY_ROUNDS, failed=failed)
+            listed = "; ".join("%s: %s" % (n, notes.get(n) or "no test result recorded") for n in failed)
+            plan = self._ask(self._user_prompt(
+                self._plan_note + " RECOVERY - these planned functions could not be built, each "
+                "with its last failing test: %s. For EACH one decide what is really wrong before "
+                "you plan it again. (1) If the value the code returned is the plausible one and "
+                "the expected value was worked out by hand (money, interest, averages, long "
+                "decimals), plan the function again and say in its spec to test it with values "
+                "you can verify exactly or with property tests. (2) If a SAVED function it calls "
+                "returns something else than the code assumed (text where a number was needed, a "
+                "whole number for \"6.5\", a fraction where a percentage was meant), first plan a "
+                "step that FIXES that saved function under its SAME name with a test for this "
+                "case, or say in the spec how to call it correctly. (3) Otherwise plan it with a "
+                "simpler approach or in smaller parts. Reply with action plan, at most %d steps, "
+                "functions that others call first." % (listed, self._max_steps), full=True),
+                "recovery", deep=True)
+            if plan.get("action") == "build":
+                plan = {"action": "plan", "steps": [{
+                    "name": plan.get("name", ""),
+                    "spec": plan.get("description") or plan.get("name") or ""}]}
+            if plan.get("action") != "plan":
+                break
+            built_before = len(self._built)
+            self._failed_steps, self._recovering = [], True
+            try:
+                self._run_steps(plan)
+            finally:
+                self._recovering = False
+            rebuilt = {n for n, _ in self._built[built_before:]}
+            # a function that failed before stays failed unless this round saved it
+            self._failed_steps = [n for n in failed if n not in rebuilt]
+            self.emit("recovery_done", round=rounds, rebuilt=sorted(rebuilt & set(failed)),
+                      still_failed=list(self._failed_steps))
+            if not rebuilt & set(failed):
+                break                        # no progress: another round would repeat this one
+        if rounds and not self._failed_steps and self.state == "failed":
+            self.state = "running"           # everything that failed was built after all
+
     def _fit_problem(self, plan):
         """Why a candidate may not run beside the saved functions, or does not fit them.
 
@@ -3205,10 +3545,55 @@ class Session:
             self.emit("acceptance", **self._accept)
         self._iface = interfaces.check(tools)
         self.emit("interface_check", problems=self._iface[:20])
+        self._check_requirements()
+
+    def _check_requirements(self):
+        """Run the user's own requirements against the finished app, as written."""
+        import mount                               # mount imports this module
+        import requirements
+        text = self.requirements_text or ""
+        if not text.strip():
+            self._reqs = None
+            return
+        reqs, errors = requirements.parse(text)
+        folders = []
+
+        def fresh_app():
+            folder = Path(tempfile.mkdtemp(prefix="gg-req-"))
+            folders.append(folder)
+            return mount.MountedApp(self.registry, mount.StateStore(folder / "state.sqlite"),
+                                    run_lisp=self.worker_fn)
+
+        def fresh_command():
+            app = fresh_app()
+
+            def run_words(words):
+                out = app.run_command(list(words))
+                if not out.get("ok"):
+                    raise RuntimeError(out.get("error") or "the command failed")
+                return out.get("output") or ""
+            return run_words
+        names = {t["name"] for t in self.registry.load()}
+        try:
+            results = requirements.run(
+                reqs, app=fresh_app if "handle-request" in names else None,
+                command=fresh_command if "handle-command" in names else None)
+        finally:
+            for folder in folders:
+                shutil.rmtree(folder, ignore_errors=True)
+        self._reqs = {"fingerprint": requirements.fingerprint(text), "results": results,
+                      "summary": requirements.summarize(results), "errors": errors[:10]}
+        self.emit("requirements", fingerprint=self._reqs["fingerprint"], results=results,
+                  errors=errors[:10], **self._reqs["summary"])
+
+    def _unmet(self):
+        """The user's requirements the last check found unmet or could not check."""
+        return [r for r in (self._reqs or {}).get("results", []) if r.get("ok") is not True]
 
     def _app_score(self):
         """``(answers, failed visitor checks)``: what a round of fixes must not make worse."""
-        return (bool(self._smoke_ok), (self._accept or {}).get("failed", 0))
+        return (bool(self._smoke_ok), (self._accept or {}).get("failed", 0)
+                + len([r for r in self._unmet() if r.get("ok") is False]))
 
     def _guarded_fix(self, plan, why):
         """Build PLAN as a round of fixes and keep it only if the app did not get worse.
@@ -3246,10 +3631,14 @@ class Session:
         """One round of fixes for what the zero-token checks found broken."""
         failed = [r for r in (self._accept or {}).get("results", []) if r.get("ok") is False]
         faults = [p for p in self._iface if p.get("kind") in ("dead-route", "method-mismatch", "arity", "missing-helper")]
-        if self._behaviour_fixed or not (failed or faults) or self.model_calls >= self.max_calls:
+        unmet = [r for r in self._unmet() if r.get("ok") is False]
+        if self._behaviour_fixed or not (failed or faults or unmet) or self.model_calls >= self.max_calls:
             return
         self._behaviour_fixed = True
-        found = ["%s (%s)" % (r["label"], r["detail"]) for r in failed[:4]] + \
+        # the user's own requirements come first and are quoted as written
+        found = ["the user's requirement '%s' is not met (%s)" % (
+                     " ".join(r["text"].split()), (r.get("detail") or "").rstrip(".")) for r in unmet[:5]] + \
+            ["%s (%s)" % (r["label"], r["detail"]) for r in failed[:4]] + \
             [p["detail"].rstrip(".") for p in faults[:4]]
         self._look_problems = found
         self.emit("behaviour_fix", problems=found)
@@ -3465,6 +3854,10 @@ class Session:
                                      % (plan["name"], "; ".join(broken[:3]))}
                 self.emit("verdict", **verdict)
             self._note_failure(verdict, attempt)
+            if verdict.get("class") not in ("REPEATED_CANDIDATE", "SCHEMA", "SPEC_INCONSISTENT") and                     isinstance(plan.get("name"), str):
+                # the last failure that says something: what a recovery round is shown
+                self._evidence[plan["name"].lower()] = " ".join(
+                    (verdict.get("detail") or verdict.get("reason") or "").split())[:420]
             # identical code AND identical tests after a value mismatch: the
             # model is stuck defending an expectation, so blame the test
             repeat_stuck = verdict.get("class") == "REPEATED_CANDIDATE" and \
@@ -3482,6 +3875,10 @@ class Session:
                 self.emit("rescue", reason=orc.CLASS_LABELS.get(
                     verdict.get("class"), "expected values look guessed"))
                 saved = plan
+                # the exact values the model first wrote are kept on record, not dropped
+                self._note_changes(saved.get("name"), ["rescue-property-tests"], replaced=[
+                    t for t in (saved.get("tests") or []) if isinstance(t, dict)
+                    and str(t.get("expect", "")).strip().upper() not in ("T", "NIL")])
                 plan = self._ask(self._user_prompt(
                     "Your code returned the same results across attempts, so "
                     "the exact expected values in your tests were probably "
@@ -3505,6 +3902,10 @@ class Session:
                     if verdict["ok"]:
                         return self._promote(plan)
                     self._note_failure(verdict, attempt)
+            if verdict.get("class") not in ("REPEATED_CANDIDATE", "SCHEMA", "SPEC_INCONSISTENT") and                     isinstance(plan.get("name"), str):
+                # the last failure that says something: what a recovery round is shown
+                self._evidence[plan["name"].lower()] = " ".join(
+                    (verdict.get("detail") or verdict.get("reason") or "").split())[:420]
             if attempt >= MAX_REPAIRS:
                 self._last_failure = {
                     "detail": verdict.get("detail") or verdict.get("reason") or "",
@@ -3552,6 +3953,7 @@ class Session:
                 # the definition is right: only the test calls are not valid Lisp
                 self.emit("test_call_repair", reason=(
                     verdict.get("detail") or verdict.get("reason") or "")[:160])
+                self._note_changes(kept.get("name"), ["test-call-repair"])
                 frozen = ["%s = %s" % (t["call"], self._frozen[t["call"]])
                           for t in kept["tests"]
                           if isinstance(t, dict) and t.get("call") in self._frozen]
@@ -3755,11 +4157,18 @@ class Session:
                     "property test (model-written)"
                     if t["expect"].strip().upper() == "T"
                     else "model-written, matched by the code")})
+        with self._lock:
+            changes = self._changes.pop(plan["name"], None) or {"fixes": [], "relaxed": []}
         self.registry.add({
             "name": plan["name"],
             "description": plan.get("description", ""),
             "definition": plan["definition"],
             "tests": tests, "session": self.id,
+            # what the harness changed on the way: repairs to the reply, and every
+            # test expectation it replaced or dropped (see repairkinds.py)
+            "harness_fixes": changes["fixes"],
+            "relaxed_tests": changes["relaxed"][:20],
+            "harness": {"kit": bool(self.use_kit), "advice": bool(self.use_advice)},
             "prompts": ([] if self._in_step
                         else [normalize_prompt(self.prompt)]),
             "call": plan["call"],
@@ -3819,6 +4228,8 @@ class Session:
             was = t["expect"]
             t["expect"] = refs
             t["source"] = "independent reference: %s" % algo
+            self._note_changes(plan.get("name"), ["oracle-reference-value"],
+                               replaced=[{"call": t["call"], "expect": was}])
             self._frozen[t["call"]] = refs
             if orc.matches_reference(info["got"], ref):
                 res["corrected"].append((t["call"], refs, algo))
@@ -4452,6 +4863,7 @@ class SessionManager:
         self._busy = False
         self.lessons = orc.LessonStore(AGENT_DIR / "lessons.json")
         self.live_spend = 0.0
+        self.live_cap = LIVE_SPEND_CAP_USD      # raised only by the user (allow_spend)
         self._lock = threading.Lock()
         self.projects = projects.ProjectStore(self.registry.path.parent)
         self._registries = {}
@@ -4459,6 +4871,47 @@ class SessionManager:
     def busy(self):
         """True while a session is running."""
         return self._busy
+
+    def acknowledge_spend(self):
+        """Let the build that is waiting at its spending limit go on. ``(resumed, status)``.
+
+        The build gets one more build's worth, and the limit of the server run is
+        raised as far as that needs, so the two never contradict each other.
+        """
+        with self._lock:
+            waiting = [x for x in self._sessions.values() if x.state == "running" and x.paused]
+        if not waiting:
+            return False, self.spend_status()
+        sess = waiting[0]
+        need = self.live_spend + sess.cost_usd + MAX_SESSION_USD
+        with self._lock:
+            self.live_cap = round(max(self.live_cap, need), 2)
+        return sess.allow_more_spend(), self.spend_status()
+
+    def spend_status(self):
+        """Live spending of this server run: finished builds plus the one under way."""
+        with self._lock:
+            running = [x for x in self._sessions.values() if x.state == "running" and x.mode == "live"]
+            twin = self._twin if self._twin is not None and self._twin.mode == "live" else None
+        current = sum(x.cost_usd for x in running) + (twin.cost_usd if twin is not None else 0.0)
+        return {"spent_usd": round(self.live_spend + current, 5), "cap_usd": self.live_cap,
+                "session_usd": round(sum(x.cost_usd for x in running), 5),
+                "paused": bool([x for x in running if x.paused])}
+
+    def allow_spend(self, amount=LIVE_SPEND_CAP_USD):
+        """Raise this server run's live spending limit by AMOUNT; the user's acknowledgement.
+
+        The limit never ends anything by itself: it pauses spending until the
+        user has seen the figure and allows more. Returns the new limit.
+        """
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            amount = 0.0
+        with self._lock:
+            if 0 < amount <= LIVE_SPEND_CAP_USD:
+                self.live_cap = round(self.live_cap + amount, 2)
+            return self.live_cap
 
     def registry_for(self, project=None):
         """The tool registry of PROJECT (the built-in one when unknown)."""
@@ -4503,9 +4956,12 @@ class SessionManager:
             # tracer). Run inside a real project it files those under the project.
             return None, ("the demo model only works in Scratchpad; choose the Live "
                           "model to build in this project")
-        if mode == "live" and self.live_spend >= LIVE_SPEND_CAP_USD:
-            return None, ("live spend cap reached ($%.2f); restart the "
-                          "dashboard to reset it" % LIVE_SPEND_CAP_USD)
+        if mode == "live" and self.live_cap - self.live_spend < MIN_BUILD_USD:
+            # Starting anyway gave builds a two-cent budget that ended them after one
+            # call (live build 9503ef3968). Refuse, and say how to go on.
+            return None, ("live spending limit reached: $%.2f of the $%.2f allowed for this "
+                          "server run is spent. Allow more to go on."
+                          % (self.live_spend, self.live_cap))
         with self._lock:
             if self._busy:
                 return None, "busy"
@@ -4518,8 +4974,10 @@ class SessionManager:
             sess.project = self.projects.resolve(project)
             sess.project_note = self.project_note(project)
             sess.visual = sess.visual and bool(visual)
+            sess.requirements_text = self.projects.requirements(sess.project)
             if mode == "live":          # never more than what is left of the process cap
-                sess.max_usd = min(MAX_SESSION_USD, max(0.02, LIVE_SPEND_CAP_USD - self.live_spend))
+                sess.max_usd = min(MAX_SESSION_USD, self.live_cap - self.live_spend)
+                sess.pause_on_spend = True       # at the limit it waits for the user
             if sess.project != projects.BUILTIN:
                 sess.prior_goals = [r.get("prompt") for r in self.history(60, sess.project)
                                     if r.get("mode") == mode and r.get("arm") == "main"]

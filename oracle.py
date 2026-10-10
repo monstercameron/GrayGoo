@@ -201,6 +201,97 @@ def is_test_call_error(info, definition=""):
     return False
 
 
+_REAL = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eEdDfF][-+]?\d+)?")
+NEAR_MISS = 0.05          # a float this close to the expected one was computed, not guessed
+# ...but not THIS close: a printed figure that is off in its last digit (1,234,567.88 for
+# 1,234,567.89) is the code losing precision or rounding the wrong way, which is a bug.
+ROUNDING_SLIP = 1e-4
+
+
+def _real(text):
+    """The number TEXT spells the way SBCL prints one, or None."""
+    t = (text or "").strip()
+    if not _REAL.fullmatch(t):
+        return None
+    try:
+        return float(re.sub(r"[dDfF]", "e", t))
+    except ValueError:
+        return None
+
+
+def is_near_miss(info):
+    """True when the code's float result is close to the expected value but not equal.
+
+    A model cannot work out compound interest or a square root in its head, so
+    it writes an approximate expected value. Code that is wrong is rarely
+    wrong by a few percent: it is off by orders of magnitude or crashes. (Live
+    build 44bdfb6d97: a correct monthly-payment returned 948.10406 against a
+    hand-computed 951.12, was judged wrong, split and lost.) Whole numbers are
+    left out: an off-by-one count is a real bug.
+    """
+    got_text, want_text = info.get("got"), info.get("expected")
+    got, want = _real(got_text), _real(want_text)
+    if got is None or want is None:
+        return _near_miss_in_text(got_text, want_text)
+    if got == want:
+        return False
+    if "." not in (got_text or "") or float(got).is_integer() and float(want).is_integer():
+        return False
+    return abs(got - want) <= NEAR_MISS * max(abs(got), abs(want))
+
+
+_NUMBER_IN_TEXT = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_NO_STATE = re.compile(r"\s*:state\s+nil\b")
+
+
+def _frame(text):
+    """TEXT with its numbers taken out: ``(frame, [(token, value), ...])``.
+
+    Case, line-break spellings (a real one, ``~%`` and a printed backslash-n) and
+    an empty ``:state nil`` do not count as differences, as in the checker itself.
+    """
+    flat = (text or "").lower().replace("~%", " ").replace("\\n", " ")
+    flat = " ".join(_NO_STATE.sub("", flat).split())
+    numbers = []
+    for token in _NUMBER_IN_TEXT.findall(flat):
+        try:
+            numbers.append((token, float(token.rstrip(",").replace(",", ""))))
+        except ValueError:
+            return flat, None
+    return _NUMBER_IN_TEXT.sub("#", flat), numbers
+
+
+def _near_miss_in_text(got_text, want_text):
+    """The same text with slightly different decimal numbers in it.
+
+    A formatted line such as "Monthly: $948.10  Total interest: $191,317.47"
+    against an expected "Monthly: $959.93  Total interest: $195,574.80" is the
+    same case as a bare float: the wording agrees, and the figures the model
+    typed into its test were worked out by hand. (Live build 950fccf453 lost
+    three correct functions this way.) Every number that differs must be a
+    decimal within NEAR_MISS of its counterpart; a whole number that differs,
+    such as a count of months, is a real difference.
+    """
+    if not isinstance(got_text, str) or not isinstance(want_text, str):
+        return False
+    if len(got_text) > 20000 or len(want_text) > 20000:
+        return False
+    got_frame, got = _frame(got_text)
+    want_frame, want = _frame(want_text)
+    if got is None or want is None or got_frame != want_frame or len(got) != len(want):
+        return False
+    differing = [(g, w) for g, w in zip(got, want) if g[1] != w[1]]
+    if not differing:
+        return False
+    for (g_token, g), (w_token, w) in differing:
+        if "." not in g_token and "." not in w_token:
+            return False
+        gap, size = abs(g - w), max(abs(g), abs(w))
+        if gap > NEAR_MISS * size or gap <= ROUNDING_SLIP * size:
+            return False
+    return True
+
+
 def failure_class(infos, drift=None, definition=None, calls=()):
     """Classify one failed rehearsal.
 
@@ -219,7 +310,7 @@ def failure_class(infos, drift=None, definition=None, calls=()):
     if any(is_compile_error(i.get("error")) for i in infos):
         return "COMPILER_ERROR"
     wrong_value = [i for i in infos if i.get("got") is not None]
-    if wrong_value and all(i.get("confidence") == "low" for i in wrong_value):
+    if wrong_value and all(i.get("confidence") == "low" or is_near_miss(i) for i in wrong_value):
         return "TEST_WRONG"
     if wrong_value:
         return "IMPLEMENTATION_WRONG"

@@ -460,6 +460,26 @@ def dispatch(method, path, body, ctx):
                     return 400, {"error": "invalid JSON body"}
                 return 200, mounts.command(pid, payload.get("args")
                                            if isinstance(payload, dict) else None)
+            if pid and pid.endswith("/requirements"):
+                pid = pid[:-len("/requirements")]
+                if not agent.projects.exists(pid) and pid != "scratch":
+                    return 404, {"error": "unknown project"}
+                import requirements as user_requirements
+                if method == "PUT" or method == "POST":
+                    try:
+                        payload = json.loads(body.decode("utf-8") if body else "{}")
+                    except (ValueError, UnicodeDecodeError):
+                        return 400, {"error": "invalid JSON body"}
+                    ok, err = agent.projects.set_requirements(
+                        pid, payload.get("text") if isinstance(payload, dict) else None)
+                    if not ok:
+                        return 400, {"error": err}
+                elif method != "GET":
+                    return 404, {"error": "unknown endpoint"}
+                text = agent.projects.requirements(pid)
+                parsed, errors = user_requirements.parse(text)
+                return 200, {"text": text, "count": len(parsed), "errors": errors[:20],
+                             "fingerprint": user_requirements.fingerprint(text)}
             if pid and pid.endswith("/mount"):
                 pid = pid[:-len("/mount")]
                 if not agent.projects.exists(pid):
@@ -506,8 +526,9 @@ def dispatch(method, path, body, ctx):
         if method == "GET" and sub == "config":
             import agent_session
             status = agent_session.live_status()
-            status["spent_usd"] = round(agent.live_spend, 5)
-            status["cap_usd"] = agent_session.LIVE_SPEND_CAP_USD
+            status.update(agent.spend_status())
+            status["min_build_usd"] = agent_session.MIN_BUILD_USD
+            status["build_usd"] = agent_session.MAX_SESSION_USD
             return 200, {"live": status}
         if method == "GET" and sub == "snapshots":
             return 200, {"snapshots": agent.snapshots()}
@@ -551,6 +572,14 @@ def dispatch(method, path, body, ctx):
             agent.registry_for(payload.get("project") if isinstance(payload, dict)
                                else None).clear()
             return 200, {"tools": []}
+        if method == "POST" and sub == "allow-spend":
+            # the user's explicit go-ahead to spend more in this server run
+            agent.allow_spend()
+            return 200, agent.spend_status()
+        if method == "POST" and sub == "acknowledge-spend":
+            # a build waiting at its spending limit goes on
+            resumed, status = agent.acknowledge_spend()
+            return 200, dict(status, resumed=resumed)
         if method == "POST" and sub == "cancel":
             done, sid = agent.cancel()
             return 200, {"cancelled": done, "session_id": sid}

@@ -404,6 +404,9 @@ Here’s the experiment as an execution-oriented TODO list, ordered to get to a 
   - [x] Machinery evidence, like-for-like: `replay_evidence.py` runs every logged live reply as written and again after today's free repairs (763 replies: 29% pass as written, 40% after; first drafts 32% to 44%; 78 rescued, none broken)
   - [x] Machinery evidence from the logs: `specialization.py` (what each mechanism saved, measured or labelled as an estimate; periods over app-sized builds) and a Thesis tab section "The machinery specialises too" fed by `GET /api/agent/machinery`
   - [ ] The logs do NOT yet show a saved function getting cheaper over time: among app-sized builds, paid repairs per function fell from 2.53 to 1.54 since Oct 9 while free repairs rose from 0.73 to 1.05, but dollars per function stayed near $0.013. A fixed set of prompts rebuilt after each harness change would settle it (needs paid runs)
+  - [x] An unfinished build can be continued from its own end-of-run card (the Continue box above the prompt was out of sight); a round of fixes no longer shrinks the plan count; the page's files are served uncached
+  - [x] A float result within 5% of the expected value blames the test, not the code (`oracle.is_near_miss`): live build 44bdfb6d97 lost a correct monthly-payment (948.10) to a hand-computed 951.12; 1 of 152 logged wrong-value verdicts matches, none falsely
+  - [ ] Live-verify the near-miss rule on the mortgage calculator: Continue should save monthly-payment in two calls instead of splitting it (needs a paid run)
   - [ ] Re-run `uv run python replay_evidence.py` after new live builds or new normalisers (about 3 minutes, no model calls); the dashboard shows the saved result
   - [ ] Show `economics.py` per-project figures in the dashboard (command line only today)
   - [ ] A production key-derivation function for mounted apps (salted SHA-256 with 1,000 rounds is a demo-grade stand-in)

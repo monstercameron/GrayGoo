@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 
+import ossandbox
 import workers
 
 _LOOP = r"""
@@ -197,7 +198,7 @@ class LispServer:
                workers._lisp_escape(self.prelude or ""),
                _guarded(_recorder_call(self._pkg, self._sym, "record", names))))
         try:
-            self.proc = subprocess.Popen(
+            self.proc = ossandbox.popen(
                 [exe, "--dynamic-space-size", "512", "--no-userinit", "--no-sysinit",
                  "--disable-debugger", "--load", script],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -252,6 +253,7 @@ class LispServer:
                     pipe.close()
                 except OSError:
                     pass
+            ossandbox.release(proc)
         for path in self._files:
             try:
                 os.unlink(path)

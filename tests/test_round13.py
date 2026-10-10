@@ -289,11 +289,48 @@ class FitTests(Base):
         self.assertIn("/add-product", self.prompts[0])
 
 
+class NearMissBuildTests(unittest.TestCase):
+    """Live build 44bdfb6d97: a correct monthly-payment was lost to a hand-computed test value."""
+
+    DEFINITION = ('(defun monthly-payment (principal annual-rate years) '
+                  '"Monthly payment of a fixed-rate loan." '
+                  '(let* ((r (/ annual-rate 1200.0)) (n (* years 12))) '
+                  '(if (zerop r) (/ principal n) (/ (* principal r) (- 1 (expt (+ 1 r) (- n)))))))')
+
+    def test_a_correct_function_survives_a_wrong_hand_computed_expectation(self):
+        first = {"action": "build", "name": "monthly-payment", "description": "Monthly payment of a loan",
+                 "definition": self.DEFINITION, "call": "(monthly-payment 150000 6.5 30)",
+                 "tests": [{"call": "(monthly-payment 150000 6.5 30)", "expect": "951.12"},
+                           {"call": "(monthly-payment 100000 5.0 15)", "expect": "805.40"}]}
+        second = {"action": "build", "name": "monthly-payment", "tests": [
+            {"call": "(let ((p (monthly-payment 150000 6.5 30))) (and (floatp p) (< 900 p 1000)))", "expect": "T"},
+            {"call": "(< (monthly-payment 100000 5.0 30) (monthly-payment 100000 5.0 15))", "expect": "T"}]}
+        replies, prompts = iter([first, second]), []
+
+        def gen(system, user):
+            prompts.append(user)
+            return ag._fake(next(replies))
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = ag.Session("monthly payment of a 150000 loan at 6.5 percent over 30 years", gen,
+                              registry=ag.ToolRegistry(Path(tmp) / "t.json"), log_path=Path(tmp) / "l.jsonl")
+            sess.run()
+            kinds = [e["kind"] for e in sess.events]
+            first_verdict = next(e for e in sess.events if e["kind"] == "verdict")
+            self.assertEqual(first_verdict["class"], "TEST_WRONG")     # the test is blamed, not the code
+            self.assertIn("rescue", kinds)
+            self.assertNotIn("repair", kinds)                          # the code was never sent back
+            self.assertEqual(sess.model_calls, 2)
+            saved = next(t for t in sess.registry.load() if t["name"] == "monthly-payment")
+            self.assertEqual(" ".join(saved["definition"].split()), " ".join(self.DEFINITION.split()))
+            self.assertEqual(sess.state, "done")
+            self.assertIn("The definition stays EXACTLY as it is", prompts[1])
+
+
 class ContractTests(unittest.TestCase):
     def test_the_contract_asks_for_hashed_passwords_and_a_demo_account(self):
         for phrase in ("never stored or compared as plain text", "hash-password", "password-matches-p",
                        "one user named demo whose password is demo"):
-            self.assertIn(phrase, ag.WEB_APP_CONTRACT)
+            self.assertIn(phrase, ag.WEB_APP_CONTRACT_LOGIN)     # the password sentences are for login goals only
         self.assertEqual(visualcheck.DEMO_USER, ("demo", "demo"))
 
 

@@ -231,6 +231,27 @@
       <p id="ag-proj-hint" class="muted ag-proj-hint"></p>
       <label class="ag-check"><input type="checkbox" id="ag-compare" checked> Also run without memory (on Live this roughly doubles the tokens, about half a cent per prompt)</label>
       <label class="ag-check" id="ag-visual-row"><input type="checkbox" id="ag-visual" checked> Check the finished app with screenshots (Live web apps; one or two extra model calls)</label>
+      <details class="ag-reqs" id="ag-reqs">
+        <summary>Your requirements <span id="ag-reqs-count" class="muted">(none yet)</span></summary>
+        <p class="ag-reqs-lede">Say what the finished app must do, one check per line. After every build the harness sends these requests or types these commands itself and reports each line as met or not met. They are checked exactly as you wrote them: nothing rewrites or drops a line.</p>
+        <label for="ag-reqs-text" class="ag-reqs-label">Requirements for this project</label>
+        <textarea id="ag-reqs-text" rows="5" spellcheck="false" aria-describedby="ag-reqs-help ag-reqs-status"
+          placeholder='run "calc 150000 6.5 30" prints "948.10"'></textarea>
+        <div class="ag-reqs-row">
+          <button type="button" id="ag-reqs-save" class="ag-ghost">Save requirements</button>
+          <span id="ag-reqs-status" class="muted" role="status"></span>
+        </div>
+        <ul id="ag-reqs-errors" class="ag-reqs-errors" hidden></ul>
+        <div id="ag-reqs-help" class="ag-reqs-help">
+          <div class="muted">How to write a line</div>
+          <code>GET /notes shows "Hello"</code>
+          <code>POST /notes with text="blue kite" then GET /notes shows "blue kite"</code>
+          <code>GET /missing answers 404</code>
+          <code>run "calc 150000 6.5 30" prints "948.10"</code>
+          <code>run "put blue kite" then run "show" prints "blue kite"</code>
+          <div class="muted">Use <code class="ag-inl">does not show</code> or <code class="ag-inl">does not print</code> for the opposite. Lines indented under <code class="ag-inl">scenario: a name</code> run in order on the same data and count as one requirement.</div>
+        </div>
+      </details>
       <details class="ag-examples">
         <summary>Example prompts</summary>
         <div class="ag-chips" aria-label="Example prompts">
@@ -257,6 +278,10 @@
         </div>
       </details>
       <p id="ag-mode-note" class="muted"></p>
+      <div id="ag-spend" class="ag-spendline" role="status" hidden>
+        <span id="ag-spend-text"></span>
+        <button type="button" id="ag-spend-more" class="ag-ghost" hidden>Allow $1.00 more</button>
+      </div>
     </div>
 
     <section class="ag-build" id="ag-build" aria-label="Build workspace">
@@ -278,8 +303,17 @@
               </svg>
               <div class="ag-gauge-read"><b id="ag-gauge-n">&ndash;</b><small id="ag-gauge-cap">avg tokens/s</small></div>
             </div>
-            <div class="ag-gauge-read ag-spend" id="ag-spend-box"><b id="ag-spend-n">$0.00</b><small id="ag-spend-cap">est. spend</small></div>
+            <div class="ag-gauge-read ag-spend" id="ag-spend-box"><b id="ag-spend-n">$0.00</b><small id="ag-spend-cap">this build</small></div>
+            <div class="ag-gauge-read ag-spend" id="ag-total-box"><b id="ag-total-n">$0.00</b><small id="ag-total-cap">total this run</small></div>
           </div></div>
+        <div id="ag-paused" class="ag-paused" role="alert" hidden>
+          <div class="ag-paused-t">Paused at the spending limit</div>
+          <p id="ag-paused-p"></p>
+          <div class="ag-paused-row">
+            <button type="button" id="ag-paused-go" class="ag-primary">Keep going</button>
+            <button type="button" id="ag-paused-stop" class="ag-ghost">Stop here and keep what is saved</button>
+          </div>
+        </div>
         <div id="ag-gstatus" class="ag-gstatus"><span id="ag-gstatus-t" role="status" aria-live="polite"></span></div>
         <div class="ag-gwrap">
           <svg id="ag-graph" tabindex="0" viewBox="0 0 640 340" role="group"

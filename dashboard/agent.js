@@ -2407,6 +2407,17 @@
       if (v.style_missing === 0) row(OK, "v-ok", "every CSS class the pages use has a rule");
       else row(BAD, "v-warn", plural(v.style_missing, "CSS class the pages use has no rule", "CSS classes the pages use have no rule"));
     }
+    var rq = v.requirements && typeof v.requirements === "object" ? v.requirements : null;
+    if (rq && rq.total > 0) {
+      var rqUnmet = Number(rq.unmet) || 0, rqNo = Number(rq.unchecked) || 0, rqMet = Number(rq.met) || 0;
+      if (rqUnmet > 0) row(BAD, "v-warn", rqUnmet + " of your " + plural(rq.total, "requirement", "requirements").replace(/^\d+ /, rq.total + " ") + " not met" +
+        (Array.isArray(rq.unmet_texts) && rq.unmet_texts.length ? ": " + rq.unmet_texts.slice(0, 3).join("; ") : ""));
+      else if (rqNo > 0) row(BAD, "v-warn", rqMet + " of your " + rq.total + " requirements met; " + rqNo + " could not be checked (see the lines marked in Your requirements)");
+      else row(OK, "v-ok", "all " + rq.total + " of your own requirements are met, checked as you wrote them");
+    }
+    var relaxed = Array.isArray(v.tests_relaxed) ? v.tests_relaxed.filter(function (r) { return r && r.name; }) : [];
+    if (relaxed.length) row("!", "v-warn", plural(relaxed.length, "function", "functions") + " passed only after the harness replaced or dropped a test expectation: " +
+      relaxed.map(function (r) { return String(r.name); }).join(", ") + " (the original expectations are kept with each function)");
     if (v.screens === true) row(OK, "v-ok", "screenshots match what was asked for");
     else if (v.screens === false) row(BAD, "v-warn", "screenshots still show problems");
     else row(NA, "v-muted", "no screenshots were checked");
@@ -2509,6 +2520,14 @@
       box.appendChild(h("div", "sum-l sum-miss", "Screenshots checked: " + visProblems.length + " problem(s) still visible: " + visProblems.join("; ") + ". Send a follow-up prompt naming what to fix."));
     }
     if (vis && vis.skipped) box.appendChild(h("div", "sum-l muted", "Screenshot check skipped: " + String(vis.skipped)));
+    var prov = m.provenance && typeof m.provenance === "object" ? m.provenance : null;
+    if (prov && prov.statement) box.appendChild(h("div", "sum-l", "Who wrote it: " + String(prov.statement)));
+    var hs = m.harness && typeof m.harness === "object" ? m.harness : null;
+    if (hs && (hs.kit === false || hs.advice === false)) box.appendChild(h("div", "sum-l muted", "Harness support in this build: " +
+      (hs.kit ? "ready-made helpers on" : "no ready-made helpers") + ", " + (hs.advice ? "design advice on" : "no design advice") + "."));
+    var rec = m.recovery && typeof m.recovery === "object" ? m.recovery : null;
+    if (rec && rec.rounds > 0) box.appendChild(h("div", "sum-l", "Recovered by itself: " + rec.rounds + " recovery round" + (rec.rounds === 1 ? "" : "s") +
+      (rec.rebuilt && rec.rebuilt.length ? " built " + rec.rebuilt.join(", ") + " after " + (rec.rebuilt.length === 1 ? "it" : "they") + " first failed." : " did not get the failed functions built.")));
     if (ver) box.appendChild(h("div", "sum-l muted", "The marks above are checks the harness ran itself. What the model says about its own work is not counted."));
     if (m.outcome === "success" && m.answer && m.answer.ok) {
       var v = String(m.answer.value == null ? "" : m.answer.value);
@@ -2582,7 +2601,7 @@
   // re-attached run shows the same figure). The gauge is the model's average speed: output
   // tokens over the time it spent answering; the demo model has no timings, so there it is
   // output tokens over wall-clock time.
-  var M = { t0: 0, end: 0, running: false, timer: null, out: 0, timedOut: 0, ms: 0, calls: 0, cost: 0, tokens: 0, free: 0 };
+  var M = { t0: 0, end: 0, running: false, timer: null, out: 0, timedOut: 0, ms: 0, calls: 0, cost: 0, tokens: 0, free: 0, base: 0 };
   var GAUGE_LEN = Math.PI * 30;
   // Spend of the run so far: under a dollar it needs four decimals to show anything.
   function spendText(usd) { return "$" + (usd >= 1 ? usd.toFixed(2) : usd > 0 ? usd.toFixed(4) : "0.00"); }
@@ -2616,7 +2635,13 @@
     // estimated spend: the sum of what each model call of this run cost at the model's list price
     var demo = M.calls > 0 && M.free === M.calls;
     $("ag-spend-n").textContent = spendText(M.cost);
-    $("ag-spend-cap").textContent = demo ? "est. spend (demo is free)" : "est. spend";
+    $("ag-spend-cap").textContent = demo ? "this build (demo is free)" : "this build";
+    // the total counts the builds finished in this run of the dashboard, plus the one under way
+    var totalBase = state.spend ? state.spend.spent : 0, liveRun = !demo && M.running;
+    $("ag-total-n").textContent = spendText(liveRun ? Math.max(M.base + M.cost, totalBase) : totalBase);
+    $("ag-total-cap").textContent = state.spend ? "total this run, of $" + state.spend.cap.toFixed(2) + " allowed" : "total this run";
+    $("ag-total-box").title = "Estimated Live spending since the dashboard was started, including the no-memory comparison runs. " +
+      "At the amount you allow, a build pauses and asks before it spends more.";
     $("ag-spend-box").title = !M.calls ? "Estimated cost of this run's model calls. No model reply yet."
       : demo ? "The demo model is scripted and offline, so this run costs nothing."
              : "Estimated from the " + M.tokens.toLocaleString("en-US") + " tokens of this run's " + M.calls + " model call" +
@@ -2626,7 +2651,8 @@
     switch (ev.kind) {
       case "goal":
         if (M.timer) clearInterval(M.timer);
-        M = { t0: ev.t || Date.now() / 1000, end: 0, running: true, timer: null, out: 0, timedOut: 0, ms: 0, calls: 0, cost: 0, tokens: 0, free: 0 };
+        M = { t0: ev.t || Date.now() / 1000, end: 0, running: true, timer: null, out: 0, timedOut: 0, ms: 0, calls: 0, cost: 0, tokens: 0, free: 0,
+              base: state.spend ? state.spend.spent : 0 };
         $("ag-meter").hidden = false;
         M.timer = setInterval(renderMeter, 100);
         renderMeter();
@@ -2819,6 +2845,41 @@
           ifProb.slice(0, 6).forEach(function (p) { say(String(p.detail || p.where || ""), "fail"); });
           if (ifProb.length > 6) say("…and " + (ifProb.length - 6) + " more", "fail");
         }
+        break;
+      case "requirements":
+        var rqRes = Array.isArray(ev.results) ? ev.results : [];
+        say("Checked your " + rqRes.length + " requirement" + (rqRes.length === 1 ? "" : "s") + " against the finished app: " + (ev.met || 0) + " met" +
+          (ev.unmet ? ", " + ev.unmet + " not met" : "") + (ev.unchecked ? ", " + ev.unchecked + " could not be checked" : "") + ".", ev.unmet || ev.unchecked ? "fail" : "pass");
+        rqRes.filter(function (r) { return r && r.ok !== true; }).slice(0, 8).forEach(function (r) {
+          say((r.id || "") + (r.ok === false ? " not met: " : " not checked: ") + String(r.text || "").replace(/\s+/g, " ") + (r.detail ? " \u2014 " + String(r.detail) : ""), "fail");
+        });
+        break;
+      case "plan_trimmed":
+        var ptKept = Array.isArray(ev.kept_as_saved) ? ev.kept_as_saved.filter(Boolean).map(String) : [];
+        say("This prompt was built before, so " + ptKept.length + " saved function" + (ptKept.length === 1 ? " stays" : "s stay") +
+          " as " + (ptKept.length === 1 ? "it is" : "they are") + " instead of being rebuilt: " + ptKept.join(", ") + ".", "note");
+        break;
+      case "bad_reply":
+        say("The model gave no usable reply for " + (ev.name || "a function") + ". It counts as not built; the rest of the build goes on.", "fail");
+        break;
+      case "spend_pause":
+        say("Paused: this build has spent $" + (Number(ev.spent_usd) || 0).toFixed(2) + ", the amount allowed for one build. It waits for you to allow more or stop it.", "note");
+        break;
+      case "spend_resumed":
+        say("Going on: you allowed more, up to $" + (Number(ev.limit_usd) || 0).toFixed(2) + " for this build.", "note");
+        break;
+      case "recovery":
+        var rvFailed = Array.isArray(ev.failed) ? ev.failed.filter(Boolean).map(String) : [];
+        say("Recovery round " + (ev.round || 1) + " of " + (ev.of || 1) + ": " + rvFailed.join(", ") +
+          (rvFailed.length === 1 ? " was" : " were") + " not built. Planning " + (rvFailed.length === 1 ? "it" : "them") +
+          " again with what went wrong, without waiting for Continue.", "note");
+        break;
+      case "recovery_done":
+        var rvBuilt = Array.isArray(ev.rebuilt) ? ev.rebuilt.filter(Boolean).map(String) : [];
+        var rvLeft = Array.isArray(ev.still_failed) ? ev.still_failed.filter(Boolean).map(String) : [];
+        if (rvBuilt.length) say("Recovery round " + (ev.round || 1) + " built " + rvBuilt.join(", ") +
+          (rvLeft.length ? "; still not built: " + rvLeft.join(", ") + "." : ". Nothing is left unbuilt."), rvLeft.length ? "note" : "pass");
+        else say("Recovery round " + (ev.round || 1) + " built none of them, so the build stops here: " + rvLeft.join(", ") + ".", "fail");
         break;
       case "visual_rollback":
         say("Undid the last round of visual fixes" + (ev.reason ? ": " + String(ev.reason).replace(/\.\s*$/, "") : "") +
@@ -3261,12 +3322,14 @@
       state.attaching = false;
       tickWait();
       state.next = s.next;
+      renderPaused(s.state === "running" ? s.paused : null, s.cost_usd);
       if (s.state !== "running") {
         if (s.compare !== "running") {
           clearInterval(state.timer); state.timer = null;
           if (G.running) { finishRun(null); flushSync(); }
           setTimeout(function () { state.hot = null; drawGraph(); }, 2500);
           loadProjects();
+          loadConfig();                      // the spend figure follows every finished build
           refresh().then(function () {
             if (done) done(true);
             else if (state.attached) { state.attached = false; setBusy(false); }
@@ -3308,7 +3371,11 @@
     setBusy(true);
     var visual = $("ag-visual").checked && !$("ag-visual").disabled;
     return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle, project: state.project, visual: visual }).then(function (r) {
-      if (r.status !== 200) { setBusy(false); throw new Error((r.data && r.data.error) || "request failed"); }
+      if (r.status !== 200) {
+        setBusy(false);
+        if (/spending limit/i.test((r.data && r.data.error) || "")) { loadConfig(); $("ag-spend").scrollIntoView({ block: "center" }); }
+        throw new Error((r.data && r.data.error) || "request failed");
+      }
       state.session = r.data.session_id; state.next = 0;
       state.runPrompt = prompt; state.runMode = mode;
       setPrompt(prompt);
@@ -3545,6 +3612,7 @@
     applyProjectMode();
     $("ag-prompt").value = lsGet(DRAFT_KEY + state.project) || "";
     $("ag-cmd-out").hidden = true; $("ag-cmd-in").value = "";
+    $("ag-reqs-text").value = ""; loadRequirements();     // each project has its own requirements
     closeProjForm(false); closeProjDel(false); setProjErr("");
     $("ag-answer").textContent = "—";
     $("ag-answer-call").textContent = "Run a prompt to see its Lisp, tests and REPL output here.";
@@ -3562,6 +3630,41 @@
     if (state.busy || id === state.project || !findProject(id)) return;
     selectProjectLocal(id);
     refresh();
+  }
+
+  // ------------------------------------------------ the user's own requirements for this project
+  function showRequirements(data, saved) {
+    var n = data && typeof data.count === "number" ? data.count : 0;
+    var errs = data && Array.isArray(data.errors) ? data.errors : [];
+    $("ag-reqs-count").textContent = n ? "(" + n + " saved" + (errs.length ? ", " + errs.length + " could not be read" : "") + ")" : "(none yet)";
+    var list = $("ag-reqs-errors");
+    clear(list);
+    list.hidden = !errs.length;
+    errs.slice(0, 8).forEach(function (e) {
+      list.appendChild(h("li", "", "Line " + e.line + " could not be read: " + String(e.problem || "") ));
+    });
+    $("ag-reqs-status").textContent = saved
+      ? (n ? "Saved. " + n + " requirement" + (n === 1 ? "" : "s") + " will be checked after the next build." : "Saved. This project has no requirements.")
+      : "";
+  }
+  function loadRequirements() {
+    if (window.location.protocol === "file:") return;
+    var pid = state.project;
+    api("GET", "/api/agent/projects/" + encodeURIComponent(pid) + "/requirements").then(function (r) {
+      if (pid !== state.project || r.status !== 200) return;
+      $("ag-reqs-text").value = r.data.text || "";
+      showRequirements(r.data, false);
+    }).catch(function () {});
+  }
+  function saveRequirements() {
+    var pid = state.project, btn = $("ag-reqs-save");
+    btn.disabled = true;
+    $("ag-reqs-status").textContent = "Saving\u2026";
+    api("POST", "/api/agent/projects/" + encodeURIComponent(pid) + "/requirements", { text: $("ag-reqs-text").value }).then(function (r) {
+      btn.disabled = false;
+      if (r.status !== 200) { $("ag-reqs-status").textContent = "Not saved: " + ((r.data && r.data.error) || "the server refused it"); return; }
+      if (pid === state.project) showRequirements(r.data, true);
+    }).catch(function () { btn.disabled = false; $("ag-reqs-status").textContent = "Not saved: the dashboard server did not answer."; });
   }
 
   function openProjForm(mode) {
@@ -3692,9 +3795,54 @@
         $("ag-mode").value = "demo";
       }
       state.configLoaded = true;
+      state.spend = live.available && typeof live.cap_usd === "number"
+        ? { spent: Number(live.spent_usd) || 0, cap: live.cap_usd, min: Number(live.min_build_usd) || 0.1, build: Number(live.build_usd) || 0.4 }
+        : null;
       applyProjectMode();          // a saved project opens on Live, not on the Demo default
       setModeNote();
+      renderSpend();
     });
+  }
+  // What the Live model has cost in this run of the dashboard, against the limit the user allows.
+  function renderSpend() {
+    var box = $("ag-spend"), sp = state.spend, live = $("ag-mode").value === "live";
+    box.hidden = !(sp && live);
+    if (box.hidden) return;
+    var left = Math.max(0, sp.cap - sp.spent), out = left < sp.min, low = left < sp.build;
+    box.className = "ag-spendline" + (out || low ? " low" : "");
+    $("ag-spend-text").textContent = "Live spending in this run of the dashboard: $" + sp.spent.toFixed(2) + " of the $" + sp.cap.toFixed(2) + " you allow." +
+      (out ? " New builds wait until you allow more." : low ? " A build will pause and ask you when it gets there." : "");
+    var more = $("ag-spend-more");
+    more.hidden = !(out || low);
+    more.disabled = false;
+    renderMeter();
+  }
+  function allowSpend() {
+    var more = $("ag-spend-more");
+    more.disabled = true;
+    api("POST", "/api/agent/allow-spend", {}).then(function (r) {
+      if (r.status === 200 && state.spend) { state.spend.cap = r.data.cap_usd; state.spend.spent = Number(r.data.spent_usd) || state.spend.spent; }
+      renderSpend();
+    }).catch(renderSpend);
+  }
+  // A build waiting at its spending limit: say what it has spent and let the user decide.
+  function renderPaused(p, cost) {
+    var box = $("ag-paused");
+    box.hidden = !p;
+    if (!p) return;
+    var spent = typeof cost === "number" ? cost : Number(p.spent_usd) || 0;
+    $("ag-paused-p").textContent = "This build has spent $" + spent.toFixed(2) + ", which is the amount allowed for one build ($" + (Number(p.limit_usd) || 0).toFixed(2) +
+      "). Nothing more is spent until you decide. Everything saved so far is kept either way.";
+    $("ag-paused-go").textContent = "Keep going (allow $" + ((state.spend && state.spend.build) || 0.4).toFixed(2) + " more)";
+    $("ag-paused-go").disabled = false;
+  }
+  function keepGoing() {
+    $("ag-paused-go").disabled = true;
+    api("POST", "/api/agent/acknowledge-spend", {}).then(function (r) {
+      if (r.status === 200 && state.spend) { state.spend.cap = r.data.cap_usd; state.spend.spent = Number(r.data.spent_usd) || state.spend.spent; }
+      if (r.status === 200 && r.data.resumed) renderPaused(null);
+      renderSpend();
+    }).catch(function () { $("ag-paused-go").disabled = false; });
   }
 
   function tryCall() {
@@ -3759,6 +3907,12 @@
   document.querySelector('nav button[data-view="thesis"]').addEventListener("click", machinerySection);
   $("ag-prompt").addEventListener("input", saveDraft);
   $("ag-cmd").addEventListener("submit", runCommand);
+  $("ag-spend-more").addEventListener("click", allowSpend);
+  $("ag-paused-go").addEventListener("click", keepGoing);
+  $("ag-paused-stop").addEventListener("click", function () { renderPaused(null); cancelRun(); });
+  $("ag-mode").addEventListener("change", renderSpend);
+  $("ag-reqs-save").addEventListener("click", saveRequirements);
+  $("ag-reqs-text").addEventListener("input", function () { $("ag-reqs-status").textContent = "Not saved yet."; });
   $("ag-resume-x").addEventListener("click", function () {
     if (state.resumeRow) lsSet(DISMISS_KEY + state.project, state.resumeRow.session_id);
     updateResume(); $("ag-prompt").focus();
@@ -3793,7 +3947,7 @@
     loadProjects().then(function () {
       applyProjectMode();          // before the first load, so a project never shows its Demo side
       var cfg = loadConfig();
-      refresh(); loadSnapshots();
+      refresh(); loadSnapshots(); loadRequirements();
       return cfg;
     }).then(checkActive, checkActive);
   }

@@ -5,6 +5,7 @@ left the whole app unwired."""
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,8 @@ class PlanFlowTests(unittest.TestCase):
         sess.prior_goals = list(prior)
         return sess, reg
 
+    # the build's own recovery rounds are tested in test_recovery.py; here they are off
+    @mock.patch.object(ag, "MAX_RECOVERY_ROUNDS", 0)
     def test_a_failed_step_does_not_stop_the_rest_of_an_app_from_being_built(self):
         plan = {"action": "plan", "steps": [
             {"name": "render-home", "spec": "(render-home request state) -> page"},

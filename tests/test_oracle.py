@@ -115,5 +115,82 @@ class LessonTests(unittest.TestCase):
             self.assertEqual(data["root_cause"], "TEST_WRONG")
 
 
+class NearMissTests(unittest.TestCase):
+    """Numbers from live build 44bdfb6d97, where a correct function was thrown away."""
+
+    def info(self, got, expected, call="(monthly-payment 150000 6.5 30)"):
+        return {"call": call, "got": got, "expected": expected, "error": "",
+                "confidence": o.oracle_confidence(call, expected)}
+
+    def test_a_float_close_to_a_hand_computed_value_blames_the_test(self):
+        infos = [self.info("948.10406", "951.12"),
+                 self.info("790.78656", "805.40", "(monthly-payment 100000 5.0 15)")]
+        self.assertTrue(all(o.is_near_miss(i) for i in infos))
+        self.assertEqual(o.failure_class(infos), "TEST_WRONG")
+
+    def test_values_that_are_far_apart_still_blame_the_code(self):
+        for got in ("462177024", "94810", "94810.5", "-184.61539", "215.4272"):
+            self.assertFalse(o.is_near_miss(self.info(got, "951.12")), got)
+        self.assertEqual(o.failure_class([self.info("94810.2", "951.12")]), "IMPLEMENTATION_WRONG")
+
+    def test_one_far_value_among_near_ones_blames_the_code(self):
+        infos = [self.info("948.10406", "951.12"), self.info("79079.0", "805.40")]
+        self.assertEqual(o.failure_class(infos), "IMPLEMENTATION_WRONG")
+
+    def test_whole_numbers_and_non_numbers_are_never_near_misses(self):
+        self.assertFalse(o.is_near_miss(self.info("99", "100")))          # an off-by-one count is a bug
+        self.assertFalse(o.is_near_miss(self.info("100.0", "99.0")))
+        self.assertFalse(o.is_near_miss(self.info("(948 2)", "(951 2)")))             # whole numbers
+        self.assertFalse(o.is_near_miss(self.info(None, "951.12")))
+        self.assertFalse(o.is_near_miss(self.info("951.12", "951.12")))
+
+    def test_close_decimals_inside_the_same_formatted_text_blame_the_test(self):
+        # live build 950fccf453: the figures the code printed were the right ones
+        got = ('"Loan 1: $150,000.00 at 6.50% for 30 years\\n  Monthly: $948.10  '
+               'Total interest: $191,317.47  Total cost: $341,317.47"')
+        want = ('"Loan 1: $150,000.00 at 6.50% for 30 years~%  Monthly: $959.93  '
+                'Total interest: $195,574.80  Total cost: $345,574.80"')
+        info = self.info(got, want, '(report-summary-line "1" 150000 6.5 30)')
+        self.assertTrue(o.is_near_miss(info))
+        self.assertEqual(o.failure_class([info]), "TEST_WRONG")
+        plist_got = '(:OUTPUT "Monthly Payment: $1,060.64 vs $1,265.79" :STATE NIL)'
+        plist_want = '(:output "Monthly Payment: $1,071.30 vs $1,281.15")'
+        self.assertTrue(o.is_near_miss(self.info(plist_got, plist_want)))
+
+    def test_text_that_differs_in_words_whole_numbers_or_far_values_blames_the_code(self):
+        same = '"Standard: 360 months, $191,317.47 interest"'
+        for got, want in [
+                ('"Rate: 0.05% vs 0.07%"', '"Rate: 5.00% vs 7.00%"'),                       # a hundred times off
+                ('"With extra: 230 months, $102,693.69"', '"With extra: 298 months, $102,693.69"'),   # a count differs
+                ('"With extra: 359 months, $102,693.69"', '"With extra: 360 months, $104,000.00"'),   # a count differs by one
+                ('"Total interest: $191,317.47"', '"Total cost: $195,574.80"'),              # other words
+                ('"Monthly: $948.10"', '"Monthly: $948.10 and $3.00"'),                      # one figure missing
+                ('(360 1597.5781)', '(360 195574.8)'),
+                (same, same),                                                                 # no difference at all
+                ('"1,234,567.88"', '"1,234,567.89"'),                                        # the last digit: lost precision
+                ('"Principal: $10,000,000.00 vs $15,000,000.00"', '"Principal: $100,000.00 vs $150,000.00"')]:
+            self.assertFalse(o.is_near_miss(self.info(got, want)), got)
+        self.assertEqual(o.failure_class([self.info('"Rate: 0.05% vs 0.07%"', '"Rate: 5.00% vs 7.00%"')]),
+                         "IMPLEMENTATION_WRONG")
+
+    def test_a_list_of_close_floats_is_a_near_miss_too(self):
+        self.assertTrue(o.is_near_miss(self.info("(250000.0 948.10406 15.0)", "(250000.0 951.12 15.0)")))
+        self.assertFalse(o.is_near_miss(self.info("(250000.0 6.0 15.0)", "(250000.0 6.5 15.0)")))   # 8% off
+
+    def test_long_text_is_compared_at_once(self):
+        import time
+        got = '"' + "row 1,234.56 and " * 1000 + '"'
+        want = '"' + "row 1,234.99 and " * 1000 + '"'
+        started = time.perf_counter()
+        self.assertTrue(o.is_near_miss(self.info(got, want)))
+        o.is_near_miss(self.info("1," * 9000, "2," * 9000))
+        self.assertLess(time.perf_counter() - started, 1.0)
+
+    def test_sbcl_float_spellings_are_read(self):
+        self.assertTrue(o.is_near_miss(self.info("9.4810406d2", "951.12")))
+        self.assertTrue(o.is_near_miss(self.info("6.3208e-3", "0.0064")))
+        self.assertFalse(o.is_near_miss(self.info("6.3208e-3", "0.64")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -170,6 +170,37 @@ class ProjectStore:
             self._save(project_id, meta)
         return self.get(project_id), None
 
+    MAX_REQUIREMENTS_CHARS = 8000
+
+    def requirements_path(self, project_id):
+        """Where a project keeps the requirements its owner wrote (plain text, one per line)."""
+        if project_id == BUILTIN:
+            return self.root.parent / "requirements.txt"
+        return self.root / project_id / "requirements.txt"
+
+    def requirements(self, project_id):
+        """The requirements text of a project, exactly as written; empty when there is none."""
+        try:
+            return self.requirements_path(project_id).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    def set_requirements(self, project_id, text):
+        """``(ok, error)``. Saves TEXT as written; only the owner's own edit changes it."""
+        if not isinstance(text, str):
+            return False, "requirements must be text"
+        if len(text) > self.MAX_REQUIREMENTS_CHARS:
+            return False, "requirements are limited to %d characters" % self.MAX_REQUIREMENTS_CHARS
+        if project_id != BUILTIN and not self.exists(project_id):
+            return False, "unknown project"
+        path = self.requirements_path(project_id)
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(text.encode("utf-8"))      # as written, line endings included
+            tmp.replace(path)
+        return True, None
+
     def touch(self, project_id):
         """Record activity so the newest work sorts and shows correctly."""
         if project_id == BUILTIN:

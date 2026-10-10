@@ -123,8 +123,9 @@ class AuthKitSourceTests(unittest.TestCase):
                 self.assertNotIn(banned, lowered, "%s contains %r" % (t["name"], banned))
 
     def test_usage_tells_the_model_how_to_store_and_check_passwords(self):
-        self.assertIn("hash-password", webkit.USAGE)
-        self.assertIn("password-matches-p", webkit.USAGE)
+        self.assertIn("hash-password", webkit.USAGE_LOGIN)
+        self.assertIn("password-matches-p", webkit.USAGE_LOGIN)
+        self.assertNotIn("hash-password", webkit.USAGE)          # the helper list alone is not login advice
 
 
 if __name__ == "__main__":

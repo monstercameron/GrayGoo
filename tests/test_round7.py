@@ -179,8 +179,8 @@ class EmptyReplyTests(unittest.TestCase):
 class PageTestGuidanceTests(unittest.TestCase):
     def test_the_web_reminder_says_how_to_test_a_page(self):
         for phrase in ("expect a response plist holding only what matters",
-                       "(:status 303 :headers ((\"Location\" \"/login\")))",
-                       "(:status 200 :body \"...Widget...\")", "Do not wrap the call in LET"):
+                       "(:status 303 :headers ((\"Location\" \"/notes\")))",
+                       "(:status 200 :body \"...Hello...\")", "Do not wrap the call in LET"):
             self.assertIn(phrase, ag.WEB_REMINDER)
 
     def test_the_recommended_expectations_really_pass_in_sbcl(self):
@@ -246,7 +246,7 @@ class ChangedToolTests(unittest.TestCase):
 
     def test_the_contract_and_the_reminder_agree_on_how_to_test_a_page(self):
         self.assertNotIn("(let ((r (page-fn", ag.WEB_APP_CONTRACT)
-        self.assertIn("(page-fn request state) => (:status 200 :body \"...Widget...\")", ag.WEB_APP_CONTRACT)
+        self.assertIn("(page-fn request state) => (:status 200 :body \"...Hello...\")", ag.WEB_APP_CONTRACT)
 
 
 if __name__ == "__main__":

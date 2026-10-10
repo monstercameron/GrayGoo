@@ -59,6 +59,8 @@ try:
 except ImportError:  # sandbox.py absent: sandboxed runs must fail, not degrade
     _sandbox = None
 
+import ossandbox as _ossandbox
+
 __all__ = [
     "SBCL_EXE",
     "WorkerPool",
@@ -436,13 +438,14 @@ def run_lisp(code, *, timeout_s=10.0, memory_mb=512, prelude="", epoch_id="",
                "--non-interactive", "--no-userinit", "--no-sysinit",
                "--disable-debugger", "--load", script_path]
         try:
-            proc = subprocess.Popen(
+            proc = _ossandbox.popen(
                 argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
                 cwd=jail_root or None,
                 env=_sanitized_env(),
+                memory_mb=max(_ossandbox.DEFAULT_MEMORY_MB, memory_mb + 512),
             )
         except OSError as exc:
             return _result(False, "", "",
@@ -452,12 +455,14 @@ def run_lisp(code, *, timeout_s=10.0, memory_mb=512, prelude="", epoch_id="",
         except subprocess.TimeoutExpired:
             proc.kill()
             out_bytes, err_bytes = proc.communicate()
+            _ossandbox.release(proc)
             return _result(
                 False, "", "",
                 "wall-clock timeout after %gs; worker killed and recycled"
                 % timeout_s, True)
         stdout_text = out_bytes.decode("utf-8", errors="replace")
         stderr_text = err_bytes.decode("utf-8", errors="replace")
+        _ossandbox.release(proc)
     finally:
         try:
             os.unlink(script_path)
