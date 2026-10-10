@@ -472,3 +472,27 @@ model calls.
   it is not yet shown for "a build costs less".
 - Closed from Round 11's open list: method mismatches in `interfaces.py`,
   update and delete visitor checks, dead onclick buttons.
+
+## Round 13 (2026-10-10): reviewer's ownership list, and self-recovery
+
+The ten prioritized issues pasted on 2026-10-10 (harness versus agent ownership).
+
+| # | Issue | Status |
+|---|---|---|
+| 1 | Harness-versus-agent ownership audit | DONE. `provenance.py` classifies every function (HARNESS_PRIMITIVE, AGENT_GENERATED, AGENT_COMPOSED, IMPORTED); the run summary and the end-of-run card state the model's share. Saved projects: the model wrote 75-100% of the code by length. Nothing writes IMPORTED yet. |
+| 2 | Application-specific implementations in the harness | DONE IN PART. A line-by-line review classed 186 elements (66 generic, 25 platform, 14 domain words, 40 architecture, 41 keyword gates). Fixed: login text and password helpers only when a goal asks for login; neutral example words; kit usage text states the helpers only. The fixes to the check modules (word lists, the "users" table, item containers) are in progress. |
+| 3 | Feature detection replaced by agent-independent contracts | DONE IN PART. Requirements the user writes are checked as written against behaviour (`requirements.py`). The keyword features of `goalcheck.py` remain as a labelled heuristic and still feed "missing". |
+| 4 | Test repair must not weaken requirements | DONE. User requirements are never passed through a repair. For model-written tests every replaced or dropped expectation is saved with the function (`relaxed_tests`) and shown in the report; `repairkinds.py` says for each rule whether it can weaken a test (7 can). |
+| 5 | Benchmark with and without kits | PREPARED. `Session.use_kit` / `use_advice` and arm K of `autonomy_experiment.py`; not run (paid). |
+| 6 | Integration composition agent-owned | DONE IN PART. The harness detects and reports mismatches (`interfaces.py`) and the agent plans the fix; the advice that prescribes a structure (one function per route, cmd-<word>) is separate and can be switched off. It is on by default. |
+| 7 | Unseen application categories | PREPARED. Four specs (graph editor, queue simulation, meeting scheduler, expression playground) with requirement lines; not run (paid). |
+| 8 | Mechanical repairs versus learned strategies | DONE as an honest statement: all 29 repair rules are hand-written; the 29.4% to 39.6% gain is engineered rules firing. The only self-derived state is the lessons ledger, which picks among hand-written advice. |
+| 9 | OS-level sandboxing | DONE IN PART. Job object, low integrity and a handle list around the warm process and the cold worker (`ossandbox.py`). Not blocked: outbound network, reads. `pool.py` unsandboxed. |
+| 10 | Verify with live runs | NOT DONE. Needs paid runs. |
+
+Self-recovery, from five failed Continue attempts on one live project
+(about $1.20, none finished): recovery rounds inside a build, the near-miss
+rule for hand-computed test figures, plan trimming on a repeated prompt, an
+empty reply costing one function, and a spending limit that pauses instead
+of ending the build. All verified with a scripted model in real SBCL; none
+has run live yet.

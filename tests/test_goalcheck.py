@@ -83,7 +83,9 @@ class GoalFeatureTests(unittest.TestCase):
         """Each returned feature has a key, a label and a non-empty hint."""
         for feature in goalcheck.goal_features(CRM_GOAL):
             with self.subTest(key=feature["key"]):
-                self.assertEqual(set(feature), {"key", "label", "hint"})
+                # item 16: every feature also carries its basis (changed from the three-key shape)
+                self.assertEqual(set(feature), {"key", "label", "hint", "basis"})
+                self.assertEqual(feature["basis"], "keyword")
                 self.assertTrue(feature["label"])
                 self.assertTrue(feature["hint"])
 

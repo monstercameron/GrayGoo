@@ -45,6 +45,7 @@ import modelgate
 import screenshot
 import visualcheck
 import oracle as orc
+import qualify
 import workers
 
 ROOT = Path(__file__).resolve().parent
@@ -154,9 +155,33 @@ GG_CHECK = (
     "(or (not (member :state-unchanged want)) (not (member :state got)) "
     "(gg-near (getf got :state) (getf want :state-unchanged)))))\n"
     # expect T is a property test: any true value passes, as in Lisp itself
-    "(defun gg-check (got want) (if (or (if (and (consp want) (eq (car want) :status)) "
-    "(gg-resp got want) (gg-near got want)) (and (eq want t) got)) "
+    # ...but a test that calls the function itself and expects T is a claim that it
+    # RETURNS T (the third argument). Text, a list or a number is not T, however non-empty.
+    # A command's plist likewise: the expected :output may hold "..." for any text and ~%
+    # for a line break, and :state is compared only when the test expects one.
+    "(defun gg-out (got want) (and (consp got) (stringp (getf got :output)) (stringp (getf want "
+    ":output)) (gg-body (getf got :output) (getf want :output)) "
+    "(or (not (member :state want)) (gg-near (getf got :state) (getf want :state)))))\n"
+    "(defun gg-check (got want &optional is-t) (if (or (cond ((and (consp want) (eq (car want) :status)) "
+    "(gg-resp got want)) ((and (consp want) (eq (car want) :output) (stringp (second want)) "
+    "(evenp (length want))) (ignore-errors (gg-out got want))) (t (gg-near got want))) "
+    "(and (eq want t) (if is-t (eq got t) got))) "
     "t (list :got got)))")
+
+
+def check_form(name, call, expect):
+    """The Lisp form that checks one test of the function NAME.
+
+    ``(cmd-calc '("1" "2") nil 0) => T`` used to pass for any result that was
+    not NIL, including "Invalid input": the model had found that an expected T
+    is satisfied by anything, and wrote such tests to get a function saved
+    (live build 65d48905f0). A property test, which wraps the call in a
+    condition, keeps the usual Lisp meaning of true.
+    """
+    if (expect or "").strip().upper() == "T" and isinstance(name, str) and \
+            re.match(r"\s*\(\s*%s(?=[\s)])" % re.escape(name), call or "", re.I):
+        return "(gg-check %s 'T :is-t)" % call
+    return "(gg-check %s '%s)" % (call, expect)
 LIVE_SPEND_CAP_USD = 1.00   # per server process; live sessions refuse past it
 # One build may make up to MAX_MODEL_CALLS_PLAN calls, so it also gets a spend and
 # a time limit of its own. Reaching one stops the build with what is saved so
@@ -166,6 +191,69 @@ MAX_SESSION_USD = 0.40
 # with what went wrong in front of the planner, instead of ending the build and
 # waiting for someone to press Continue. A round that builds none of them ends it.
 MAX_RECOVERY_ROUNDS = 2
+# After the app answers, what its proofs show wrong is fixed in rounds. They go on while
+# the build has budget and the failures keep changing; two rounds that leave the very
+# same failures mean the model is stuck, and only then does the build stop and say so.
+MAX_FIX_ROUNDS = 6
+MAX_GOAL_ROUNDS = 2                  # rounds of work on what a review of the goal found missing
+MAX_FIX_STEPS = 4                    # saved functions rebuilt in one round of fixes
+MAX_INTEGRATION_TESTS = 8            # written for a new project
+MAX_INTEGRATION_MORE = 4             # added when a later prompt adds functions
+MAX_INTEGRATION_TOTAL = 16           # kept per project
+
+# A build that is not an app has no entry point to try it through. What can be asked is
+# whether the functions, as described and tested, do what the user's words say. The
+# question goes to the model in a call of its own, as a reviewer and not as the author.
+GOAL_REVIEW_SYSTEM = (
+    "You review software against what its user asked for. You did not write it. Reply "
+    "with ONE JSON object and nothing else: {\"action\":\"review\",\"missing\":[\"...\"],"
+    "\"why\":\"one sentence\"}. \"missing\" lists what the user asked for that the functions, "
+    "as described and tested, do not do; it is an empty list when nothing is missing.\n"
+    "RULES\n"
+    "- Judge only against the user's own words. Every condition they state counts, above "
+    "all one they call the challenge, the point or the hard part.\n"
+    "- Look at how the functions are CALLED in their tests: that is all a user can do "
+    "with them. If the user said they may give anything, or only some of the values, "
+    "and every test spells out every value in one fixed form, that part is missing.\n"
+    "- If the answer shown is not an answer to the user's question (the value of a "
+    "helper, a bare fraction such as 200/3, an example that ignores the user's own "
+    "numbers), say so.\n"
+    "- Each entry says what a user would give and what should come back, concretely "
+    "enough to build it. At most 4 entries.\n"
+    "- Do not ask for more than the user did: no extra features, formats, error "
+    "handling or polish they did not mention."
+)
+
+# Integration tests are written once per project, from the goal and from what the app
+# offers, never from its code: they say what a user who types a command or opens a page
+# must see. The harness runs them through the entry point in every qualification.
+INTEGRATION_SYSTEM = (
+    "You write integration tests for a small app. Reply with ONE JSON object and nothing "
+    "else: {\"action\":\"tests\",\"lines\":[\"...\", ...]}. Each line is one test in exactly "
+    "one of these forms.\n"
+    "For a command-line app:\n"
+    "  run \"put blue kite\" prints \"blue kite\"\n"
+    "  run \"put blue kite\" then run \"show\" prints \"blue kite\"\n"
+    "  run \"drop 9\" does not print \"blue kite\"\n"
+    "For a web app:\n"
+    "  GET /notes shows \"Hello\"\n"
+    "  POST /notes with text=\"blue kite\" then GET /notes shows \"blue kite\"\n"
+    "  GET /missing answers 404\n"
+    "  run \"put blue kite\" then run \"show\" works\n"
+    "RULES\n"
+    "- Use ONLY the commands or pages of THIS app, named in the message. The words above "
+    "are examples of the form, not of your app.\n"
+    "- Every test goes through the app as its user does: a command typed, a page asked for.\n"
+    "- At least half of the tests chain two steps: one that stores or changes something, "
+    "then one that shows it. That is what proves the parts work together.\n"
+    "- After prints or shows comes ONLY text typed in that same line, which must come back "
+    "(the note that was put, the amount that was saved), or the name of a command. Never a "
+    "heading, a label, a format or a figure that you imagine the app prints: you have not "
+    "seen its output. When a line has no such text, end it with the word works: it then "
+    "checks that the commands run without an error.\n"
+    "- Each test starts from an empty app: do not rely on an earlier line.\n"
+    "- 4 to 8 lines, one test per line."
+)
 MIN_BUILD_USD = 0.10            # a build is not started with less than this left to spend
 RECOVERY_RESERVE_CALLS = 4      # a round is not started with fewer model calls left
 # A goal with one of these words is also looked at on a phone-sized screen.
@@ -423,6 +511,28 @@ WEB_REMINDER = (
     "#'concatenate 'string (mapcar ...)), not ~{ ~}. (/ a b) on integers is a "
     "ratio like 40/3: show (float ...) of it. Keep every definition under 3000 "
     "characters: a longer page is split into helper functions.")
+
+# The same for a command-line app. Until 2026-10-10 such an app was sent WEB_REMINDER
+# (it has kit tools), and in seven live builds 64% of 1,025 test runs failed: web-style
+# expected values, tables picked apart by hand, text used as numbers.
+CLI_REMINDER = (
+    "COMMAND-LINE APP: a command tool is (cmd-<word> args state now). ARGS holds the "
+    "words typed after the command word, always as text, e.g. '(\"150000\" \"6.5\" "
+    "\"30\"); turn a word into a number with (number-from-string word), exactly once. "
+    "STATE is a list of (name rows) tables, e.g. '((\"entries\" ((\"blue kite\")))): "
+    "read a table with (table-rows state \"entries\") and store new rows with "
+    "(with-table-rows state \"entries\" rows); never take STATE apart with ASSOC, FIND "
+    "or CONS. RETURN (list :output \"text\" :state new-state): a plist built with LIST "
+    "(a form such as (:output \"x\") is not code); leave :state out when nothing "
+    "changed. A line break in the output is made by FORMAT, e.g. (format nil \"Total: "
+    "~a~%Rate: ~a\" total rate); the characters ~% in any other string are shown as they "
+    "are. TESTS: call the tool directly with literal data and expect a plist holding "
+    "only what matters: (:output \"...blue kite...\") where ... matches any text and ~% "
+    "a line break; add :state only when the command changes the data, written out in "
+    "full. Expect the words the output must contain, never a whole long text and never "
+    "a figure you did not work out digit by digit. T is a constant: never name a "
+    "parameter t. Keep every definition under 3000 characters: a longer one is split "
+    "into helper functions.")
 
 # Fixing test calls needs the output format and the data rules, not the whole build brief.
 TEST_SYSTEM = (
@@ -714,6 +824,14 @@ def live_generate(system, user):
         res = call(effort, THINK_TOKENS[effort], THINK_TIMEOUT_S)
     if _usable(res):
         res["thinking"] = effort
+        return res
+    if budget and getattr(_TEMP, "no_fallback", False):
+        # A repair whose reasoning ran out. In the logs the plain call that used to follow
+        # passed the tests 2 times in 33, at twice the price of a call; a reasoning that
+        # did finish passed 14 times in 24. The attempt is given up and the function is
+        # split instead, which was the next step anyway.
+        res.update(text="", thinking=None, thinking_fallback=True, thinking_exhausted=True)
+        res["reasoning_tokens"] = res.get("reasoning_tokens") or res.get("output_tokens")
         return res
     # The reasoning used the whole budget and left no complete answer. Ask
     # again without it: a plain answer now beats a second expensive silence.
@@ -1931,7 +2049,8 @@ CLI_PLATFORM = (
 CLI_KIT = (
     "These tested tools are already in the REGISTRY, use them and do NOT "
     "rebuild them: (table-rows state \"entries\"), (with-table-rows state \"entries\" "
-    "rows), (join-strings strings separator). "
+    "rows), (join-strings strings separator), (number-from-string text) which reads "
+    "\"6.5\" as 6.5. "
 )
 CLI_STATE_NOTE = ("Test data for STATE always starts "
                   "with two opening parentheses. ")
@@ -2071,6 +2190,7 @@ class Session:
         self._eval_ms = []                # timings of the latest rehearsal's tests
         self._features = []               # what the goal asks for (goalcheck.goal_features)
         self._app = False                 # building a web or command-line app
+        self._cli = False                 # ...a command-line one
         self._max_steps = MAX_PLAN_STEPS
         self._drafts = {}                 # step name -> Future of a first draft
         self._later = set()               # plan steps still to be built after this one
@@ -2099,12 +2219,34 @@ class Session:
         # It is checked exactly as written against the finished app. Nothing in the
         # harness rewrites, relaxes or drops a line of it.
         self.requirements_text = ""
+        # Integration tests of the project, in the same language. They are written by the
+        # model once (see INTEGRATION_SYSTEM) and then kept; SAVE_INTEGRATION stores new ones.
+        self.integration_text = ""
+        self.write_integration = False    # ask the model for them when the project has none
+        self.save_integration = None      # callable(text), set by whoever owns the project
+        self._integ = None                # the last run: {"results", "summary"}
         # At its spending limit an interactive build waits for the user; a build with
         # nobody to ask (a test, an experiment, the no-memory twin) stops there instead.
         self.pause_on_spend = False
         self.paused = None                # {"spent_usd", "limit_usd", "since"} while it waits
         self._resume = threading.Event()
         self._reqs = None                 # the last check: {"fingerprint", "results", "summary"}
+        self._qual = None                 # the proofs of doneness of the last check (qualify.py)
+        self._qual_said = None            # what the last announced qualification looked like
+        self._web_state = None            # a web app's stored data after the visitor checks
+        self._state_note = ""             # the app's real tables and rows, in a sentence
+        self._real_rows = {}              # the same, as the qualifier read them
+        self.connect_checks = True        # try each function of an app on the others as it is built
+        self._connect_note = {}           # name -> why it does not fit, while it is being rebuilt
+        self._reconnected = set()         # functions already rebuilt once to fit the others
+        self._connections = {}            # name -> what its latest check found
+        self._integ_covered = False       # the commands without an integration test were asked for
+        self._plan_names = set()          # the functions of the plan the integration tests were written for
+        self.goal_check = False           # review a build that is not an app against the user's words
+        self._goal = None                 # what that review found: {"met", "missing", "rounds"}
+        self._goal_missing = []           # what a round of work on the goal is about
+        self._replay_seen = 0             # the most handler tests ever replayable in this build
+        self._proving = False             # a round of fixes for failed proofs is being built
         self._deep_calls = 0
         self._built = []        # tools saved by this session: (name, tests)
         self._t0 = time.time()
@@ -2304,6 +2446,7 @@ class Session:
         _TEMP.value = temperature
         _TEMP.deep = deep
         _TEMP.think_tokens = think_tokens
+        _TEMP.no_fallback = label == "rewrite"     # a repair that thought itself out is given up, not asked plainly
         _TEMP.notify = lambda msg, **kw: self.emit("model_wait", message=msg, **kw)
         try:
             # PREFETCHED: this reply was requested earlier, alongside other drafts
@@ -2313,11 +2456,22 @@ class Session:
             _TEMP.value = None
             _TEMP.deep = False
             _TEMP.think_tokens = None
+            _TEMP.no_fallback = False
             _TEMP.images = None
         self.cost_usd += res.get("cost_usd") or 0.0
         self.input_tokens += res.get("input_tokens") or 0
         self.output_tokens += res.get("output_tokens") or 0
         self._check_cancel()              # the reply was paid for and counted; nothing is built from it
+        if res.get("thinking_exhausted"):
+            self._think["calls"] += 1
+            self._think["fallbacks"] += 1
+            self._think["reasoning_tokens"] += res.get("reasoning_tokens") or 0
+            self.emit("model_reply", text="", model=res.get("model"), input_tokens=res.get("input_tokens"),
+                      output_tokens=res.get("output_tokens"), estimated=bool(res.get("estimated")),
+                      cost_usd=res.get("cost_usd"), latency_ms=res.get("latency_ms"),
+                      finish_reason="thinking ran out", thinking=None, thinking_fallback=True,
+                      reasoning_tokens=res.get("reasoning_tokens"))
+            raise BadReply("the model's reasoning ran out before it answered")
         think = {}
         if deep:
             self._think["calls"] += 1
@@ -2353,8 +2507,13 @@ class Session:
                 self.lessons.record_harness("invalid-json-reply")
             self.model_calls += 1
             empty = not (res.get("text") or "").strip()
-            # an empty reply was not cut off: the same question is simply asked again
-            retry_text = user_text if empty else (
+            # An empty reply was not cut off, but asking the very same question again got the
+            # very same silence (live build 5ddd668f84: three in a row, twice). 30 of 353
+            # rewrite calls in the logs came back empty and none of 321 repair calls, which
+            # end by naming the JSON to return: so the retry ends that way too.
+            retry_text = (user_text + "\nYOUR PREVIOUS REPLY WAS EMPTY, which is never an answer. Reply "
+                          "now with ONE complete JSON object of the form the system message describes, "
+                          "starting with { and ending with }.") if empty else (
                 user_text + "\nYOUR PREVIOUS REPLY WAS CUT OFF OR NOT VALID "
                 "JSON (%s). Reply with ONE complete JSON object only. Close "
                 "every string with a double quote before the next } or ], "
@@ -2468,7 +2627,11 @@ class Session:
                     saved += len(note) - len(short)
                     note = short
             text = note + "\n" + text
-        if not full and any(t["name"] == "handle-request" or t.get("kit") for t in tools):
+        if not full and any(t.get("kit") for t in tools) and (
+                self._cli or any(t["name"] == "handle-command" for t in tools)) and \
+                not any(t["name"] == "handle-request" for t in tools):
+            text += "\n" + CLI_REMINDER
+        elif not full and any(t["name"] == "handle-request" or t.get("kit") for t in tools):
             text += "\n" + WEB_REMINDER
         if self.lessons is not None and not full:
             keys = self.lessons.select(self.project, self._slips, limit=2)
@@ -2529,6 +2692,7 @@ class Session:
     def _run_guarded(self):
         try:
             self._run()
+            self._review_goal()
             self._check_cancel()        # asked for during the last check: still a cancel
         except Cancelled:
             # the user's decision, not a failure: what was saved stays saved
@@ -2643,7 +2807,7 @@ class Session:
             "efficiency": self._efficiency(),
             "oracle_fixes": count("oracle_corrected") + count("oracle_reference"),
             "stopped": ({"detail": gave[-1].get("detail"),
-                         "hint": gave[-1].get("hint")} if gave else None),
+                         "hint": gave[-1].get("hint"), "app": bool(gave[-1].get("app"))} if gave else None),
             "error": errs[-1].get("message") if errs else None,
             "capability_gaps": next((e.get("gaps") for e in ev
                                      if e["kind"] == "capability_notice"), None) or [],
@@ -2668,6 +2832,7 @@ class Session:
                         "lessons": self.lessons is not None,
                         "memory": self._memory_at_start},
             "provenance": self._provenance(),
+            "qualification": self._qual,
             "recovery": {"rounds": count("recovery"),
                          "rebuilt": sorted({n for e in ev if e["kind"] == "recovery_done"
                                             for n in e.get("rebuilt") or []})},
@@ -2719,6 +2884,15 @@ class Session:
             # what the user asked for in their own words, judged by behaviour alone
             "requirements": (dict(self._reqs["summary"], fingerprint=self._reqs["fingerprint"])
                              if self._reqs else None),
+            # the verdict of the qualifier: proven, unproven or disproven, and on what basis
+            "integration": dict(self._integ["summary"]) if self._integ else None,
+            "goal": dict(self._goal) if self._goal else None,
+            "connections": ({"checked": len(self._connections),
+                             "rebuilt": sum(1 for c in self._connections.values() if c["rebuilt"]),
+                             "left": [n for n, c in self._connections.items() if c["faults"]][:8]}
+                            if self._connections else None),
+            "qualification": ({"verdict": self._qual["verdict"], "failed": self._qual["failed"],
+                               "basis": self._qual["basis"]} if self._qual else None),
         }
 
     def _missing_now(self):
@@ -2776,7 +2950,10 @@ class Session:
                 self.emit("retired", tools=[{"name": n, "reason": reasons[n]} for n in retired])
                 tools = self.registry.load()
         self.emit("registry", tools=[t["name"] for t in tools])
-        cached = self.registry.find_cached(self.prompt)
+        # An app's answer is the app, not the call of one function that happened to be built
+        # under the same prompt (live build a5a5e63eae answered "verify that the project is
+        # complete" by calling cmd-amortize and reported it done at no cost).
+        cached = None if self._has_entry() else self.registry.find_cached(self.prompt)
         if cached:
             self.emit("decision", action="cache", plan={
                 "why": "this exact prompt was solved before by tool '%s': "
@@ -2819,6 +2996,8 @@ class Session:
                      + " | ".join(g[:240] for g in earlier) + ".")
         self._app = bool(needs & {"web server", "command line"} or
                          names & {"handle-request", "handle-command"})
+        self._cli = "handle-request" not in names and bool(
+            "command line" in needs or "handle-command" in names)
         if self._app:
             self._max_steps = MAX_APP_STEPS
             note += (" This is an app: you may plan up to %d steps." % MAX_APP_STEPS)
@@ -2837,6 +3016,15 @@ class Session:
                         " These %d used classes have NO rule and render unstyled now: %s."
                         % (len(facts["missing"]), ", ".join(facts["missing"][:40]))
                         if facts["missing"] else "", facts["sheet"]))
+        if self._app and names & {"handle-request", "handle-command"}:
+            facts = self._proof_facts()
+            if facts:
+                note += (" PROOF FACTS - the saved app was tried just now and fails these; a plan that "
+                         "leaves them as they are is not done: " + " ".join(facts)[:1500])
+        note += self._shared_facts()
+        if self._app and self.use_advice:
+            note += (" Every step that reads or writes stored data states the SAME row layout in its "
+                     "spec, with one example row, so that all functions agree on it.")
         if (self.requirements_text or "").strip():
             lines = [" ".join(x.split()) for x in self.requirements_text.splitlines()
                      if x.strip() and not x.strip().startswith("#")]
@@ -2851,11 +3039,30 @@ class Session:
         # the plan decides every later call: a large goal gets a thought-out one
         plan = self._ask(self._user_prompt(note, full=True), "plan", deep=(
             self._app or len(self.prompt.split()) > THINK_PLAN_WORDS))
+        if self._app:
+            self._ensure_integration(plan)
         if plan.get("action") == "plan":
             plan = self._trim_repeat(self._cover(plan, note))
-            if not self._run_steps(plan):
+            if self._repair_only(plan):
+                self._look_problems = self._fixable()
+                self._proving = True
+                try:
+                    self._guarded_fix(self._trim_fix(plan), "fixes")
+                finally:
+                    self._proving = False
+            elif not self._run_steps(plan):
                 return
             self._recover()                  # what failed is tried again, with the evidence
+            if self._app and self._failed_steps and not self._has_entry():
+                # nothing to try the app through: the entry point itself could not be built
+                self.state = "failed"
+                self.emit("gave_up", attempts=0, app=True, detail=(
+                    "The app has no entry point yet: %s could not be built."
+                    % ", ".join(dict.fromkeys(self._failed_steps))),
+                    hint="Continue builds on the functions that are saved.")
+                return
+            if self._app:
+                self._cover_integration()    # every command the app now has is typed in a test
             if self._app and self._smoke():
                 if self._smoke_ok:
                     self._finish_app()       # it answers: check it, style it, look at it
@@ -3136,7 +3343,7 @@ class Session:
                 self._later = {(x.get("name") or "").lower() for x in steps[i:]}
                 if not self._build_step(step, 0):
                     fail = getattr(self, "_last_failure", {}) or {}
-                    if self._fixing or self._recovering or (self._app and i < len(steps)):
+                    if self._fixing or self._recovering or self._app:
                         # One part failing must not leave the app unwired: note it,
                         # build the rest, and report the gap at the end. A change
                         # asked for by the screenshot check simply stays unmade.
@@ -3150,6 +3357,7 @@ class Session:
                               hint=fail.get("hint", ""),
                               attempts=fail.get("attempts", 0), step=True)
                     return False
+                self._connect(step)
         finally:
             self._in_step = False
             self._drafts = {}
@@ -3200,6 +3408,8 @@ class Session:
                         self.emit("step", i=i + 1, n=len(steps), name=name,
                                   spec=step["spec"], lane=name)
                         ok = self._build_step(step, 0)
+                        if ok:
+                            self._connect(step)
                         if not ok:
                             out[i] = dict(self._last_failure or {})
                             self._halt = self._halt or not self._app
@@ -3231,7 +3441,7 @@ class Session:
                 # a change asked for by the screenshot check: the saved version stays
                 self._fix_failed.append(names[i])
                 self.emit("step_failed", name=names[i], detail=(fail.get("detail") or "")[:400])
-            elif self._recovering or (self._app and i < len(steps) - 1):
+            elif self._recovering or self._app:
                 # One part failing must not leave the app unwired: note it and
                 # report the gap at the end. The other lanes went on regardless.
                 self._failed_steps.append(names[i])
@@ -3351,11 +3561,41 @@ class Session:
         extra = self.BUILD_STEP
         if self._saved(step.get("name")):
             extra += self.REPLACE_STEP % (step["name"], " ".join(self.prompt.split())[:300])
-        if self._fixing and self._look_problems:
+        if self._fixing and self._look_problems and self._proving:
+            extra += (" THE APP WAS TRIED AND THESE CHECKS FAILED: %s. Fix what this function causes "
+                      "and change nothing else about it." % "; ".join(self._problems_of(step))[:1800])
+        elif self._fixing and self._look_problems:
             extra += (" SCREENSHOTS OF THE APP AS IT IS NOW SHOW THESE PROBLEMS: %s. Fix every "
                       "one of them that this function causes." % "; ".join(self._look_problems))
         extra += self._class_note(step)
+        extra += self._shared_facts()
+        if self._goal_missing:
+            extra += (" A REVIEW OF WHAT WAS BUILT AGAINST THE USER'S WORDS FOUND THIS MISSING: %s. "
+                      "This function does its part of that, and its tests show it."
+                      % "; ".join(self._goal_missing)[:900])
+        misfit = self._connect_note.get((step.get("name") or "").lower())
+        if misfit:
+            extra += (" THIS FUNCTION WAS BUILT AND PASSES ITS OWN TESTS, BUT IT DOES NOT FIT THE OTHER "
+                      "FUNCTIONS OF THE APP: %s. Rebuild it, tests included, so that it works on the data the "
+                      "other functions really produce. Change nothing else about what it does." % misfit)
         return self._user_prompt(extra, goal=step["spec"])
+
+    def _shared_facts(self):
+        """What every function of the app has to agree on: the stored data and the integration tests."""
+        said = ""
+        if self._state_note and "replay" not in ((self._qual or {}).get("failed") or ()):
+            said += (" THE APP'S STORED DATA, read from the app itself: %s. Code and test data use exactly "
+                     "these tables and row layouts; do not invent another." % self._state_note[:500])
+        elif self._app and self.connect_checks:
+            used = qualify.layout_note([t for t in self.registry.load() if not t.get("kit")])
+            if used:
+                said += (" ROW LAYOUTS THE FUNCTIONS BUILT SO FAR USE: %s. Code and test data use exactly "
+                         "these tables and row layouts; do not invent another." % used[:500])
+        lines = [x for x in (self.integration_text or "").splitlines() if x.strip()]
+        if lines:
+            said += (" THE FINISHED APP MUST PASS THESE INTEGRATION TESTS, which go through its entry "
+                     "point: " + " | ".join(lines)[:900])
+        return said
 
     def _style_facts(self, candidate=None):
         """How the saved pages and the stylesheet fit together: a dict, or None when not a web app.
@@ -3427,15 +3667,27 @@ class Session:
         if self._recovering or not isinstance(steps, list) or not self._is_repeat():
             return plan
         saved = {t["name"].lower() for t in self.registry.load() if not t.get("kit")}
-        keep, dropped = [], []
+        blamed = self._blamed()
+        keep, dropped, entries = [], [], []
         for step in steps:
             name = (step.get("name") or "").lower() if isinstance(step, dict) else ""
-            (dropped if name in saved and name not in self.ENTRY_POINTS else keep).append(step)
+            if name in self.ENTRY_POINTS and name in saved and name not in blamed:
+                entries.append(step)         # rebuilt only when something new has to be wired in
+            else:
+                # a saved function the failed proofs point at is the work, not a repeat of it
+                (dropped if name in saved and name not in blamed else keep).append(step)
+        if any((x.get("name") or "").lower() not in saved for x in keep) or not blamed:
+            keep += entries
+        else:
+            dropped += entries
         if not dropped or not keep:
             return plan                  # nothing saved was planned, or nothing would be left to do
         self.emit("plan_trimmed", kept_as_saved=[x.get("name") for x in dropped],
                   planned=[x.get("name") for x in keep if isinstance(x, dict)])
         return dict(plan, steps=keep)
+
+    def _has_entry(self):
+        return bool({t["name"] for t in self.registry.load()} & {"handle-request", "handle-command"})
 
     def _budget_left(self):
         """True while the build may still start a round of work of its own accord."""
@@ -3518,9 +3770,41 @@ class Session:
         found = lispstyle.trust_problems(
             definition, reserved=[t["name"] for t in tools if t["name"] != name])
         if found:
-            return "not allowed beside the harness's own functions: " + found[0]
+            hint = (" To read a number out of text call (number-from-string text)."
+                    if "read" in found[0] or "parse" in found[0] else "")
+            return "not allowed beside the harness's own functions: " + found[0] + "." + hint
         wrong = interfaces.call_arity_problems(definition, tools)
-        return wrong[0]["detail"] if wrong else None
+        if wrong:
+            return wrong[0]["detail"]
+        return self._idle_tests(plan)
+
+    def _idle_tests(self, plan):
+        """Why the tests of an app handler prove nothing, or None.
+
+        A function the app's entry point hands a request or a command to
+        answers with text. Tests that only check that it answers at all (expect
+        T from a type check) pass for a wrong answer as readily as for a right
+        one. At least one test has to compare the answer with something.
+        """
+        if not self._proving:
+            return None                      # asked for in a round on failed proofs; a first draft is judged by the qualifier
+        made = qualify._defun(plan)
+        tests = [t for t in plan.get("tests") or [] if isinstance(t, dict)]
+        if not made or not tests:
+            return None
+        params = made[0]
+        if not (params[-2:] == ["state", "now"] and len(params) == 3 or params == ["request", "state"]):
+            return None
+        name = plan["name"].lower()
+        for t in tests:
+            tree = qualify._parse(t.get("call"))
+            if tree is not None and qualify._says_something(tree, name, t.get("expect")):
+                return None
+        key = ":output" if params[-1] == "now" else ":body"
+        return ("every test of %s would pass whatever it answers: at least one test must compare the %s "
+                "with concrete text, for example expect the whole plist, or use a property test such as "
+                "(let ((r (%s ...))) (and (search \"Total\" (getf r %s)) t))"
+                % (plan["name"], key, plan["name"], key))
 
     def _check_app(self):
         """Zero-token checks of the finished app as a whole.
@@ -3539,6 +3823,10 @@ class Session:
                 app = mount.MountedApp(self.registry, mount.StateStore(folder / "state.sqlite"),
                                        run_lisp=self.worker_fn)
                 results = acceptance.run_scenarios(app)
+                try:
+                    self._web_state = app._state()       # the data the app kept while it was visited
+                except Exception:  # noqa: BLE001
+                    self._web_state = None
             finally:
                 shutil.rmtree(folder, ignore_errors=True)
             self._accept = dict(acceptance.summarize(results), results=results)
@@ -3546,6 +3834,314 @@ class Session:
         self._iface = interfaces.check(tools)
         self.emit("interface_check", problems=self._iface[:20])
         self._check_requirements()
+        self._check_integration()
+        self._qualify()
+
+    # Proofs that decide whether a build ends as done (the others are reported only):
+    # a look at screenshots is a model's opinion and never fails a build by itself.
+    DECIDING_PROOFS = ("answers", "wired", "commands", "replay", "state", "integration", "visitor",
+                       "fit", "requirements", "goal")
+
+    def _qualify(self, announce=True):
+        """Collect the proofs of doneness for the app as it is saved now (see qualify.py)."""
+        import mount                               # mount imports this module
+        tools = self.registry.load()
+        names = {t["name"] for t in tools}
+        planned = {(x.get("name") or "").lower() for e in self.events
+                   if e.get("kind") == "plan" and not e.get("sub") for x in e.get("steps") or []}
+        built = list(dict.fromkeys(n for n, _ in self._built if n.lower() in planned))
+        command = None
+        if "handle-command" in names:
+            folder = Path(tempfile.mkdtemp(prefix="gg-qual-"))
+            try:
+                app = mount.MountedApp(self.registry, mount.StateStore(folder / "state.sqlite"),
+                                       run_lisp=self.worker_fn)
+                command = qualify.command_proofs(tools, app.run_command, self.worker_fn,
+                                                 self.registry.prelude(), GG_CHECK, read_state=app._state)
+            except Exception as exc:  # noqa: BLE001 - a proof that cannot run proves nothing
+                command = ([{"id": "commands", "label": "Every command the app offers is one it recognises",
+                             "ok": None, "detail": "the commands could not be tried (%s)" % type(exc).__name__}], [])
+            finally:
+                shutil.rmtree(folder, ignore_errors=True)
+        self._qual = qualify.qualify(
+            tools, planned_built=built,
+            smoke_ok=bool(self._smoke_ok) if self._smoke_ran else None,
+            accept=self._accept, iface=self._iface,
+            reqs=self._reqs["summary"] if self._reqs else None,
+            screens=self._visual["done"] if self._visual["checked"] else None,
+            command=command, state=self._web_state,
+            integ=self._integ["summary"] if self._integ else None)
+        self._state_note = (self._qual.get("counts") or {}).get("state_facts") or ""
+        self._real_rows = self._qual.get("real_rows") or {}
+        look = (self._qual["verdict"], [(p["id"], p["ok"], p["detail"]) for p in self._qual["proofs"]])
+        if announce and look != self._qual_said:        # the same result is not announced twice
+            self._qual_said = look
+            self.emit("qualification", **self._qual)
+        return self._qual
+
+    def _proof_facts(self):
+        """What the app as saved fails right now, found without a model call, for the planner."""
+        try:
+            self.emit("precheck")
+            self._check_app()
+        except Exception:  # noqa: BLE001 - facts are a help to the planner, never a reason to stop
+            return []
+        facts = [text.rstrip(".") + "." for i, text in self._disproven() if i != "wired"]
+        self._behaviour_fixed = False
+        return facts
+
+    def _disproven(self):
+        """The failed proofs that decide the build, as ``[(id, sentence)]``."""
+        return [(p["id"], "%s: %s" % (p["label"], p["detail"]))
+                for p in (self._qual or {}).get("proofs", [])
+                if p["ok"] is False and p["id"] in self.DECIDING_PROOFS]
+
+    def _seal(self):
+        """A build is done only when no deciding proof failed; otherwise it says what is not shown."""
+        if not self._smoke_ran or not self._smoke_ok:
+            return
+        self._retire_orphans()
+        self._qualify()                            # with the last look at the screenshots in it
+        failed = self._disproven()
+        if failed and self.state == "running":
+            self.state, self._incomplete = "failed", True
+            self.emit("gave_up", attempts=0, app=True, detail=(
+                "Built, but not proven done. " + " ".join(text for _, text in failed)[:900]),
+                hint="Continue works on exactly these." + (
+                    " If an integration test expects the wrong thing, change or delete it under "
+                    "'Your requirements'." if any(i == "integration" for i, _ in failed) else ""))
+
+    def _ask_review(self):
+        """Ask whether what is saved does what the user asked: the list of what is missing, or None."""
+        goals = [g for g in dict.fromkeys(list(self.prior_goals or []) + [self.prompt]) if g][-4:]
+        lines = []
+        for tool in [t for t in self.registry.load() if not t.get("kit")][-24:]:
+            parts = lispstyle.defun_parts(tool.get("definition") or "")
+            lines.append("TOOL %s (%s): %s" % (tool["name"], " ".join(parts[1]) if parts else "?",
+                                              " ".join((tool.get("description") or "").split())[:160]))
+            for test in (tool.get("tests") or [])[:3]:
+                lines.append("   tested: %s => %s" % (" ".join(str(test.get("call")).split())[:220],
+                                                      " ".join(str(test.get("expect")).split())[:120]))
+        shown = next((e for e in reversed(self.events) if e["kind"] == "result"), None)
+        answer = "%s => %s" % (shown.get("call"), shown.get("value") if shown.get("ok") else
+                               "an error: %s" % str(shown.get("error"))[:160]) if shown else "nothing"
+        try:
+            reply = self._ask("WHAT THE USER ASKED (latest last):\n%s\nWHAT WAS BUILT:\n%s\n"
+                              "THE ANSWER SHOWN TO THE USER: %s" % (
+                                  "\n".join("- " + " ".join(g.split())[:500] for g in goals),
+                                  "\n".join(lines)[:6000], answer[:500]),
+                              "goal-review", system=GOAL_REVIEW_SYSTEM)
+        except BadReply:
+            return None
+        missing = reply.get("missing") if isinstance(reply, dict) else None
+        if not isinstance(missing, list):
+            return None
+        return [" ".join(str(x).split())[:300] for x in missing if str(x).strip()][:4]
+
+    def _goal_round(self, missing):
+        """Plan and build what a review found missing, then answer the user's question again."""
+        self._goal_missing = list(missing)
+        self._fixing = True                   # a part that fails is noted; what is saved stays
+        try:
+            plan = self._ask(self._user_prompt(
+                self._plan_note + " A REVIEW OF WHAT WAS BUILT AGAINST THE USER'S WORDS FOUND THIS "
+                "MISSING: %s. Plan ONLY the functions to add or change so that it is there (action "
+                "plan, at most %d steps): change a saved function under its SAME name, and put the "
+                "top-level function last." % ("; ".join(missing), self._max_steps), full=True),
+                "goal-fix", deep=True)
+            if plan.get("action") == "build":
+                plan = {"action": "plan", "steps": [{
+                    "name": plan.get("name", ""),
+                    "spec": "%s. It must also: %s" % (plan.get("description") or plan.get("name") or "",
+                                                      "; ".join(missing))}]}
+            if plan.get("action") != "plan" or not self._run_steps(plan):
+                return False
+            final = self._ask(self._user_prompt(
+                "The functions are built and saved. Now answer the user's goal: reply with action use "
+                "and ONE call of the top-level tool on the user's own example or numbers."), "final")
+            if final.get("action") == "use" and final.get("call"):
+                self._finish_call(final["call"], self.registry.prelude())
+            return True
+        finally:
+            self._fixing, self._goal_missing = False, []
+
+    def _review_goal(self):
+        """For a build that is not an app: is it what the user asked for? If not, build what is missing.
+
+        Three functions that each pass tests written by their own author are not
+        yet the calculator the user described. Live build abba36314e was asked
+        for one where "the user can give you any battery specs and you try to
+        fill in the variables", built one that needs all four values spelled
+        out, and ended as done in 3.4 seconds with nothing having read the goal
+        again. Here a reviewer call reads the goal, the functions with their
+        tests, and the answer shown. What it finds missing is planned and built
+        (at most MAX_GOAL_ROUNDS times); what is still missing after that keeps
+        the build from ending as done.
+        """
+        if not self.goal_check or self._app or not self._built or self.state != "running" \
+                or self._has_entry():
+            return
+        self.max_calls = max(self.max_calls, MAX_MODEL_CALLS_PLAN)
+        missing, rounds, asked = None, 0, 0
+        while self._budget_left():
+            found = self._ask_review()
+            if found is None:
+                break                             # no usable review: nothing is concluded from it
+            missing, asked = found, asked + 1
+            self.emit("goal_review", met=not missing, missing=missing, round=asked,
+                      fixing=bool(missing) and rounds < MAX_GOAL_ROUNDS and self._budget_left())
+            if not missing or rounds >= MAX_GOAL_ROUNDS or not self._budget_left():
+                break
+            rounds += 1
+            if not self._goal_round(missing):
+                break
+        if missing is None:
+            return
+        self._goal = {"met": not missing, "missing": missing, "rounds": rounds}
+        label = "A review of what was built against your words finds nothing missing"
+        proof = {"id": "goal", "label": label, "ok": not missing,
+                 "detail": "; ".join(missing)[:600] if missing else
+                 "the functions, their tests and the answer were read against what you asked"}
+        self._qual = {"verdict": "disproven" if missing else "proven", "proofs": [proof], "transcript": [],
+                      "failed": ["goal"] if missing else [], "counts": {}, "implicated": [], "real_rows": {},
+                      "basis": ("Not done: %s." % label.replace("finds nothing", "found something") if missing
+                                else "Proven by: %s." % label)}
+        self.emit("qualification", **self._qual)
+        if missing:
+            self.state, self._incomplete = "failed", True
+            self.emit("gave_up", attempts=0, app=True, detail=(
+                "Built, but it does not yet do what you asked: " + "; ".join(missing)[:900]),
+                hint="Continue works on exactly these.")
+
+    def _retire_orphans(self):
+        """Put away the functions that nothing in the app reaches and that this build did not make.
+
+        A step that fails after it was split leaves its parts saved; a round of
+        fixes writes a second lookup beside the first. After seven builds the
+        first live project held 82 functions of which the app reached 26; the
+        rest filled every prompt and their tests were held against the app. A
+        function a whole build did not wire in is dead code. It is retired, not
+        deleted, and the app has to answer and score as before without it.
+        """
+        try:
+            tools = self.registry.load()
+            names = {t["name"].lower() for t in tools}
+            if not (self._app and self._smoke_ok and names & {"handle-request", "handle-command"}):
+                return
+            reach = qualify.reachable(tools)
+            mine = {n.lower() for n, _ in self._built}
+            gone = {t["name"]: "nothing in the app calls it" for t in tools
+                    if not t.get("kit") and t["name"].lower() not in reach and t["name"].lower() not in mine}
+            if not gone or len(reach) < 2:
+                return
+            before, snapshot = self._app_score(), self.registry.snapshot()
+            retired = self.registry.retire(gone)
+            said, self.emit = self._qual_said, (lambda *args, **kwargs: None)   # a check of our own: not news
+            try:
+                self._smoke()
+                after = self._app_score()
+                if not (after[0] >= before[0] and after[1] <= before[1]):
+                    self.registry.restore(snapshot)
+                    self._smoke()
+                    return
+            finally:
+                del self.emit
+                self._qual_said = said
+            if retired:
+                self.emit("retired", orphans=True,
+                          tools=[{"name": n, "reason": gone[n]} for n in retired][:80])
+        except (Cancelled, BudgetExhausted):
+            raise
+        except Exception:  # noqa: BLE001 - tidying up is never a reason to stop a build
+            return
+
+    def _surface(self, plan=None):
+        """What the app offers its user, in a few lines: the planned parts and what is saved."""
+        lines = []
+        for step in (plan or {}).get("steps") or []:
+            if isinstance(step, dict) and step.get("spec"):
+                lines.append("planned: " + " ".join(str(step["spec"]).split())[:240])
+        tools = self.registry.load()
+        words = sorted(qualify.dispatch_map(tools))
+        if words:
+            lines.append("commands the app has today: " + ", ".join(words))
+        paths = sorted({p for _, p in (interfaces.routes(tools).get("handled") or []) if isinstance(p, str)})
+        if paths:
+            lines.append("pages the app has today: " + ", ".join(paths[:20]))
+        return "\n".join(lines[:16])
+
+    def _ensure_integration(self, plan=None):
+        """Have the project's integration tests written, once, before the code is."""
+        if not self.write_integration:
+            return
+        # an app is proven as a whole, so its build has a plan's budget of calls, also when
+        # the planner answered with one function (the spend and time limits still hold)
+        self.max_calls = max(self.max_calls, MAX_MODEL_CALLS_PLAN)
+        if not self._budget_left():
+            return
+        have = [x.strip() for x in (self.integration_text or "").splitlines() if x.strip()]
+        saved = {t["name"] for t in self.registry.load()}
+        planned = {(x.get("name") or "") for x in (plan or {}).get("steps") or [] if isinstance(x, dict)}
+        self._plan_names = {n.lower() for n in planned}
+        room = MAX_INTEGRATION_TOTAL - len(have)
+        if have and (not (planned - saved) or room < 1 or self._is_repeat()):
+            return                               # nothing new is being added: the tests it has stand
+        names = saved | planned
+        kind = "command-line" if "handle-command" in names else "web"
+        goals = [g for g in dict.fromkeys(list(self.prior_goals or []) + [self.prompt]) if g][-4:]
+        message = "APP KIND: %s app\nGOAL: %s\nWHAT THE APP OFFERS:\n%s" % (
+            kind, " | ".join(" ".join(g.split())[:300] for g in goals), self._surface(plan))
+        if have:
+            message = ("APP KIND: %s app\nTHE APP IS BEING EXTENDED. NEW GOAL: %s\nWHAT THE APP OFFERS:\n%s\n"
+                       "THE APP ALREADY HAS THESE TESTS, which stay as they are:\n%s\n"
+                       "Write only 1 to %d NEW lines, for what the new goal adds. Do not repeat a test." % (
+                           kind, " ".join(self.prompt.split())[:400], self._surface(plan), "\n".join(have),
+                           min(MAX_INTEGRATION_MORE, room)))
+        self._take_integration(message, have, kind,
+                               min(MAX_INTEGRATION_MORE, room) if have else MAX_INTEGRATION_TESTS)
+
+    def _run_lines(self, text):
+        """Run lines of the requirements language against the saved app: ``(results, errors)``."""
+        import mount                               # mount imports this module
+        import requirements
+        reqs, errors = requirements.parse(text)
+        folders = []
+
+        def fresh_app():
+            folder = Path(tempfile.mkdtemp(prefix="gg-req-"))
+            folders.append(folder)
+            return mount.MountedApp(self.registry, mount.StateStore(folder / "state.sqlite"),
+                                    run_lisp=self.worker_fn)
+
+        def fresh_command():
+            app = fresh_app()
+
+            def run_words(words):
+                out = app.run_command(list(words))
+                if not out.get("ok"):
+                    raise RuntimeError(out.get("error") or "the command failed")
+                return out.get("output") or ""
+            return run_words
+        names = {t["name"] for t in self.registry.load()}
+        try:
+            results = requirements.run(
+                reqs, app=fresh_app if "handle-request" in names else None,
+                command=fresh_command if "handle-command" in names else None)
+        finally:
+            for folder in folders:
+                shutil.rmtree(folder, ignore_errors=True)
+        return results, errors
+
+    def _check_integration(self):
+        """Run the project's integration tests against the finished app."""
+        import requirements
+        text = self.integration_text or ""
+        if not text.strip():
+            self._integ = None
+            return
+        results, _ = self._run_lines(text)
+        self._integ = {"results": results, "summary": requirements.summarize(results)}
+        self.emit("integration", results=results, **self._integ["summary"])
 
     def _check_requirements(self):
         """Run the user's own requirements against the finished app, as written."""
@@ -3593,7 +4189,22 @@ class Session:
     def _app_score(self):
         """``(answers, failed visitor checks)``: what a round of fixes must not make worse."""
         return (bool(self._smoke_ok), (self._accept or {}).get("failed", 0)
-                + len([r for r in self._unmet() if r.get("ok") is False]))
+                + len([r for r in self._unmet() if r.get("ok") is False])
+                + int(((self._integ or {}).get("summary") or {}).get("unmet") or 0)
+                + self._proof_debt())
+
+    def _proof_debt(self):
+        """How much the command proofs still owe: failing replays and commands that do not work.
+
+        A dispatcher rewritten so that no test can be replayed any more has not
+        fixed the failing replays, it has hidden them: they stay owed. ("wired"
+        is not counted: rebuilding a function nothing called makes nothing worse.)
+        """
+        counts = (self._qual or {}).get("counts") or {}
+        total = int(counts.get("replay_total") or 0)
+        self._replay_seen = max(self._replay_seen, total)
+        lost = self._replay_seen if self._replay_seen and not total else 0
+        return int(counts.get("replay_failed") or 0) + int(counts.get("commands_bad") or 0) + lost
 
     def _guarded_fix(self, plan, why):
         """Build PLAN as a round of fixes and keep it only if the app did not get worse.
@@ -3605,6 +4216,19 @@ class Session:
         self._fixing = True
         try:
             built = self._run_steps(plan)
+        except (BudgetExhausted, Cancelled):
+            # cut short: what the round had already saved is judged like a finished round, or a
+            # half-made change stays in the app unjudged (live build 71e6ca92e2 left an entry
+            # point behind that no longer knew four of its commands)
+            self._fixing = False
+            try:
+                self._smoke()
+                after = self._app_score()
+                if not (after[0] >= before[0] and after[1] <= before[1]):
+                    self._roll_back(snapshot, "the round of fixes was cut short and had made the app worse")
+            except Exception:  # noqa: BLE001 - the limit that was hit is what gets reported
+                pass
+            raise
         finally:
             self._fixing = False
         if not built:
@@ -3627,23 +4251,284 @@ class Session:
         self._built = [(n, t) for n, t in self._built if n not in restored]
         self._smoke()                                # the checks describe the restored app again
 
-    def _behaviour_fix(self):
-        """One round of fixes for what the zero-token checks found broken."""
+    def _fixable(self):
+        """What a round of fixes can act on right now, as sentences (empty when nothing)."""
         failed = [r for r in (self._accept or {}).get("results", []) if r.get("ok") is False]
         faults = [p for p in self._iface if p.get("kind") in ("dead-route", "method-mismatch", "arity", "missing-helper")]
         unmet = [r for r in self._unmet() if r.get("ok") is False]
-        if self._behaviour_fixed or not (failed or faults or unmet) or self.model_calls >= self.max_calls:
-            return
-        self._behaviour_fixed = True
-        # the user's own requirements come first and are quoted as written
+        unproven = [text.rstrip(".") for i, text in self._disproven()
+                    if i in ("wired", "commands", "replay", "state")]
+        unproven += ["the integration test '%s' fails (%s)" % (
+            " ".join(r["text"].split()), (r.get("detail") or "").rstrip("."))
+            for r in (self._integ or {}).get("results", []) if r.get("ok") is False][:4]
+        idle = ((self._qual or {}).get("counts") or {}).get("uncovered") or []
         found = ["the user's requirement '%s' is not met (%s)" % (
                      " ".join(r["text"].split()), (r.get("detail") or "").rstrip(".")) for r in unmet[:5]] + \
+            unproven[:5] + \
             ["%s (%s)" % (r["label"], r["detail"]) for r in failed[:4]] + \
             [p["detail"].rstrip(".") for p in faults[:4]]
+        if idle and not found:
+            # nothing fails, but nothing is shown either: the tests have to start saying something
+            found.append("the tests of the functions behind these commands would pass whatever the command "
+                         "printed: %s. Build each of those functions again under its SAME name, with the same "
+                         "behaviour and with tests that compare what it prints with concrete text"
+                         % ", ".join(idle[:6]))
+        return found
+
+    def _ready_lines(self, name, tools):
+        """The integration tests that can be run now and that go through the function NAME."""
+        lines = [x.strip() for x in (self.integration_text or "").splitlines() if x.strip()]
+        names = {t["name"].lower() for t in tools}
+        if not lines or not names & {"handle-command", "handle-request"}:
+            return []
+        if "handle-command" not in names:
+            # a page is asked for by its path; only the whole set says something about one function
+            paths = {p for _, p in (interfaces.routes(tools).get("handled") or []) if isinstance(p, str)}
+            asked = lambda line: set(re.findall(r"(?:GET|POST)\s+(/\S*)", line, re.I))  # noqa: E731
+            return [x for x in lines if name == "handle-request" and asked(x) and asked(x) <= paths]
+        by_word = {w: (info.get("handler") or "").lower() for w, info in qualify.dispatch_map(tools).items()}
+        out = []
+        for line in lines:
+            words = qualify.typed_commands([line])
+            if not words or not words <= set(by_word):
+                continue                         # it types a command the app does not have yet
+            through = qualify.reachable(tools, tuple(by_word[w] for w in words if by_word[w]))
+            if name == "handle-command" or name in through:
+                out.append(line)
+        return out
+
+    def _connect(self, step, retry=True):
+        """A quick check that the function just built fits the others; one rebuild if it does not.
+
+        Every function passes its own tests on data those tests made up. The
+        moment it is saved it is tried on what the others really produce: the
+        rows its tests assume are compared with theirs, each handler is run on
+        the state another handler really returns, and the integration tests
+        that go through it are run if the app can already run them. No model
+        call is made unless something does not fit.
+        """
+        name = (step.get("name") or "").lower()
+        if not (self._app and self.connect_checks and name):
+            return
+        faults, chains, lines = [], [], []
+        try:
+            tools = self.registry.load()
+            if not any(t["name"].lower() == name for t in tools):
+                return
+            if {t["name"].lower() for t in tools} & {"handle-request", "handle-command"}:
+                reach = qualify.reachable(tools) | {n.lower() for n, _ in self._built} | {name}
+                tools = [t for t in tools if t.get("kit") or t["name"].lower() in reach]
+            faults += qualify.layout_faults(tools, name, self._real_rows)
+            chains = qualify.chain_checks(tools, name)
+            ran = qualify.run_chains(chains, self.registry.prelude(), self.worker_fn)
+            faults += [detail for ok, detail in ran if ok is False]
+            chains = [c for c, (ok, _) in zip(chains, ran) if ok is not None]
+            lines = self._ready_lines(name, tools)
+            if lines:
+                results, _ = self._run_lines("\n".join(lines))
+                failing = [r for r in results if r.get("ok") is False]
+                if name not in ("handle-command", "handle-request") or not failing:
+                    faults += ["the integration test '%s' fails (%s)" % (
+                        " ".join(r["text"].split()), (r.get("detail") or "").rstrip(".")) for r in failing]
+                else:
+                    # the entry point only hands on: what fails behind it is told, and left to the
+                    # proof at the end, which knows which handler each test goes through
+                    self.emit("connection", name=name, chains=len(chains), lines=len(lines), entry=True,
+                              faults=["%s (%s)" % (" ".join(r["text"].split()), (r.get("detail") or "")[:160])
+                                      for r in failing][:6])
+                    self._connections[name] = {"faults": 0, "rebuilt": False}   # the integration row tells it
+                    return
+        except (Cancelled, BudgetExhausted):
+            raise
+        except Exception:  # noqa: BLE001 - a check that cannot be made is no reason to stop a build
+            return
+        faults = list(dict.fromkeys(faults))
+        again = bool(faults) and retry and not self._fixing and name not in self._reconnected \
+            and self._budget_left()
+        self.emit("connection", name=name, chains=len(chains), lines=len(lines), faults=faults[:6],
+                  rebuilding=again, second=not retry)
+        self._connections[name] = {"faults": len(faults), "rebuilt": not retry or bool(
+            (self._connections.get(name) or {}).get("rebuilt"))}
+        if not again:
+            return
+        self._reconnected.add(name)
+        self._connect_note[name] = "; ".join(faults)[:900]
+        try:
+            rebuilt = self._build_step(step, 0)
+        finally:
+            self._connect_note.pop(name, None)
+        if rebuilt:
+            self._connect(step, retry=False)
+
+    def _cover_integration(self):
+        """Ask for integration tests for the commands that no test types yet (once per build)."""
+        if not self.write_integration or self._integ_covered or not self._budget_left():
+            return
+        self._integ_covered = True
+        tools = self.registry.load()
+        have = [x.strip() for x in (self.integration_text or "").splitlines() if x.strip()]
+        room = MAX_INTEGRATION_TOTAL - len(have)
+        missing = sorted(set(qualify.dispatch_map(tools)) - qualify.typed_commands(have) - {"help"})
+        if not have or not missing or room < 1:
+            return                               # with none at all, the next build writes the first set
+        said = {t["name"].lower(): " ".join((t.get("description") or "").split())[:120] for t in tools}
+        by_word = {w: (info.get("handler") or "").lower() for w, info in qualify.dispatch_map(tools).items()}
+        limit = min(MAX_INTEGRATION_MORE, room, len(missing))
+        self._take_integration(
+            "APP KIND: command-line app\nGOAL: %s\nWHAT THE APP OFFERS:\n%s\n"
+            "THE APP ALREADY HAS THESE TESTS, which stay as they are:\n%s\n"
+            "NO TEST TYPES THESE COMMANDS YET:\n%s\n"
+            "Write 1 to %d NEW lines so that each of those commands is typed in a test, where possible "
+            "chained after a command that stores what it shows. Do not repeat a test." % (
+                " ".join(self.prompt.split())[:400], self._surface(), "\n".join(have),
+                "\n".join("%s: %s" % (w, said.get(by_word.get(w) or "", "")) for w in missing[:8]), limit),
+            have, "command-line", limit)
+
+    def _grounded(self, line, step):
+        """LINE as it may be kept: itself, or its "works" form when what it expects is a guess.
+
+        The tests are written before the code, so their author has never seen
+        what the app prints. In the first live project three of five expected a
+        heading or a format of the author's own making ("Schedule", "Report",
+        "150000,6.5,30"), the app printed its own words, and seven builds spent
+        $1.75 trying to print the guess. Text that was typed in the same line
+        has to come back; so does the name of a command in a help text, and a
+        text the goal itself puts in quotes. Anything else is not known.
+        """
+        if step.get("kind") != "command" or step.get("expect") != "prints":
+            return line
+        want = " ".join(str(step.get("value") or "").split())
+        # what was typed AFTER each command word: the word itself ("report") says nothing about the output
+        typed = " ".join(list(step.get("words") or [])[1:] + list(step.get("then") or [])[1:])
+        tools = self.registry.load()
+        commands = set(qualify.dispatch_map(tools)) | {
+            n[4:] for n in {t["name"].lower() for t in tools} | self._plan_names if n.startswith("cmd-")}
+        goals = " ".join(list(self.prior_goals or []) + [self.prompt])
+        asked = (list(step.get("then") or []) or list(step.get("words") or []) or [""])[0].lower()
+        listed = asked == "help" and want.lower() in commands      # a help text names the commands
+        if want and (want.lower() in typed.lower() or listed or '"%s"' % want in goals):
+            return line
+        return 'run "%s"%s works' % (" ".join(step["words"]), ' then run "%s"' % " ".join(step["then"])
+                                     if step.get("then") else "")
+
+    def _take_integration(self, message, have, kind, limit):
+        """Ask for integration tests and keep the lines that can be run as written."""
+        import requirements
+        try:
+            reply = self._ask(message, "integration-tests", system=INTEGRATION_SYSTEM)
+        except BadReply:
+            return
+        lines = reply.get("lines") if isinstance(reply, dict) else None
+        kept, eased = [], []
+        for line in lines if isinstance(lines, list) else []:
+            line = " ".join(str(line).split())
+            if not line or line.lower().startswith("scenario"):
+                continue
+            parsed, _ = requirements.parse(line)
+            wrong_kind = line.lower().startswith("run") != (kind == "command-line")
+            if not (len(parsed) == 1 and parsed[0].get("steps") and not wrong_kind):
+                continue                         # a line that does not parse is dropped, never guessed at
+            sure = self._grounded(line, parsed[0]["steps"][0])
+            if sure != line:
+                eased.append(line)
+            if sure not in kept + have:
+                kept.append(sure)
+        kept = kept[:limit]
+        self.emit("integration_written", lines=kept, dropped=len(lines or []) - len(kept), added=bool(have),
+                  eased=eased[:8])
+        if not kept:
+            return
+        self.integration_text = "\n".join(have + kept) + "\n"
+        if self.save_integration:
+            try:
+                self.save_integration(self.integration_text)
+            except Exception:  # noqa: BLE001 - they still count for this build
+                pass
+
+    def _integration_blame(self):
+        """The handlers of the commands that failing integration tests type."""
+        failing = [r["text"] for r in (self._integ or {}).get("results", []) if r.get("ok") is False]
+        if not failing:
+            return set()
+        tools = self.registry.load()
+        by_word = {w: info.get("handler") for w, info in qualify.dispatch_map(tools).items()}
+        typed = {m.split()[0] for text in failing for m in re.findall(r'run\s+"([^"]+)"', text) if m.split()}
+        return {by_word.get(w) for w in typed} - {None}
+
+    def _trim_fix(self, plan):
+        """Leave saved functions that no failed proof points at out of a round of fixes.
+
+        Asked to fix one command, the planner planned four, three of which had
+        just been rebuilt and worked; the round made the app worse and had to be
+        undone (live build 71b6248694). New functions and the ones the proofs
+        name stay; other saved functions are not this round's business.
+        """
+        steps = plan.get("steps")
+        blamed = self._blamed()
+        if not isinstance(steps, list) or not blamed:
+            return plan
+        saved = {t["name"].lower() for t in self.registry.load() if not t.get("kit")}
+        text = " ".join(self._look_problems or []).lower()
+        keep, dropped, entries = [], [], []
+        for step in steps:
+            name = (step.get("name") or "").lower() if isinstance(step, dict) else ""
+            mentioned = bool(name) and re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(name), text) is not None
+            wanted = name not in saved or name in blamed or mentioned
+            if name in self.ENTRY_POINTS and not wanted:
+                entries.append(step)             # needed only if something new has to be wired in
+            else:
+                (keep if wanted else dropped).append(step)
+        new = [x for x in keep if (x.get("name") or "").lower() not in saved]
+        if not keep:
+            return plan
+        keep.sort(key=lambda x: (x.get("name") or "").lower() not in self.ENTRY_POINTS)
+        # A round is judged as a whole and undone as a whole, so it is kept small: seven live
+        # builds planned five to ten handlers per round, ran out of calls inside the round and
+        # were never judged at all. What is left over is taken up by the next round.
+        later = keep[MAX_FIX_STEPS:]
+        keep = keep[:MAX_FIX_STEPS] + (entries if new else [])
+        dropped += [] if new else entries
+        if dropped or later:
+            self.emit("plan_trimmed", kept_as_saved=[x.get("name") for x in dropped],
+                      planned=[x.get("name") for x in keep if isinstance(x, dict)], fix=True,
+                      later=[x.get("name") for x in later])
+        return dict(plan, steps=keep)
+
+    def _blamed(self):
+        """The saved functions the failed proofs and the failing integration tests point at."""
+        return {n.lower() for n in (self._qual or {}).get("implicated") or []} | \
+            {n.lower() for n in self._integration_blame()}
+
+    def _repair_only(self, plan):
+        """True when PLAN only rebuilds saved functions of an app whose proofs fail."""
+        steps = plan.get("steps")
+        if not (self._app and isinstance(steps, list) and steps and self._has_entry() and self._disproven()):
+            return False
+        saved = {t["name"].lower() for t in self.registry.load()}
+        return all(isinstance(x, dict) and (x.get("name") or "").lower() in saved for x in steps)
+
+    def _problems_of(self, step):
+        """The failed checks that name the function of STEP or a command it handles; else the first two."""
+        name = (step.get("name") or "").lower()
+        words = [w for w, info in qualify.dispatch_map(self.registry.load()).items()
+                 if (info.get("handler") or "").lower() == name]
+        mine = [p for p in self._look_problems or [] if any(
+            re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(x), p.lower()) for x in [name] + words if x)]
+        return mine or list(self._look_problems or [])[:2]
+
+    def _behaviour_fix(self, round_no=1, stuck=False):
+        """One round of fixes for what the zero-token checks found broken."""
+        found = self._fixable()               # the user's own requirements come first, as written
+        if self._behaviour_fixed or not found or self.model_calls >= self.max_calls:
+            return
+        self._behaviour_fixed = True
         self._look_problems = found
-        self.emit("behaviour_fix", problems=found)
+        self.emit("behaviour_fix", problems=found, round=round_no, stuck=bool(stuck))
         plan = self._ask(self._user_prompt(
-            self._plan_note + " THE FINISHED APP WAS TRIED AND THESE CHECKS FAILED: %s. Plan "
+            self._plan_note + (" THE LAST ROUND OF FIXES LEFT EXACTLY THESE FAILURES IN PLACE, so do not "
+                               "plan it again: change the OTHER side of each mismatch, or write the "
+                               "function at fault again from nothing." if stuck else "") +
+            " THE FINISHED APP WAS TRIED AND THESE CHECKS FAILED: %s. Plan "
             "ONLY the changes that fix them (action plan, at most %d steps): name each saved "
             "function to change with its SAME name, add new ones only if needed, and include "
             "handle-request when a route is missing." % ("; ".join(found), self._max_steps),
@@ -3654,13 +4539,30 @@ class Session:
                 "spec": "%s. Fixes: %s" % (plan.get("description") or plan.get("name") or "",
                                            "; ".join(found))}]}
         if plan.get("action") == "plan":
-            self._guarded_fix(plan, "fixes")
+            plan = self._trim_fix(plan)
+            self._proving = True
+            try:
+                self._guarded_fix(plan, "fixes")
+            finally:
+                self._proving = False
 
     def _finish_app(self):
-        """After the app answers: fix what the free checks found, style it, look at it."""
-        self._behaviour_fix()
+        """After the app answers: fix what the proofs found, style it, look at it, then seal it."""
+        self.max_calls = max(self.max_calls, MAX_MODEL_CALLS_PLAN)
+        last, same = None, 0
+        for round_no in range(1, MAX_FIX_ROUNDS + 1):
+            now = self._fixable()
+            if not now or not self._budget_left():
+                break
+            same = same + 1 if now == last else 0
+            if same >= 2:
+                break                        # twice the same failures: more of the same will not help
+            last = now
+            self._behaviour_fixed = False
+            self._behaviour_fix(round_no, stuck=same > 0)
         self._style_repair()
         self._visual_review()
+        self._seal()
 
     def _style_repair(self):
         """After the app answers: give the stylesheet a rule for every class the pages use.
@@ -3754,6 +4656,15 @@ class Session:
             % (spec, fail.get("detail", "")[:400]), goal=spec), "split",
             think_tokens=THINK_TOKENS_REPAIR, deep=fail.get("cls") in THINK_CLASSES)
         subs = sp.get("steps") if sp.get("action") == "plan" else None
+        if isinstance(subs, list):
+            # Other steps of the plan are other lanes' work. A split that plans them too
+            # builds the same function twice at once (live build 5ddd668f84: the split of
+            # handle-command re-planned cmd-simulate and cmd-compare, which were failing
+            # in their own lanes at that very moment).
+            own = (step.get("name") or "").lower()
+            others = {n for n in self._lane_index if n != own}
+            subs = [x for x in subs if not (isinstance(x, dict) and
+                                            (x.get("name") or "").lower() in others)]
         if not (isinstance(subs, list) and 1 <= len(subs) <= 3 and all(
                 isinstance(x, dict) and isinstance(x.get("spec"), str)
                 for x in subs)):
@@ -3809,6 +4720,7 @@ class Session:
     def _build_loop(self, plan, prelude, goal=None, quiet=False):
         """Rehearse PLAN, repairing up to MAX_REPAIRS times. True if saved."""
         prev_got, defs_seen, rescued = {}, set(), False
+        detour = None                     # the candidate to go back to after fixing a tool it calls
         self._last_stuck = False
         for attempt in range(MAX_REPAIRS + 1):
             problem = validate_build(plan, self._frozen) or self._style_problem(plan) \
@@ -3842,8 +4754,25 @@ class Session:
                 verdict = self._rehearse(plan, self.registry.prelude())
             if verdict["ok"]:
                 broken = self._regressions(plan)
-                if not broken:
+                if not broken and detour is not None and \
+                        (plan.get("name") or "").lower() != (detour.get("name") or "").lower():
+                    # The repair fixed a tool the candidate CALLS. That tool is saved, and then the
+                    # candidate gets its turn again. (Live build 8485f34590: asked how long a
+                    # flashlight runs, the model had to teach normalize-current a unit; that
+                    # helper was saved, the calculator's new tests were dropped, and the build
+                    # answered the user with the helper's value, 200/3.)
+                    was, self._in_step = self._in_step, True      # a helper's value is not the answer
+                    try:
+                        self._promote(plan)
+                    finally:
+                        self._in_step = was
+                    self.emit("detour", fixed=plan.get("name"), back_to=detour.get("name"))
+                    plan, detour = detour, None
+                    verdict = self._rehearse(plan, self.registry.prelude())
+                    broken = self._regressions(plan) if verdict["ok"] else []
+                if verdict["ok"] and not broken:
                     return self._promote(plan)
+            if verdict["ok"]:
                 verdict = {"ok": False, "stage": "regression", "got_map": {},
                            "class": "REGRESSION",
                            "reason": "the new %s breaks %d existing test(s)"
@@ -3886,10 +4815,16 @@ class Session:
                     "Return JSON {\"action\":\"build\",\"name\":\"%s\",\"tests\":[...]} "
                     "with ONLY the tests (do not send the definition): replace "
                     "every exact-value test you cannot verify by hand with "
-                    "PROPERTY tests whose expect is T (determinism, type, range, "
-                    "length, different inputs give different results). Keep exact "
-                    "values only for results you are certain of."
-                    % (saved["definition"], saved.get("name", "")),
+                    "PROPERTY tests whose expect is T. A property test WRAPS the call in a "
+                    "condition about its result, for example (let ((r (%s ...))) (and "
+                    "(stringp (getf r :output)) (search \"Total\" (getf r :output)) t)) "
+                    "for a function that answers with a plist, or (let ((v (%s ...))) "
+                    "(and (numberp v) (< 0 v 1000))) for a number. A bare call such as "
+                    "(%s ...) that expects T is NOT a property test: it is only right "
+                    "for a function that returns T itself. Keep exact values only for "
+                    "results you are certain of."
+                    % (saved["definition"], saved.get("name", ""), saved.get("name", "f"),
+                       saved.get("name", "f"), saved.get("name", "f")),
                     goal=goal), "property-tests")
                 plan = compaction.merge_reply(saved, plan)
                 for key in ("kept", "edited", "saved_chars", "base_sha"):
@@ -4065,6 +5000,11 @@ class Session:
                 except BadReply as exc:
                     self.emit("bad_reply", reason=str(exc)[:200])
                     continue
+            if detour is None and plan.get("action") == "build" and isinstance(plan.get("name"), str) \
+                    and isinstance(kept.get("name"), str) and plan["name"].lower() != kept["name"].lower() \
+                    and re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(plan["name"].lower()),
+                                  str(kept.get("definition") or "").lower()):
+                detour = kept                 # the reply changes a tool the candidate calls
             self.emit("decision", action=plan.get("action"), plan=plan)
             if plan.get("action") != "build":
                 self._last_failure = {"detail": "the model stopped building",
@@ -4245,8 +5185,8 @@ class Session:
         direct = []
         for t in plan["tests"]:
             self._seen_expect.setdefault(t["call"], set()).add(t["expect"])
-            code = "%s\n%s\n%s\n(gg-check %s '%s)" % (
-                GG_CHECK, prelude, plan["definition"], t["call"], t["expect"])
+            code = "%s\n%s\n%s\n%s" % (
+                GG_CHECK, prelude, plan["definition"], check_form(plan.get("name"), t["call"], t["expect"]))
             self._shown[code] = "%s   ;; expect %s" % (t["call"], t["expect"])
             direct.append({"code": code, "expect": "T"})
         self._eval_ms = []
@@ -4282,7 +5222,12 @@ class Session:
                           "confidence": orc.oracle_confidence(t["call"], t["expect"])})
             if got is not None:
                 got_map[t["call"]] = got
-                detail.append("%s: got %s, expected %s" % (t["call"], got, t["expect"]))
+                bare = (t["expect"].strip().upper() == "T" and got.strip().upper() not in ("NIL", "T")
+                        and "is-t" in check_form(plan.get("name"), t["call"], t["expect"]))
+                detail.append("%s: got %s, expected %s%s" % (
+                    t["call"], got, t["expect"],
+                    " (this call returns that value, not T: compare the result with something, "
+                    "or give the value itself as the expected one)" if bare else ""))
             else:
                 detail.append("%s: %s" % (t["call"], error_cause(err)[:260]))
         drift = [i["call"] for i in infos
@@ -4321,8 +5266,8 @@ class Session:
         out, own, tampered = {}, [plan["name"]], None
         try:
             for d, t in zip(direct, plan["tests"]):
-                env = server.eval("(progn %s\n(gg-check %s '%s))"
-                                  % (plan["definition"], t["call"], t["expect"]), restore=own)
+                env = server.eval("(progn %s\n%s)" % (
+                    plan["definition"], check_form(plan.get("name"), t["call"], t["expect"])), restore=own)
                 if env.get("timed_out") or (env.get("error") or "").startswith(
                         ("the Lisp server", "sbcl executable", "failed to spawn",
                          "the definitions failed")):
@@ -4975,6 +5920,12 @@ class SessionManager:
             sess.project_note = self.project_note(project)
             sess.visual = sess.visual and bool(visual)
             sess.requirements_text = self.projects.requirements(sess.project)
+            sess.integration_text = self.projects.integration(sess.project)
+            if mode == "live":
+                sess.goal_check = True
+                sess.write_integration = True
+                sess.save_integration = (lambda text, pid=sess.project:
+                                         self.projects.set_integration(pid, text))
             if mode == "live":          # never more than what is left of the process cap
                 sess.max_usd = min(MAX_SESSION_USD, self.live_cap - self.live_spend)
                 sess.pause_on_spend = True       # at the limit it waits for the user

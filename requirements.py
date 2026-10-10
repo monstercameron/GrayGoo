@@ -25,6 +25,7 @@ Command lines (checked through the command-line app's run_words):
     run "add Buy milk" prints "Buy milk"
     run "list" does not print "x"
     run "add a" then run "list" prints "a"
+    run "add a" then run "list" works        (the commands run without an error)
 
 Sequencing: each line starts from the app's initial state and no cookies. A
 block of lines indented under a line "scenario: some name" shares state and
@@ -265,8 +266,10 @@ def _parse_command(args):
         expect, value, i = "prints", _quoted_text(args, i + 1), i + 2
     elif _word(head, "does") and _word(_arg(args, i + 1), "not") and _word(_arg(args, i + 2), "print"):
         expect, value, i = "not_prints", _quoted_text(args, i + 3), i + 4
+    elif _word(head, "works"):
+        expect, value, i = "works", "", i + 1
     else:
-        raise _Bad("after the command comes prints \"text\" or does not print \"text\"")
+        raise _Bad("after the command comes prints \"text\", does not print \"text\" or works")
     if i != len(args):
         raise _Bad("the line has words after the check that it does not use")
     return {"kind": "command", "words": words, "then": then, "expect": expect, "value": value}
@@ -489,6 +492,8 @@ def _do_command(run_words, step):
         run_words(step["words"])
         words = step["then"]
     output = str(run_words(words) or "")
+    if step["expect"] == "works":            # an error in a command is raised by run_words
+        return True, '%s ran without an error; it printed "%s".' % (label, _collapse(output)[:SNIPPET])
     found = _collapse(step["value"]) in _collapse(output)
     if step["expect"] == "prints":
         if found:

@@ -39,7 +39,7 @@ class KitTests(unittest.TestCase):
         env = ag._worker_fn("%s\n%s\n(list %s)" % (ag.GG_CHECK, prelude, " ".join(checks)))
         self.assertTrue(env.get("ok"), env.get("error"))
         results = env["return_value"].strip("()").split()
-        self.assertEqual(len(checks), 38)          # 28 + the 10 of the password-hashing tools
+        self.assertEqual(len(checks), 46)          # 28 + 10 for password hashing + 8 for number-from-string
         self.assertEqual(set(results), {"T"}, list(zip(checks, results)))
 
     def test_every_kit_tool_meets_the_house_rules_and_validates(self):

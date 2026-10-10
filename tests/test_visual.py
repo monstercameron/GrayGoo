@@ -4,6 +4,7 @@ changes is built and looked at again."""
 import http.client
 import sys
 import tempfile
+import time
 import threading
 import unittest
 from pathlib import Path
@@ -333,6 +334,114 @@ class ShotRouteTests(unittest.TestCase):
                 finally:
                     srv.shutdown()
                     srv.server_close()
+
+
+class AccountTablesOtherThanUsers(unittest.TestCase):
+    """Item 17: a login can come from any table; named account tables come first; the demo account is the last resort."""
+
+    def test_a_table_not_named_users_supplies_the_login(self):  # item 17
+        state = '(("accounts" (("ann" "ann-pass"))))'
+        self.assertEqual(visualcheck.first_user(state), ("ann", "ann-pass"))
+        self.assertEqual(visualcheck.user_candidates(state), [("ann", "ann-pass", "accounts")])
+
+    def test_a_salted_hash_row_gives_its_salt_as_the_second_string(self):  # item 17
+        self.assertEqual(visualcheck.first_user('(("users" (("bob" "s1" "9f2c"))))'), ("bob", "s1"))
+
+    def test_named_account_tables_come_before_other_tables(self):  # item 17
+        state = ('(("products" (("Widget" "10.00"))) ("members" (("mia" "m-pass"))) '
+                 '("users" (("sam" "sam-pass"))))')
+        self.assertEqual([t for _n, _s, t in visualcheck.user_candidates(state)],
+                         ["users", "members", "products"])
+
+    def test_the_demo_account_is_the_last_candidate_only(self):  # item 17
+        creds = visualcheck.credentials('(("accounts" (("ann" "ann-pass"))))')
+        self.assertEqual(creds[0], ("ann", "ann-pass"))
+        self.assertEqual(creds[-1], ("demo", "demo"))
+        self.assertEqual(creds.count(("demo", "demo")), 1)
+
+    def test_a_login_through_an_accounts_table_is_walked(self):  # item 17
+        class Accounts(FakeApp):
+            def handle(self, method, target, headers, body=b""):
+                if method == "POST" and target.split("?")[0] == "/login" and "username=user" in body.decode() \
+                        and "password=password" in body.decode():
+                    return 303, [("Location", "/"), ("Set-Cookie", "sid=abc; Path=/")], ""
+                return super().handle(method, target, headers, body)
+        pages = visualcheck.collect_pages(Accounts('(("accounts" (("user" "password"))))'), limit=2)
+        self.assertEqual([p["label"] for p in pages], ["GET / -> /login", "signed in as user: GET /"])
+
+
+class SharedWordMatcher(unittest.TestCase):
+    """Item 18: one whole-word matcher for skips; relative links are resolved; logout spellings are recognised."""
+
+    def test_whole_words_only(self):  # item 18
+        self.assertTrue(visualcheck.any_word("/sign-out", visualcheck.EXIT_WORDS))
+        self.assertTrue(visualcheck.any_word("/log_out", visualcheck.EXIT_WORDS))
+        self.assertFalse(visualcheck.any_word("/editor/add", ("edit",)))
+        self.assertFalse(visualcheck.any_word("/removal", visualcheck.DESTRUCTIVE_WORDS))
+        self.assertTrue(visualcheck.any_word("/items/3/delete", visualcheck.DESTRUCTIVE_WORDS))
+
+    def test_collect_pages_skips_leaving_and_deleting_links_and_follows_relative_ones(self):  # item 18
+        class PlainApp:
+            def __init__(self):
+                self.seen = []
+
+            def _state(self):
+                return "nil"
+
+            def handle(self, method, target, headers, body=b""):
+                self.seen.append(target)
+                if target.split("?")[0] == "/":
+                    return 200, [], ('<a href="/sign-out">x</a><a href="/log-out">y</a>'
+                                     '<a href="/removal">z</a><a href="items/9">w</a>'
+                                     '<a href="/delete/1">d</a>')
+                return 200, [], "<html><body><p>%s</p></body></html>" % target
+        app = PlainApp()
+        visualcheck.collect_pages(app, limit=4)
+        self.assertNotIn("/sign-out", app.seen)
+        self.assertNotIn("/log-out", app.seen)
+        self.assertNotIn("/delete/1", app.seen)
+        self.assertIn("/removal", app.seen)
+        self.assertIn("/items/9", app.seen)                 # a relative link, resolved against /
+
+
+class FrameworkByTag(unittest.TestCase):
+    """Item 19: a framework counts only when its name is in the href or src of a link or script tag."""
+
+    def test_a_page_that_only_mentions_bootstrap_in_text_is_judged(self):  # item 19
+        page = {"html": '<p>We do not use bootstrap.</p><style>.card{color:red}</style>'
+                        '<div class="card glass">x</div>'}
+        gaps = visualcheck.style_gaps([page])
+        self.assertFalse(gaps["framework"])
+        self.assertEqual(gaps["undefined"], ["glass"])
+
+    def test_a_stylesheet_address_that_names_the_framework_is_not_judged(self):  # item 19
+        page = {"html": '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5/dist/css/bootstrap.min.css">'
+                        '<div class="x">a</div>'}
+        self.assertTrue(visualcheck.style_gaps([page])["framework"])
+
+
+class LargeInputs(unittest.TestCase):
+    """Timing: a state or a page of 300,000 characters is read in under two seconds."""
+
+    def test_a_state_of_300000_characters_is_read_quickly(self):
+        # s_expr refuses a state over 100,000 characters (the same as before this change), so a
+        # 300,000-character state gives no candidates, quickly; a state under the cap gives them all.
+        rows = " ".join('("name%d" "pass%d")' % (n, n) for n in range(1, 300000 // 24))
+        big = '(("accounts" (%s)))' % rows
+        self.assertGreater(len(big), 200000)
+        started = time.perf_counter()
+        self.assertEqual(visualcheck.user_candidates(big), [])
+        self.assertLess(time.perf_counter() - started, 2.0)
+        small = '(("accounts" (%s)))' % " ".join('("name%d" "pass%d")' % (n, n) for n in range(1, 3000))
+        self.assertLess(len(small), 100000)
+        self.assertEqual(len(visualcheck.user_candidates(small)), 2999)
+
+    def test_a_page_of_300000_characters_is_judged_quickly(self):
+        body = "".join('<div class="c%d">x</div>' % n for n in range(1, 12000))
+        page = {"html": ("<style>.c1{color:red}</style>" + body)[:300000]}
+        started = time.perf_counter()
+        visualcheck.style_gaps([page])
+        self.assertLess(time.perf_counter() - started, 2.0)
 
 
 if __name__ == "__main__":

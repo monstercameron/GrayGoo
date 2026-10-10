@@ -20,6 +20,10 @@ from urllib.parse import urlencode, urljoin, urlsplit
 import s_expr
 
 MAX_HOPS = 4
+EXIT_WORDS = ("logout", "signout", "log out", "sign out")   # the words of leaving a session
+DESTRUCTIVE_WORDS = ("delete", "remove")                     # the words of a link that changes data
+ACCOUNT_TABLES = ("users", "accounts", "members", "people")  # tables that usually hold sign-in rows
+_WORD = re.compile(r"[a-z0-9]+")
 
 
 class _Scan(HTMLParser):
@@ -64,25 +68,69 @@ def login_form(html):
     return None
 
 
-def first_user(state_src):
-    """``(name, password)`` of the first row of the state's "users" table, or None.
+def words_of(text):
+    """The lower-case words of TEXT: runs of letters and digits, so '/', '-', '_', '?' and spaces all separate."""
+    return _WORD.findall((text or "").lower())
 
-    The apps this harness builds keep users as rows of strings in the state;
-    the first two strings of the first row are what their own login checks.
+
+def any_word(text, phrases):
+    """True when one of PHRASES occurs as whole words of TEXT.
+
+    A phrase is one word ("delete") or several words in order ("log out").
+    Whole words only: "/editor/add" has no word "edit", "/sign-out" has the
+    words "sign" and "out", and "/removal" has no word "remove".
     """
+    words = words_of(text)
+    for phrase in phrases:
+        want = words_of(phrase)
+        size = len(want)
+        if size and any(words[i:i + size] == want for i in range(len(words) - size + 1)):
+            return True
+    return False
+
+
+def _tables(state_src):
+    """``[(name, rows)]`` of the state's tables, in order; a table is a two-item list of a name and its rows."""
     try:
         state = s_expr.parse(state_src or "nil")
     except (s_expr.SExprError, ValueError, TypeError):
-        return None
+        return []
+    out = []
     for table in state if isinstance(state, list) else []:
-        if isinstance(table, list) and len(table) == 2 and \
-                isinstance(table[0], s_expr.SString) and str(table[0]).lower() == "users":
-            for row in table[1] if isinstance(table[1], list) else []:
-                texts = [str(x) for x in row if isinstance(x, s_expr.SString)] \
-                    if isinstance(row, list) else []
-                if len(texts) >= 2:
-                    return texts[0], texts[1]
-    return None
+        if isinstance(table, list) and len(table) == 2 and isinstance(table[0], s_expr.SString) \
+                and isinstance(table[1], list):
+            out.append((str(table[0]), table[1]))
+    return out
+
+
+def _rank(name):
+    lowered = name.lower()
+    return ACCOUNT_TABLES.index(lowered) if lowered in ACCOUNT_TABLES else len(ACCOUNT_TABLES)
+
+
+def user_candidates(state_src):
+    """``[(name, second_string, table)]`` for every row of the state that holds at least two strings.
+
+    The rows of the accounts-like tables (users, accounts, members, people) come
+    first, in that order; the rows of every other table follow in the state's
+    order. The apps this harness builds keep rows of strings; a row's first two
+    strings are what a login would check (a name and a password, or a name and
+    a salt). Each pair is listed once.
+    """
+    found, seen = [], set()
+    for table, rows in sorted(_tables(state_src), key=lambda t: _rank(t[0])):
+        for row in rows:
+            texts = [str(x) for x in row if isinstance(x, s_expr.SString)] if isinstance(row, list) else []
+            if len(texts) >= 2 and (texts[0], texts[1]) not in seen:
+                seen.add((texts[0], texts[1]))
+                found.append((texts[0], texts[1], table))
+    return found
+
+
+def first_user(state_src):
+    """``(name, second_string)`` of the first candidate of ``user_candidates``, or None."""
+    found = user_candidates(state_src)
+    return (found[0][0], found[0][1]) if found else None
 
 
 def _remember_cookies(jar, headers):
@@ -126,13 +174,15 @@ DEMO_USER = ("demo", "demo")     # the account an app is asked to seed, so it ca
 def credentials(state_src):
     """Name/password pairs worth trying on a login form, most likely first.
 
-    An app that stores passwords properly keeps a hash, so the password cannot
-    be read from its state; such apps are asked to seed the demo account. The
-    row's own second string is still tried first for apps that store plain text.
+    Each candidate row of the state (see ``user_candidates``) contributes its
+    own second string first, then a few guesses built from its name. The demo
+    account comes last and only as a fallback: an app that stores passwords
+    properly keeps a hash, so its password cannot be read from the state, and
+    such apps are asked to seed the demo account.
     """
-    user, out = first_user(state_src), []
-    if user:
-        out += [user, (user[0], DEMO_USER[1]), (user[0], user[0]), (user[0], "password")]
+    out = []
+    for name, second, _table in user_candidates(state_src):
+        out += [(name, second), (name, DEMO_USER[1]), (name, name), (name, "password")]
     out.append(DEMO_USER)
     return list(dict.fromkeys(out))
 
@@ -197,10 +247,11 @@ def collect_pages(app, limit=3, state_src=None):
             break
         url = urlsplit(urljoin(current["path"], href))
         low = (url.path or "").lower()
-        if url.netloc or url.scheme not in ("", "http", "https") or not low.startswith("/") or \
-                any(word in low for word in ("logout", "signout", "delete", "remove")):
+        if url.netloc or url.scheme not in ("", "http", "https") or not low.startswith("/"):
             continue
         target = url.path + ("?" + url.query if url.query else "")
+        if any_word(target, EXIT_WORDS + DESTRUCTIVE_WORDS):
+            continue
         if (target, len(jar) > 0) in seen:
             continue
         page = fetch(app, "GET", target, jar)
@@ -217,6 +268,10 @@ def collect_pages(app, limit=3, state_src=None):
 _CLASS_ATTR = re.compile(r"""class\s*=\s*\\?["']([^"'\\<>]*)""")
 _CLASS_NAME = re.compile(r"\.([A-Za-z_][\w-]*)")
 _FRAMEWORK = ("tailwindcss", "bootstrap", "bulma", "unpkg.com/tachyons")
+# The address of a stylesheet or script tag. Only these addresses name a framework:
+# a page text that merely mentions the word does not load one.
+_ASSET = re.compile(r"<(?:link|script)\b[^>]{0,500}?\b(?:href|src)\s*=\s*[\"']?([^\"'\s>]{0,300})",
+                    re.IGNORECASE)
 
 
 def css_classes(css):
@@ -225,7 +280,7 @@ def css_classes(css):
     Only selectors are read (the text before each ``{``), so a URL or a number
     such as ``0.3s`` inside a declaration is never mistaken for a class.
     """
-    found, start = [], 0
+    found, seen, start = [], set(), 0
     while True:
         opened = css.find("{", start)
         if opened < 0:
@@ -233,7 +288,8 @@ def css_classes(css):
         selector = css[max(css.rfind("}", 0, opened), css.rfind(";", 0, opened),
                            css.rfind("{", 0, opened)) + 1:opened]
         for name in _CLASS_NAME.findall(selector):
-            if name not in found:
+            if name not in seen:
+                seen.add(name)
                 found.append(name)
         start = opened + 1
     return found
@@ -241,12 +297,18 @@ def css_classes(css):
 
 def html_classes(text):
     """Class names used in ``class="..."`` attributes of TEXT (HTML, or Lisp source that builds HTML)."""
-    found = []
+    found, seen = [], set()
     for value in _CLASS_ATTR.findall(text or ""):
         for name in value.split():
-            if re.fullmatch(r"[A-Za-z_][\w-]*", name) and name not in found:
+            if re.fullmatch(r"[A-Za-z_][\w-]*", name) and name not in seen:
+                seen.add(name)
                 found.append(name)
     return found
+
+
+def _loads_framework(html):
+    """True when the page loads a CSS framework: its name is in the href or src of a link or script tag."""
+    return any(word in address.lower() for address in _ASSET.findall(html or "") for word in _FRAMEWORK)
 
 
 def style_gaps(pages):
@@ -257,18 +319,22 @@ def style_gaps(pages):
     nothing is reported for it.
     """
     undefined, defined, framework = [], [], False
+    defined_set, undefined_set = set(), set()
     for page in pages:
         html = page.get("html") or ""
-        if any(word in html.lower() for word in _FRAMEWORK):
+        if _loads_framework(html):
             framework = True
             continue
         own = []
         for block in re.findall(r"<style[^>]*>(.*?)</style>", html, re.S | re.I):
             own.extend(css_classes(block))
         for name in own:
-            if name not in defined:
+            if name not in defined_set:
+                defined_set.add(name)
                 defined.append(name)
+        own_set = set(own)
         for name in html_classes(re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.S | re.I)):
-            if name not in own and name not in undefined:
+            if name not in own_set and name not in undefined_set:
+                undefined_set.add(name)
                 undefined.append(name)
     return {"undefined": undefined, "defined": defined, "framework": framework}

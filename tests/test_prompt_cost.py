@@ -59,7 +59,7 @@ class FocusedRegistryTests(unittest.TestCase):
             self.assertNotIn("TOOL form-value", step)
             # the planner prompt is itself compacted now, so the gap is smaller than it was
             self.assertLess(len(step), 0.6 * len(plan))
-            self.assertLess(len(step), 3600)
+            self.assertLess(len(step), 3700)          # one more kit helper since: number-from-string
 
 
 class BriefLessonTests(unittest.TestCase):

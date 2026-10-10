@@ -156,7 +156,10 @@ class EmptyReplyTests(unittest.TestCase):
             sess = ag.Session("x", gen, registry=ag.ToolRegistry(Path(tmp) / "t.json"),
                               log_path=Path(tmp) / "l.jsonl")
             sess._ask("THE QUESTION", "probe")
-            self.assertEqual(prompts, ["THE QUESTION", "THE QUESTION"])       # no "cut off" complaint
+            # asked again in other words (the same words got the same silence), and no "cut off" complaint
+            self.assertEqual(prompts[0], "THE QUESTION")
+            self.assertTrue(prompts[1].startswith("THE QUESTION\nYOUR PREVIOUS REPLY WAS EMPTY"))
+            self.assertNotIn("CUT OFF", prompts[1])
             labels = [e["label"] for e in sess.events if e["kind"] == "model_call"]
             self.assertEqual(labels, ["probe", "probe (retry: empty reply)"])
             self.assertEqual([e["finish_reason"] for e in sess.events if e["kind"] == "model_reply"][0], "stop")

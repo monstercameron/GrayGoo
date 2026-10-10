@@ -404,6 +404,20 @@ HINTS = (
      "COLLECT is a LOOP keyword, not a function: write (loop for x in xs "
      "collect (f x)), never (collect ...) inside DO. To join strings with a "
      "separator use (format nil \"~{~a~^~%~}\" list)."),
+    ("constant-param", r"compiled with errors[\s\S]{0,400}\(lambda \(t[\s)]",
+     "T is the constant for true and cannot be the name of a parameter or variable: "
+     "(lambda (t) ...) does not compile. Rename it, e.g. (lambda (row) ...)."),
+    ("table-as-string", r"\(\(?\"[^\"]*\" \([\s\S]{0,300}is not a string designator",
+     "A whole table or row (a list) was compared with a string. Read the rows of a table with "
+     "(table-rows state \"name\"); to find a row compare one column of it, e.g. "
+     "(find id rows :key (function first) :test (function string=))."),
+    ("text-as-number", r"the value\s+\"[^\"]*\"\s+is not of type\s+(real|number|float|integer)",
+     "A text such as \"6.5\" was used as a number. The words the user types and the values in "
+     "stored rows are text: turn each into a number with (number-from-string text) before "
+     "calculating with it."),
+    ("number-as-text", r"the value\s+-?\d[\d.d]*\s+is not of type\s+string",
+     "A number was used where a text is needed (the value was already converted). Convert each "
+     "value exactly once, and pass text to functions that read text."),
     ("arity", r"invalid number of arguments",
      "Wrong number of arguments: check the lambda list against how the test "
      "calls it."),

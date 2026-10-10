@@ -86,7 +86,11 @@ class CoverageFlowTests(unittest.TestCase):
             {"name": "handle-delete-product", "spec": "(handle-delete-product request state) delete"},
             {"name": "initial-state", "spec": "(initial-state) three seeded products"},
             self.PARTIAL["steps"][2]]}
-        steps = [build(s["name"], '(html-page 200 "x")',
+        # the router calls every planned function: one that nothing calls would not be done
+        wired = ('(progn (css-style) (render-products-page state) (handle-login request state) '
+                 '(handle-add-product request state) (handle-edit-product request state) '
+                 '(handle-delete-product request state) (html-page 200 "x"))')
+        steps = [build(s["name"], wired if s["name"] == "handle-request" else '(html-page 200 "x")',
                        params="()" if s["name"] in ("css-style", "initial-state") else
                        ("(state)" if s["name"] == "render-products-page" else "(request state)"),
                        call="(%s)" % s["name"] if s["name"] in ("css-style", "initial-state") else

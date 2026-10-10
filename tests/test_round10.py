@@ -161,7 +161,7 @@ class PromptCompactionTests(unittest.TestCase):
     def test_a_wrong_result_still_gets_the_tracing_advice_and_both_lines(self):
         run = Run([BUILD, {"action": "stop"}]).go()
         repair = run.prompts[1][1]
-        self.assertIn("Failing tests: (page 1 2): got 9, expected T", repair)
+        self.assertIn("Failing tests: (page 1 2): got 9, expected T (this call returns that value, not T", repair)
         self.assertIn("Trace the FIRST failing test", repair)
         self.assertIn(ag.EDIT_OFFER % "page", repair)
 

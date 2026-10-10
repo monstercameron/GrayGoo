@@ -20,7 +20,8 @@ def command(body):
             "definition": '(defun handle-command (args state now) "Runs one command." '
                           '(declare (ignore state now)) (list :output %s))' % body,
             "call": "(getf (handle-command '(\"help\") '() 0) :output)",
-            "tests": [{"call": "(stringp (getf (handle-command '(\"help\") '() 0) :output))", "expect": "T"}]}
+            "tests": [{"call": "(getf (handle-command '(\"help\") '() 0) :output)",
+                       "expect": '"commands: hello, help"'}]}
 
 
 FIRST = command('(if (equal (first args) "hello") "hi" "commands: hello, help")')

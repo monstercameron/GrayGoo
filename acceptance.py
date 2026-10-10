@@ -4,15 +4,17 @@
 walk into pass/fail checks, so "the login works" is decided by signing in,
 not by a function being named handle-login: the front page opens, a wrong
 password is refused, the right one gets in, logging out really ends the
-session, the password that worked is not readable in the stored state, a form
-adds an item that is still there after a reload, an edit control changes an
-item and the change shows, a delete control removes an item, the links
-on the main page lead somewhere, and no page answers with a server error.
+session, the password that signs a user in is not readable in the stored
+state, a form adds an item that is still there after a reload, an edit
+control changes an item and the change shows, a delete control removes an item,
+the links on the main page lead somewhere, and no page answers with a server
+error.
 
 Every request goes through ``app.handle`` on the app's own state. No model
 call, browser or port is involved. A check that cannot apply (no login form,
 no user, no add form, no edit or delete control) reports ``ok=None`` instead
-of passing or failing.
+of passing or failing. Nothing here assumes what the app is about: the items
+can be posts, products, nodes or anything else the page shows.
 """
 import re
 from html.parser import HTMLParser
@@ -23,16 +25,22 @@ import visualcheck as vc
 
 MAX_DETAIL = 200
 MAX_LINKS = 6
-BANNED_FORM_WORDS = ("delete", "remove", "logout", "login", "edit")
-BANNED_LINK_WORDS = ("logout", "signout", "delete", "remove")
-EXIT_WORDS = ("logout", "signout")
+EXIT_WORDS = vc.EXIT_WORDS                     # logout, signout, log out, sign out
+DELETE_WORDS = vc.DESTRUCTIVE_WORDS            # delete, remove
+EDIT_WORDS = ("edit", "update")
+LOGIN_WORDS = ("login", "log in", "sign in")
+BANNED_FORM_WORDS = EDIT_WORDS + DELETE_WORDS + EXIT_WORDS + LOGIN_WORDS
+BANNED_LINK_WORDS = EXIT_WORDS + DELETE_WORDS
 TEXT_TYPES = ("text", "search", "number", "email", "url", "tel")
 NUMERIC_NAME = re.compile(r"price|amount|qty|quantity|count", re.IGNORECASE)
 SELECT_NAME = re.compile(r"<select[^>]*?\bname\s*=\s*[\"']?([^\"'\s>]+)", re.IGNORECASE)
-EDIT_WORDS = ("edit", "update")
-DELETE_WORDS = ("delete", "remove")
 EDITABLE_TYPES = TEXT_TYPES + ("textarea",)
-NOT_SENT_TYPES = ("submit", "button", "image", "reset", "file", "checkbox", "radio")
+NOT_SENT_TYPES = ("submit", "button", "image", "reset", "file")
+DIGIT_PATTERN = re.compile(r"[\[\]0-9\\d.+*?{},()|-]+")   # the characters of a digits-only pattern
+VOID_TAGS = frozenset(("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+                       "param", "source", "track", "wbr"))
+TEXT_LIMIT = 300                               # characters of text read for one link, form or row
+NOTE_LAST = "could not tell which control belongs to the item; used the last one"
 
 # Goal feature key (goalcheck.FEATURES) -> the scenarios that really demonstrate
 # it. A feature is True when none of its scenarios failed and at least one
@@ -74,6 +82,11 @@ class _Recorder:
 def _clip(text):
     text = " ".join(str(text).split())
     return text if len(text) <= MAX_DETAIL else text[:MAX_DETAIL - 3] + "..."
+
+
+def _with_note(text, note):
+    """TEXT with the note about which control was used, when there is one."""
+    return text + ("; " + note if note else "")
 
 
 def _target(base_path, href):
@@ -158,23 +171,43 @@ def _login_accepts(rec, ctx):
     return False, "signing in as %s did not get past the login page" % name
 
 
-def _user_rows(state_src):
-    """The rows of the state's "users" table, each as its list of strings."""
+def _stored_rows(state_src):
+    """``[(table, strings)]`` for every row of the state: a list holding two or more strings.
+
+    The table is the name of the two-item list (name and rows) the row sits in,
+    or None for a row above the tables. Every table is read, whatever its name.
+    """
     try:
         state = s_expr.parse(state_src or "nil")
     except (s_expr.SExprError, ValueError, TypeError):
         return []
-    for table in state if isinstance(state, list) else []:
-        if isinstance(table, list) and len(table) == 2 and \
-                isinstance(table[0], s_expr.SString) and str(table[0]).lower() == "users":
-            return [[str(x) for x in row if isinstance(x, s_expr.SString)]
-                    for row in (table[1] if isinstance(table[1], list) else [])
-                    if isinstance(row, list)]
-    return []
+    out = []
+
+    def walk(node, table):
+        if not isinstance(node, list):
+            return
+        if len(node) == 2 and isinstance(node[0], s_expr.SString) and isinstance(node[1], list):
+            walk(node[1], str(node[0]))
+            return
+        strings = [str(x) for x in node if isinstance(x, s_expr.SString)]
+        if len(strings) >= 2:
+            out.append((table, strings))
+        for item in node:
+            walk(item, table)
+
+    walk(state, None)
+    return out
+
+
+def _holds_both(strings, name, password):
+    """True when NAME and PASSWORD are both among STRINGS, as two separate strings."""
+    if name == password:
+        return strings.count(name) >= 2
+    return name in strings and password in strings
 
 
 def _passwords_hashed(rec, ctx):
-    """The password that signs a user in must not be readable in that user's row."""
+    """The password that signs a user in must not be readable anywhere in the stored state."""
     jar = {}
     state = rec.state()
     setup = _login_setup(rec, jar, state)
@@ -184,12 +217,11 @@ def _passwords_hashed(rec, ctx):
     if not inside:
         return None, "no sign-in worked, so no password is known to look for"
     name, password = inside["user"], inside["password"]
-    for row in _user_rows(rec.state()):
-        if row and row[0] == name and password in row[1:]:
-            return False, ("the password of %s is stored as plain text in the users table: "
-                           "store (name salt hash) made with hash-password and check it "
-                           "with password-matches-p" % name)
-    return True, "the password of %s cannot be read from the users table" % name
+    for table, strings in _stored_rows(rec.state()):
+        if _holds_both(strings, name, password):
+            return False, ("the password that signs %s in is readable in the stored data (table %s)"
+                           % (name, table or "at the top level"))
+    return True, "the password that signs %s in cannot be read in the stored data" % name
 
 
 def _logout_ends_session(rec, ctx):
@@ -198,32 +230,46 @@ def _logout_ends_session(rec, ctx):
     setup = _login_setup(rec, jar, state)
     if setup is None:
         return None, "there is no login form, so there is no logout to test"
-    inside = vc._sign_in(rec, setup[0], jar, state)
+    front = setup[0]
+    inside = vc._sign_in(rec, front, jar, state)
     if not inside:
         return None, "the visitor could not sign in, so there is no logout to test"
     exit_ = _find_exit(inside)
     if exit_ is None:
         return None, "the signed-in page has no logout link or form"
     method, target, data = exit_
+    where = inside["path"]
+    signed_in = set(vc.words_of(_visible(inside["html"])))
+    public = set(vc.words_of(_visible(front["html"])))
+    private = signed_in - public            # the words only a signed-in visitor is shown
     vc.fetch(rec, method, target, jar, form=data)
-    after = vc.fetch(rec, "GET", "/", jar)
+    after = vc.fetch(rec, "GET", where, jar)
+    if len(after["hops"]) > 1:
+        return True, "after logging out, %s leads on to %s" % (where, after["path"])
+    if after["status"] in (401, 403):
+        return True, "after logging out, %s answers %d" % (where, after["status"])
     if vc.login_form(after["html"]) is not None:
-        return True, "after logging out, the front page asks for the login again"
-    return False, "after logging out, the front page still opened without signing in"
+        return True, "after logging out, %s shows the login form" % where
+    if not private:
+        return None, ("the signed-in page shows nothing that a logged-out visitor cannot also see, "
+                      "so logging out cannot be judged")
+    still = set(vc.words_of(_visible(after["html"])))
+    kept = sum(1 for word in private if word in still) / len(private)
+    if kept >= 0.8:
+        return False, "after logging out, %s still shows the signed-in page" % where
+    return True, "after logging out, %s no longer shows the signed-in page" % where
 
 
 def _find_exit(page):
-    """``(method, target, form_data)`` of the first logout link or form on PAGE, or None."""
-    forms, links = vc.scan(page["html"])
-    for href in links:
-        target = _target(page["path"], href)
-        if any(word in _path(target).lower() for word in EXIT_WORDS):
-            return "GET", target, None
-    for form in forms:
-        action = _target(page["path"], form["action"])
-        if any(word in _path(action).lower() for word in EXIT_WORDS):
-            data = {f["name"]: f["value"] for f in form["fields"] if f["type"] == "hidden"}
-            return ("POST" if form["method"] == "post" else "GET"), action, data
+    """``(method, target, form_data)`` of the first logout link, else the first logout form, on PAGE."""
+    controls = _controls(page)
+    for control in controls:
+        if control["kind"] == "link" and _names(control, EXIT_WORDS):
+            return "GET", control["target"], None
+    for control in controls:
+        if control["kind"] == "form" and _names(control, EXIT_WORDS):
+            data = {f["name"]: f["value"] for f in control["fields"] if f["type"] == "hidden"}
+            return ("POST" if control["method"] == "post" else "GET"), control["target"], data
     return None
 
 
@@ -237,15 +283,45 @@ def _add_candidates(page, limit):
     """Up to LIMIT forms on PAGE that post text input and are not the login form."""
     selects = set(SELECT_NAME.findall(page["html"]))
     found = []
-    for form in vc.scan(page["html"])[0]:
+    for form in _controls(page):
         if len(found) >= limit:
             break
+        if form["kind"] != "form" or form["method"] != "post":
+            continue
         if any(f["type"] == "password" for f in form["fields"]):
             continue
-        if form["method"] != "post" or not _text_fields(form, selects):
+        if not _text_fields(form, selects):
             continue
         found.append(form)
     return found, selects
+
+
+def _numeric(field):
+    """True when the field takes a number. What the input declares decides; its name only when it declares nothing."""
+    declared = field.get("declared")
+    if declared:
+        return declared == "number"
+    return bool(NUMERIC_NAME.search(field["name"]))
+
+
+def _declared(kind, attrs):
+    """What an input declares about its value: "number" for a number type, a numeric inputmode, a digits-only
+    pattern, or a min, max or step; "text" for a text type named outright; None when it says nothing."""
+    pattern = attrs.get("pattern", "")
+    if kind == "number" or attrs.get("inputmode", "").lower() in ("numeric", "decimal") \
+            or any(key in attrs for key in ("min", "max", "step")) \
+            or (pattern and DIGIT_PATTERN.fullmatch(pattern) and ("\\d" in pattern or "0-9" in pattern)):
+        return "number"
+    if "type" in attrs and kind in TEXT_TYPES:
+        return "text"
+    return None
+
+
+def _refused(posted, action):
+    """True when a submission was turned away: the answer was 400 to 422, or the form posted to ACTION shows again."""
+    if 400 <= posted["status"] <= 422:
+        return True
+    return any(c["kind"] == "form" and _path(c["target"]) == _path(action) for c in _controls(posted))
 
 
 def _create_item(rec, ctx):
@@ -256,33 +332,47 @@ def _create_item(rec, ctx):
         return None, "no form on the main page takes typed input with POST"
     chosen = None
     for form in candidates:
-        action = _target(landing["path"], form["action"])
-        if not any(word in _path(action).lower() for word in BANNED_FORM_WORDS):
-            chosen = (form, action)
+        if not vc.any_word(form["target"], BANNED_FORM_WORDS):
+            chosen = form
             break
     if chosen is None:
         return None, "the only forms on the main page edit, delete or log in"
-    form, action = chosen
-    data, check = {}, None
-    for field in form["fields"]:
-        if field["type"] == "hidden":
-            data[field["name"]] = field["value"]
-    for field in _text_fields(form, selects):
-        numeric = field["type"] == "number" or NUMERIC_NAME.search(field["name"])
-        value = "42" if numeric else "gg-check-" + field["name"]
-        data[field["name"]] = value
-        if check is None and not numeric:
-            check = value
+    form, action = chosen, chosen["target"]
+    shown = _visible(landing["html"])
+    number = _fresh_number(shown)          # a number the page does not show yet, for numeric fields
+    fields = _text_fields(form, selects)
+    base = {f["name"]: f["value"] for f in form["fields"] if f["type"] in ("hidden", "checkbox", "radio")}
+    data, check = dict(base), None
+    for field in fields:
+        if _numeric(field):
+            data[field["name"]] = number
+        else:
+            value = "gg-check-" + field["name"]
+            data[field["name"]] = value
+            if check is None:
+                check = value
     if check is None:
-        check = "42"
+        check = number
     posted = vc.fetch(rec, "POST", action, jar, form=data)
     after = vc.fetch(rec, "GET", landing["path"], jar)
-    if check in after["html"]:
+    if check in _visible(after["html"]):
         ctx["created"] = {"jar": jar, "landing": landing["path"], "marker": check}
         return True, 'the form posting to %s saved an item; "%s" shows on the page' % (
             _path(action), check)
+    retried = ""
+    if any(not _numeric(f) for f in fields) and _refused(posted, action):
+        retry = dict(base)
+        for field in fields:
+            retry[field["name"]] = number
+        vc.fetch(rec, "POST", action, jar, form=retry)
+        after = vc.fetch(rec, "GET", landing["path"], jar)
+        if number in _visible(after["html"]):
+            ctx["created"] = {"jar": jar, "landing": landing["path"], "marker": number}
+            return True, ('the form posting to %s saved an item once its text fields took numbers; '
+                          '"%s" shows on the page' % (_path(action), number))
+        retried = ' (a retry with numbers in the text fields did not show "%s" either)' % number
     return False, ('the form posting to %s answered %d, and "%s" is missing from the page '
-                   "afterwards" % (_path(action), posted["status"], check))
+                   "afterwards%s" % (_path(action), posted["status"], check, retried))
 
 
 def _survives_reload(rec, ctx):
@@ -290,7 +380,7 @@ def _survives_reload(rec, ctx):
     if not created:
         return None, "no item was added, so there is nothing to look for after a reload"
     page = vc.fetch(rec, "GET", created["landing"], created["jar"])
-    if created["marker"] in page["html"]:
+    if created["marker"] in _visible(page["html"]):
         return True, '"%s" is still on the page after a reload' % created["marker"]
     return False, ('"%s" was gone after a reload, so the app did not keep the item'
                    % created["marker"])
@@ -302,50 +392,70 @@ def _words(pieces):
 
 
 class _Page(HTMLParser):
-    """The links and forms of one page, each with the table row or list item it sits in,
-    and the visible text of the whole page. Scripts and styles are not visible text."""
+    """The links and forms of one page, the visible text, and every element as a span of that text.
+
+    A control records the element it sits in, so the item that holds a marker
+    can be found: the smallest element that holds both the marker and a control.
+    The table row or list item of a control is kept for its first words.
+    """
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.controls = []     # link and form records, in document order
-        self.text = []         # visible text pieces
-        self._open = []        # (tag, record) of the rows, links and forms not yet closed
+        self.elements = []     # {"start", "end", "parent"} for each element, in the order they open
+        self.text = []         # visible text pieces, in order
+        self.flat = ""         # the visible text joined
+        self._length = 0       # characters of visible text read so far
+        self._open = []        # (tag, record, element index) of the elements not yet closed
+        self._rows = []        # records of the table rows and list items not yet closed
         self._form = None      # the form whose fields are being read
         self._field = None     # the textarea or select being read
         self._skip = 0         # depth inside script or style
 
-    def _row(self):
-        for tag, record in reversed(self._open):
-            if tag in ("tr", "li"):
-                return record
-        return None
+    def _parent(self):
+        return self._open[-1][2] if self._open else None
+
+    def _new_record(self, kind, href, method):
+        record = {"kind": kind, "href": href, "method": method, "fields": [],
+                  "first": len(self.text), "last": None, "parent": self._parent(),
+                  "row": self._rows[-1] if self._rows else None}
+        self.controls.append(record)
+        return record
 
     def handle_starttag(self, tag, attrs):
         a = {k.lower(): (v or "") for k, v in attrs}
+        record = None
         if tag in ("script", "style"):
             self._skip += 1
         elif tag in ("tr", "li"):
-            self._open.append((tag, {"texts": []}))
+            record = {"first": len(self.text), "last": None}
+            self._rows.append(record)
         elif tag == "a" and a.get("href"):
-            record = {"kind": "link", "href": a["href"], "method": "get", "fields": [],
-                      "texts": [], "row": self._row()}
-            self.controls.append(record)
-            self._open.append((tag, record))
+            record = self._new_record("link", a["href"], "get")
         elif tag == "form":
-            record = {"kind": "form", "href": a.get("action", ""),
-                      "method": (a.get("method") or "get").lower(), "fields": [],
-                      "texts": [], "row": self._row()}
-            self.controls.append(record)
-            self._open.append((tag, record))
+            record = self._new_record("form", a.get("action", ""), (a.get("method") or "get").lower())
             self._form = record
         elif tag in ("input", "textarea", "select") and self._form is not None and a.get("name"):
-            kind = (a.get("type") or "text").lower() if tag == "input" else tag
-            field = {"name": a["name"], "type": kind, "value": a.get("value", ""),
-                     "options": []}
-            self._form["fields"].append(field)
-            self._field = field if tag != "input" else None
+            self._add_field(tag, a)
         elif tag == "option" and self._field is not None and self._field["type"] == "select":
             self._field["options"].append((a.get("value", ""), "selected" in a))
+        if tag not in VOID_TAGS:
+            self.elements.append({"start": self._length, "end": None, "parent": self._parent()})
+            self._open.append((tag, record, len(self.elements) - 1))
+
+    def _add_field(self, tag, a):
+        kind = (a.get("type") or "text").lower() if tag == "input" else tag
+        if kind in ("checkbox", "radio") and "checked" not in a:
+            return                          # a browser sends a box or a radio button only when ticked
+        field = {"name": a["name"], "type": kind, "value": a.get("value", ""), "options": []}
+        if tag == "input":
+            if kind in ("checkbox", "radio"):
+                field["value"] = a["value"] if "value" in a else "on"
+            declared = _declared(kind, a)
+            if declared:
+                field["declared"] = declared
+        self._form["fields"].append(field)
+        self._field = field if tag != "input" else None
 
     def handle_endtag(self, tag):
         if tag in ("script", "style"):
@@ -356,17 +466,89 @@ class _Page(HTMLParser):
             self._form = None
         for index in range(len(self._open) - 1, -1, -1):
             if self._open[index][0] == tag:
-                del self._open[index:]
+                self._close(index)
                 break
+
+    def _close(self, index):
+        for tag, record, element in reversed(self._open[index:]):
+            self.elements[element]["end"] = self._length
+            if record is not None:
+                record["last"] = len(self.text)
+                if tag in ("tr", "li"):
+                    self._forget_row(record)
+        del self._open[index:]
+
+    def _forget_row(self, record):
+        for index in range(len(self._rows) - 1, -1, -1):
+            if self._rows[index] is record:
+                del self._rows[index]
+                return
 
     def handle_data(self, data):
         if self._skip:
             return
         self.text.append(data)
-        for _tag, record in self._open:
-            record["texts"].append(data)
+        self._length += len(data)
         if self._field is not None and self._field["type"] == "textarea":
             self._field["value"] += data
+
+    def finish(self):
+        """Close what the page left open, at the end of its text."""
+        self._close(0)
+        self.flat = "".join(self.text)
+
+    def _holder(self, element, marker):
+        """Index of the innermost element at ELEMENT or above whose text holds MARKER, or None.
+
+        The page as a whole (an element with all of the visible text) is never an item.
+        """
+        while element is not None:
+            box = self.elements[element]
+            whole_page = box["end"] - box["start"] >= len(self.flat)
+            if not whole_page and self.flat.find(marker, box["start"], box["end"]) >= 0:
+                return element
+            element = box["parent"]
+        return None
+
+    def item_element(self, marker):
+        """The smallest element that holds MARKER and at least one link or form, or None."""
+        best = None
+        for record in self.controls:
+            holder = self._holder(record["parent"], marker)
+            if holder is None:
+                continue
+            size = self.elements[holder]["end"] - self.elements[holder]["start"]
+            if best is None or size < best[0]:
+                best = (size, holder)
+        return None if best is None else best[1]
+
+    def within(self, element, container):
+        """True when ELEMENT is CONTAINER or sits inside it."""
+        while element is not None:
+            if element == container:
+                return True
+            element = self.elements[element]["parent"]
+        return False
+
+    def span_text(self, record):
+        """The words of RECORD's text, read up to TEXT_LIMIT characters."""
+        last = len(self.text) if record["last"] is None else record["last"]
+        pieces, size = [], 0
+        for index in range(record["first"], last):
+            pieces.append(self.text[index])
+            size += len(self.text[index])
+            if size >= TEXT_LIMIT:
+                break
+        return _words(pieces)
+
+    def first_text(self, record):
+        """The first piece of RECORD's text with a visible character in it, stripped, or None."""
+        last = len(self.text) if record["last"] is None else record["last"]
+        for index in range(record["first"], last):
+            piece = self.text[index].strip()
+            if piece:
+                return piece
+        return None
 
 
 def _parse(html):
@@ -374,13 +556,18 @@ def _parse(html):
     parser = _Page()
     try:
         parser.feed(html or "")
+        parser.close()
     except Exception:  # noqa: BLE001 - broken markup must not stop a check
         pass
+    parser.finish()
     return parser
 
 
 def _fields(record):
-    """The named fields of a form as ``{"name", "type", "value"}``; a select gives its choice."""
+    """The named fields of a form as ``{"name", "type", "value"}``; a select gives its choice.
+
+    A field that the input declares a number for carries ``"declared"`` as well.
+    """
     out = []
     for field in record["fields"]:
         value = field["value"]
@@ -388,35 +575,44 @@ def _fields(record):
             options = field["options"]
             chosen = [v for v, selected in options if selected] or [v for v, _ in options]
             value = chosen[0] if chosen else ""
-        out.append({"name": field["name"], "type": field["type"], "value": value})
+        item = {"name": field["name"], "type": field["type"], "value": value}
+        if "declared" in field:
+            item["declared"] = field["declared"]
+        out.append(item)
     return out
 
 
-def _controls(page):
-    """The links and forms of PAGE a visitor can follow or submit, in document order.
+def _control_records(parsed, path):
+    """The links and forms of a parsed page that a visitor can follow or submit, in document order.
 
-    Each is ``{"kind", "target", "method", "fields", "text", "row_text", "row_first"}``:
+    Each is ``{"kind", "target", "method", "fields", "text", "row_text", "row_first", "parent"}``:
     ``target`` is the path and query seen from the page, ``text`` the words
     inside the link or form, ``row_text`` the words of the table row or list item
-    it sits in, and ``row_first`` the first words of that row (the item's name).
+    it sits in, ``row_first`` the first words of that row (the item's name), and
+    ``parent`` the element it sits in (see ``_Page.item_element``).
     """
     out = []
-    for record in _parse(page["html"]).controls:
+    for record in parsed.controls:
         url = urlsplit(record["href"])
         if url.netloc or url.scheme not in ("", "http", "https"):
             continue
         row = record["row"]
-        row_texts = row["texts"] if row is not None else []
         out.append({
             "kind": record["kind"],
-            "target": _target(page["path"], record["href"]),
+            "target": _target(path, record["href"]),
             "method": record["method"],
             "fields": _fields(record),
-            "text": _words(record["texts"]),
-            "row_text": _words(row_texts),
-            "row_first": next((piece.strip() for piece in row_texts if piece.strip()), None),
+            "text": parsed.span_text(record),
+            "row_text": parsed.span_text(row) if row is not None else "",
+            "row_first": parsed.first_text(row) if row is not None else None,
+            "parent": record["parent"],
         })
     return out
+
+
+def _controls(page):
+    """The links and forms of PAGE a visitor can follow or submit, in document order (see _control_records)."""
+    return _control_records(_parse(page["html"]), page["path"])
 
 
 def _visible(html):
@@ -425,10 +621,8 @@ def _visible(html):
 
 
 def _names(control, words):
-    """True when the control's address or its words name one of WORDS."""
-    if any(word in _path(control["target"]).lower() for word in words):
-        return True
-    return any(re.search(r"\b" + word, control["text"], re.IGNORECASE) for word in words)
+    """True when the control's address (path and query) or its words name one of WORDS, as whole words."""
+    return vc.any_word(control["target"], words) or vc.any_word(control["text"], words)
 
 
 def _is_edit(control):
@@ -443,26 +637,30 @@ def _is_delete(control):
         _names(control, DELETE_WORDS)
 
 
-def _pick(controls, marker, matches):
-    """The control that belongs to the item: the first match in the row showing MARKER,
-    else the last match on the page, or None when nothing matches."""
-    found = [control for control in controls if matches(control)]
+def _pick(page, marker, matches):
+    """``(control, note, inside)`` for the item that MARKER names on PAGE.
+
+    Among the controls that MATCHES, the one inside the smallest element that
+    also holds MARKER. ``inside`` is True then. When no element holds both, the
+    last match is used, the note says so, and ``inside`` is False. ``control``
+    is None when nothing matches.
+    """
+    parsed = _parse(page["html"])
+    found = [control for control in _control_records(parsed, page["path"]) if matches(control)]
     if not found:
-        return None
+        return None, "", False
     if marker:
-        for control in found:
-            if marker in control["row_text"]:
-                return control
-    return found[-1]
+        item = parsed.item_element(marker)
+        if item is not None:
+            for control in found:
+                if parsed.within(control["parent"], item):
+                    return control, "", True
+    return found[-1], NOTE_LAST, False
 
 
 def _form_data(control):
     """What a browser sends for CONTROL: each named field with its value, buttons aside."""
     return {f["name"]: f["value"] for f in control["fields"] if f["type"] not in NOT_SENT_TYPES}
-
-
-def _numeric(field):
-    return field["type"] == "number" or bool(NUMERIC_NAME.search(field["name"]))
 
 
 def _field_to_change(control):
@@ -483,8 +681,7 @@ def _edit_form(page):
     forms = [c for c in _controls(page)
              if c["kind"] == "form" and c["method"] == "post"
              and not any(f["type"] == "password" for f in c["fields"])
-             and not any(word in _path(c["target"]).lower()
-                         for word in DELETE_WORDS + EXIT_WORDS + ("login",))
+             and not vc.any_word(c["target"], DELETE_WORDS + EXIT_WORDS + ("login",))
              and _field_to_change(c) is not None]
     for form in forms:
         if _names(form, EDIT_WORDS):
@@ -539,8 +736,7 @@ def _dead_control(html, words):
         name = hit.group(1)
         if any(w in name.lower() for w in words) and name not in scripts:
             return ("the page offers it only as a button that calls %s(...), and no script on "
-                    "the page defines %s, so the button does nothing: use a link or a POST form"
-                    % (name, name))
+                    "the page defines %s, so the button does nothing" % (name, name))
     return None
 
 
@@ -548,7 +744,7 @@ def _update_item(rec, ctx):
     created = ctx.get("created")
     jar = dict(created["jar"]) if created else {}
     main = _main_page(rec, ctx, jar)
-    control = _pick(_controls(main), created["marker"] if created else None, _is_edit)
+    control, note, _inside = _pick(main, created["marker"] if created else None, _is_edit)
     if control is None:
         dead = _dead_control(main["html"], EDIT_WORDS)
         if dead:
@@ -578,9 +774,14 @@ def _update_item(rec, ctx):
     if marker in _visible(after["html"]):
         if created:
             created["marker"] = marker
-        return True, '"%s" shows on the page after the edit' % marker
-    return False, ('the edit form posting to %s answered %d, and "%s" is missing from the page '
-                   "afterwards" % (_path(form["target"]), posted["status"], marker))
+        return True, _with_note('"%s" shows on the page after the edit' % marker, note)
+    return False, _with_note(
+        'the edit form posting to %s answered %d, and "%s" is missing from the page afterwards'
+        % (_path(form["target"]), posted["status"], marker), note)
+
+
+def _same_control(control, other):
+    return control["target"] == other["target"] and _form_data(control) == _form_data(other)
 
 
 def _delete_item(rec, ctx):
@@ -588,13 +789,15 @@ def _delete_item(rec, ctx):
     jar = dict(created["jar"]) if created else {}
     main = _main_page(rec, ctx, jar)
     marker = created["marker"] if created else None
-    control = _pick(_controls(main), marker, _is_delete)
+    control, note, inside = _pick(main, marker, _is_delete)
     if control is None:
         dead = _dead_control(main["html"], DELETE_WORDS)
         if dead:
             return False, dead
         return None, "the main page has no delete link or POST form"
-    item = marker or control["row_first"]
+    if control["kind"] == "link" and not inside:
+        return None, ("the only delete link on the main page is not inside the item the check "
+                      "found, and a link that deletes is not followed from outside its item")
     where = _path(control["target"])
     if control["kind"] == "link":
         posted = vc.fetch(rec, "GET", control["target"], jar)
@@ -603,27 +806,25 @@ def _delete_item(rec, ctx):
         posted = vc.fetch(rec, "POST", control["target"], jar, form=_form_data(control))
         what = "the delete form posting to %s" % where
     if posted["status"] == 404 or posted["status"] >= 500:
-        return False, "%s answered %d" % (what, posted["status"])
+        return False, _with_note("%s answered %d" % (what, posted["status"]), note)
     after = vc.fetch(rec, "GET", main["path"], jar)
-    if item:
-        if item in _visible(after["html"]):
-            return False, '"%s" is still on the page after %s' % (item, what)
-        return True, '"%s" is gone from the page after %s' % (item, what)
-    if any(c["target"] == control["target"] for c in _controls(after)):
-        return False, "the main page still lists %s after it was used" % what
-    return True, "%s removed its item" % what
+    if marker:
+        if marker in _visible(after["html"]):
+            return False, _with_note('"%s" is still on the page after %s' % (marker, what), note)
+        return True, _with_note('"%s" is gone from the page after %s' % (marker, what), note)
+    if any(_same_control(control, other) for other in _controls(after)):
+        return False, _with_note("the main page still lists %s after it was used" % what, note)
+    return True, _with_note("%s removed its item" % what, note)
 
 
 def _links_resolve(rec, ctx):
     jar = {}
     landing = _landing(rec, jar, rec.state())
     targets = []
-    for href in vc.scan(landing["html"])[1]:
-        if not href.startswith("/") or href.startswith("//"):
-            continue
-        target = _target(landing["path"], href)
-        if any(word in _path(target).lower() for word in BANNED_LINK_WORDS):
-            continue
+    for control in _controls(landing):
+        if control["kind"] != "link" or _names(control, BANNED_LINK_WORDS):
+            continue                                 # a link that leaves or deletes is not followed
+        target = control["target"]
         if target not in targets:
             targets.append(target)
         if len(targets) >= MAX_LINKS:
@@ -649,18 +850,19 @@ def _no_server_error(rec, ctx):
     return True, "%d requests, none answered with a server error" % len(rec.seen)
 
 
-# (id, label, function(rec, ctx) -> (ok, detail)). no-server-error reads every
-# request the earlier scenarios made, so it must stay last.
+# (id, label, function(rec, ctx) -> (ok, detail)). The labels are shown to the
+# model, so they describe what is observed and carry no design choice. no-server-error
+# reads every request the earlier scenarios made, so it must stay last.
 _SCENARIOS = (
     ("front-page", "The front page opens for a visitor", _front_page),
     ("login-rejects-wrong-password", "A wrong password is refused", _login_rejects),
-    ("login-accepts-user", "The right user name and password let the visitor in",
+    ("login-accepts-user", "A stored account signs in and gets past the login page",
      _login_accepts),
-    ("logout-ends-session", "Logging out sends the visitor back to the login page",
+    ("logout-ends-session", "After logging out, the signed-in page is no longer shown",
      _logout_ends_session),
-    ("passwords-hashed", "Passwords are stored hashed, not as plain text", _passwords_hashed),
-    ("create-item", "A visitor can add an item through a form and see it on the page",
-     _create_item),
+    ("passwords-hashed", "The password of a signed-in user is not readable in the stored data",
+     _passwords_hashed),
+    ("create-item", "A visitor can add an item and see it on the page", _create_item),
     ("state-survives-reload", "The added item is still there after a reload",
      _survives_reload),
     ("update-item", "A visitor can change an item and see the change", _update_item),

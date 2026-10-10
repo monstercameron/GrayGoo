@@ -140,6 +140,36 @@ KIT = [
                ("(join-strings '() \", \")", '""'),
                ("(join-strings '(\"solo\") \"-\")", '"solo"'),
                ("(join-strings '(\"a\" \"b\" \"c\") \" -- \")", '"a -- b -- c"')]},
+    {"name": "number-from-string",
+     "description": "The number written in TEXT, such as \"42\", \"-3\" or \"6.5\"; NIL when TEXT is not a number",
+     "definition": '''(defun number-from-string (text)
+  "The number written in TEXT, such as \\"42\\", \\"-3\\" or \\"6.5\\"; NIL when TEXT is not a number."
+  (if (numberp text)
+      text
+      (let* ((s (string-trim " " (if (stringp text) text "")))
+             (neg (and (> (length s) 0) (char= (char s 0) #\\-)))
+             (body (if (and (> (length s) 0) (find (char s 0) "+-")) (subseq s 1) s))
+             (dot (position #\\. body))
+             (whole (if dot (subseq body 0 dot) body))
+             (frac (if dot (subseq body (1+ dot)) "")))
+        (if (and (> (+ (length whole) (length frac)) 0)
+                 (every (function digit-char-p) whole)
+                 (every (function digit-char-p) frac))
+            (let ((value (+ (if (string= whole "") 0 (parse-integer whole))
+                            (if (string= frac "") 0
+                                (/ (parse-integer frac) (expt 10 (length frac)))))))
+              (if dot
+                  (float (if neg (- value) value) 1.0d0)
+                  (if neg (- value) value)))
+            nil))))''',
+     "tests": [('(number-from-string "6.5")', "6.5"),
+               ('(number-from-string "42")', "42"),
+               ('(number-from-string "-3.25")', "-3.25"),
+               ('(number-from-string " 150000 ")', "150000"),
+               ('(number-from-string ".5")', "0.5"),
+               ('(number-from-string "abc")', "NIL"),
+               ('(number-from-string "")', "NIL"),
+               ('(number-from-string "1.2.3")', "NIL")]},
     {"name": "sha256-hex",
      "description": "SHA-256 of the UTF-8 bytes of TEXT as 64 lowercase hex characters",
      "definition": '''(defun sha256-hex (text)
@@ -253,7 +283,7 @@ USAGE = (
     "(cookie-value request \"seen\"), (table-rows state \"notes\"), "
     "(with-table-rows state \"notes\" rows), (html-escape text), (html-page 200 html), "
     "(redirect-to \"/\"), (with-state response new-state), "
-    "(with-cookie response \"seen\" value), (join-strings strings separator), "
+    "(with-cookie response \"seen\" value), (join-strings strings separator), (number-from-string text), "
     "e.g. (join-strings '(\"a\" \"b\") \" \"). "
     "REQUEST is a plist, never an alist: never use ASSOC on it. STATE is a list "
     "of (name rows) tables, so test data for it always starts with two opening "
@@ -510,7 +540,7 @@ def tools():
             for t in KIT]
 
 
-STATE_NAMES = ("pair-value", "table-rows", "with-table-rows", "join-strings")   # what any stateful app needs
+STATE_NAMES = ("pair-value", "table-rows", "with-table-rows", "join-strings", "number-from-string")   # what any stateful app needs
 LOGIN_NAMES = ("sha256-hex", "hash-password", "password-matches-p")   # only for an app that asks for login
 
 

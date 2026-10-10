@@ -6,6 +6,7 @@ unittest only; no model, browser or port.
 """
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
@@ -68,7 +69,8 @@ class FakeSite:
     def __init__(self, login=True, accept_any=False, login_works=True, add_saves=True,
                  echo_once=False, dead_link=False, page_500=False, raises=False, plain=False,
                  edit_saves=True, delete_works=True, no_edit=False, no_delete=False,
-                 delete_404=False):
+                 delete_404=False, logout_works=True):
+        self.logout_works = logout_works   # False: the logout redirects but keeps the cookie
         self.plain = plain
         self.login = login
         self.accept_any = accept_any
@@ -175,6 +177,8 @@ class FakeSite:
                     return self._redirect("/", [("Set-Cookie", "session=1; Path=/")])
                 return 200, [], LOGIN_PAGE % "Those details are not right."
             return 200, [], LOGIN_PAGE % ""
+        if path == "/logout" and not self.logout_works:
+            return self._redirect("/")
         if path == "/logout":
             return self._redirect("/", [("Set-Cookie", "session=; Path=/; Max-Age=0")])
         if self.login and not signed:
@@ -277,8 +281,9 @@ class HealthyAndBrokenSites(unittest.TestCase):
     def test_a_password_readable_in_the_users_table_fails_the_hashing_check(self):
         results = by_id(acceptance.run_scenarios(FakeSite(plain=True)))
         self.assertIs(results["passwords-hashed"]["ok"], False)
-        self.assertIn("stored as plain text", results["passwords-hashed"]["detail"])
-        self.assertIn("hash-password", results["passwords-hashed"]["detail"])
+        # item 4: the detail states what was observed and names no implementation
+        self.assertIn("is readable in the stored data (table users)", results["passwords-hashed"]["detail"])
+        self.assertNotIn("hash-password", results["passwords-hashed"]["detail"])
         self.assertIs(results["login-accepts-user"]["ok"], True)      # the login itself works
 
     def test_the_hashing_check_does_not_apply_without_a_login(self):
@@ -571,7 +576,8 @@ class DeadControlTests(unittest.TestCase):
     def test_a_button_that_calls_a_function_no_script_defines_is_a_fault(self):
         said = acceptance._dead_control(self.PAGE, acceptance.EDIT_WORDS)
         self.assertIn("calls editProduct(...)", said)
-        self.assertIn("use a link or a POST form", said)
+        self.assertIn("so the button does nothing", said)      # item 10: the observation only
+        self.assertNotIn("POST form", said)
         self.assertIn("deleteProduct", acceptance._dead_control(self.PAGE, acceptance.DELETE_WORDS))
 
     def test_a_button_whose_function_is_defined_on_the_page_is_fine(self):
@@ -592,6 +598,278 @@ class DeadControlTests(unittest.TestCase):
         page = ("<button " + "x " * 20 + ">a</button>") * 20000 + "<button onclick=" * 20000
         started = time.perf_counter()
         acceptance._dead_control(page, acceptance.EDIT_WORDS)
+        self.assertLess(time.perf_counter() - started, 2.0)
+
+
+class EditorAddSite(FakeSite):
+    """The add form posts to /editor/add, a path that merely contains the word edit."""
+
+    def _home(self, cookies):
+        return super()._home(cookies).replace('action="/add"', 'action="/editor/add"')
+
+    def handle(self, method, target, headers, body=b""):
+        return super().handle(method, target.replace("/editor/add", "/add"), headers, body)
+
+
+class RelativeGoneSite(FakeSite):
+    """The main page links to a page that does not exist, by a relative address."""
+
+    def _home(self, cookies):
+        return super()._home(cookies) + '<a href="gone">Relative gone</a>'
+
+
+class RemoveAllSite(FakeSite):
+    """No row has a delete control; the page offers a destructive GET link called Remove all."""
+
+    def _row_controls(self, number):
+        return '<a href="/edit/%d">Edit</a>' % number
+
+    def _home(self, cookies):
+        return super()._home(cookies) + '<a href="/purge">Remove all</a>'
+
+
+class SameUrlDeleteSite(FakeSite):
+    """Every row posts to /delete with its own hidden id."""
+
+    def _row_controls(self, number):
+        return ('<a href="/edit/%d">Edit</a> <form method="post" action="/delete">'
+                '<input type="hidden" name="id" value="%d"><button>Delete</button></form>'
+                % (number, number))
+
+    def handle(self, method, target, headers, body=b""):
+        if method == "POST" and urlsplit(target).path == "/delete":
+            form = dict(parse_qsl(body.decode("utf-8")))
+            self.posted.append(("/delete", form))
+            self.products.pop(int(form["id"]) - 1)
+            return self._redirect("/")
+        return super().handle(method, target, headers, body)
+
+
+class NumbersOnlySite(FakeSite):
+    """POST /add refuses any title that is not a number: 422, and the form is shown again."""
+
+    def handle(self, method, target, headers, body=b""):
+        if method == "POST" and urlsplit(target).path == "/add":
+            form = dict(parse_qsl(body.decode("utf-8")))
+            if not form.get("title", "").isdigit():
+                self.posted.append(("/add", form))
+                return self._page(422, "Products", self._home(self._cookies(headers)))
+        return super().handle(method, target, headers, body)
+
+
+class FortyTwoSite(FakeSite):
+    """The page shows the number 42 somewhere else, and the add never saves."""
+
+    def _home(self, cookies):
+        return super()._home(cookies) + "<p>Showing 42 styles</p>"
+
+
+class AccountsTableSite(FakeSite):
+    """The same accounts, stored in a table called accounts instead of users."""
+
+    def _state(self):
+        return super()._state().replace('("users"', '("accounts"')
+
+
+class WholeWordMatching(unittest.TestCase):
+    """Item 1: paths and link words match whole words; every logout spelling is recognised."""
+
+    def test_editor_is_not_edit_removal_is_not_remove_and_updated_is_not_update(self):
+        editor = {"kind": "form", "method": "post", "target": "/editor/add", "text": "", "fields": []}
+        removal = {"kind": "form", "method": "post", "target": "/removal", "text": "", "fields": []}
+        updated = {"kind": "link", "method": "get", "target": "/updated", "text": "", "fields": []}
+        self.assertFalse(acceptance._is_edit(editor))
+        self.assertFalse(acceptance._is_delete(removal))
+        self.assertFalse(acceptance._is_edit(updated))
+
+    def test_each_spelling_of_logout_is_recognised(self):  # item 1
+        for href in ("/logout", "/signout", "/sign-out", "/log-out", "/sign_out"):
+            with self.subTest(href=href):
+                page = {"path": "/", "html": '<a href="%s">Leave</a>' % href}
+                self.assertEqual(acceptance._find_exit(page), ("GET", href, None))
+
+    def test_a_form_at_editor_add_is_the_create_form(self):  # item 1
+        table = by_id(acceptance.run_scenarios(EditorAddSite()))
+        self.assertIs(table["create-item"]["ok"], True, table["create-item"])
+        self.assertIs(table["update-item"]["ok"], True, table["update-item"])
+
+
+class NumericFields(unittest.TestCase):
+    """Item 2: the declared type decides; the name is only a last fallback; a refused text is retried as numbers."""
+
+    def _field(self, tag):
+        return acceptance._controls({"path": "/", "html": '<form method="post" action="/x">%s</form>'
+                                     % tag})[0]["fields"][0]
+
+    def test_a_declared_number_is_numeric_whatever_its_name(self):  # item 2
+        for tag in ('<input type="number" name="weight">',
+                    '<input type="text" inputmode="decimal" name="weight">',
+                    '<input type="text" pattern="[0-9]+" name="weight">',
+                    '<input type="text" pattern="\\d{1,3}" name="weight">',
+                    '<input type="text" min="0" name="weight">'):
+            with self.subTest(tag=tag):
+                self.assertTrue(acceptance._numeric(self._field(tag)))
+
+    def test_a_declared_text_is_text_whatever_its_name(self):  # item 2
+        self.assertFalse(acceptance._numeric(self._field('<input type="text" name="price">')))
+        self.assertFalse(acceptance._numeric(self._field('<input type="text" pattern="[a-z]+" name="count">')))
+
+    def test_the_name_decides_only_when_the_input_declares_nothing(self):  # item 2
+        self.assertTrue(acceptance._numeric(self._field('<input name="unit_price">')))
+        self.assertFalse(acceptance._numeric(self._field('<input name="weight">')))
+
+    def test_a_refused_text_is_retried_with_numbers_and_passes(self):  # item 2
+        table = by_id(acceptance.run_scenarios(NumbersOnlySite()))
+        self.assertIs(table["create-item"]["ok"], True, table["create-item"])
+        self.assertIn("numbers", table["create-item"]["detail"])
+        self.assertIs(table["state-survives-reload"]["ok"], True)
+
+    def test_a_site_that_refuses_numbers_too_still_fails(self):  # item 2
+        class Refuses(FakeSite):
+            def handle(self, method, target, headers, body=b""):
+                if method == "POST" and urlsplit(target).path == "/add":
+                    return self._page(422, "Products", self._home(self._cookies(headers)))
+                return super().handle(method, target, headers, body)
+        table = by_id(acceptance.run_scenarios(Refuses()))
+        self.assertIs(table["create-item"]["ok"], False)
+        self.assertIn("retry", table["create-item"]["detail"])
+
+
+class CheckedBoxes(unittest.TestCase):
+    """Item 3: a ticked box or a selected radio is sent with its value; an unticked one is not."""
+
+    def test_a_checked_box_is_sent_and_an_unticked_one_is_not(self):  # item 3
+        html = ('<form method="post" action="/save"><input type="checkbox" name="done" checked>'
+                '<input type="checkbox" name="public" value="yes" checked>'
+                '<input type="checkbox" name="off"><input type="radio" name="size" value="s" checked>'
+                '<input type="radio" name="size2" value="m"></form>')
+        control = acceptance._controls({"path": "/", "html": html})[0]
+        self.assertEqual(acceptance._form_data(control), {"done": "on", "public": "yes", "size": "s"})
+
+
+class StoredPasswords(unittest.TestCase):
+    """Item 4: every table is searched; no table name is assumed; the detail names no implementation."""
+
+    def test_a_plain_password_in_an_accounts_table_fails(self):  # item 4
+        table = by_id(acceptance.run_scenarios(AccountsTableSite(plain=True)))
+        self.assertIs(table["passwords-hashed"]["ok"], False)
+        self.assertIn("(table accounts)", table["passwords-hashed"]["detail"])
+        self.assertNotIn("hash-password", table["passwords-hashed"]["detail"])
+
+    def test_salt_and_hash_in_an_accounts_table_pass(self):  # item 4
+        table = by_id(acceptance.run_scenarios(AccountsTableSite()))
+        self.assertIs(table["passwords-hashed"]["ok"], True)
+
+    def test_a_name_and_password_as_separate_strings_are_both_needed(self):  # item 4
+        self.assertFalse(acceptance._holds_both(["user", "s4lt"], "user", "password"))  # no password stored
+        self.assertTrue(acceptance._holds_both(["user", "password"], "user", "password"))
+        self.assertFalse(acceptance._holds_both(["demo", "s1", "9f2c"], "demo", "demo"))
+        self.assertTrue(acceptance._holds_both(["demo", "demo", "x"], "demo", "demo"))
+
+
+class FoundItemNumbers(unittest.TestCase):
+    """Item 5: the number checked is a fresh one, never a bare 42."""
+
+    def test_a_42_already_on_the_page_does_not_count_as_the_new_item(self):  # item 5
+        table = by_id(acceptance.run_scenarios(FortyTwoSite(add_saves=False)))
+        self.assertIs(table["create-item"]["ok"], False, table["create-item"])
+        self.assertNotIn('"42"', table["create-item"]["detail"])
+
+
+class ItemContainers(unittest.TestCase):
+    """Item 6: the control of an item is the one in the smallest element holding the marker."""
+
+    DIVS = ('<div class="item"><span>Acme</span><a href="/edit/1">Edit</a></div>'
+            '<div class="item"><span>Beta</span><a href="/edit/2">Edit</a></div>')
+
+    def test_the_control_inside_the_marked_div_is_chosen(self):  # item 6
+        control, note, inside = acceptance._pick({"path": "/", "html": self.DIVS}, "Beta",
+                                                 acceptance._is_edit)
+        self.assertEqual(control["target"], "/edit/2")
+        self.assertEqual(note, "")
+        self.assertTrue(inside)
+
+    def test_without_a_container_the_last_control_is_used_and_the_detail_says_so(self):  # item 6
+        control, note, inside = acceptance._pick({"path": "/", "html": self.DIVS}, "Zeta",
+                                                 acceptance._is_edit)
+        self.assertEqual(control["target"], "/edit/2")
+        self.assertIn("could not tell which control belongs to the item; used the last one", note)
+        self.assertFalse(inside)
+
+    def test_delete_in_articles_and_sections_finds_the_marked_one(self):  # item 6
+        html = ('<article><p>One</p><form method="post" action="/delete/1"><button>Delete</button>'
+                '</form></article><section><p>Two</p><form method="post" action="/delete/2">'
+                "<button>Delete</button></form></section>")
+        control, _note, _inside = acceptance._pick({"path": "/", "html": html}, "Two",
+                                                   acceptance._is_delete)
+        self.assertEqual(control["target"], "/delete/2")
+
+
+class DeleteJudgedByItem(unittest.TestCase):
+    """Item 7: with no added item, a delete is judged by the item's form, not by its shared address."""
+
+    def test_rows_that_post_to_one_address_do_not_fail_the_delete(self):  # item 7
+        site = SameUrlDeleteSite(add_saves=False)
+        site.products = [WIDGET, ("Gadget", "5.00", "d")]
+        table = by_id(acceptance.run_scenarios(site))
+        self.assertIs(table["delete-item"]["ok"], True, table["delete-item"])
+        self.assertEqual(site.products, [WIDGET])
+
+
+class DestructiveLinks(unittest.TestCase):
+    """Item 8: a destructive GET link outside the item is never followed."""
+
+    def test_a_remove_all_link_is_not_followed(self):  # item 8
+        site = RemoveAllSite()
+        table = by_id(acceptance.run_scenarios(site))
+        self.assertIsNone(table["delete-item"]["ok"], table["delete-item"])
+        self.assertNotIn(("GET", "/purge"), site.requests)      # not followed by any scenario
+
+
+class RelativeLinks(unittest.TestCase):
+    """Item 9: a relative link is resolved against the page it is on."""
+
+    def test_a_broken_relative_link_fails_links_resolve(self):  # item 9
+        table = by_id(acceptance.run_scenarios(RelativeGoneSite()))
+        self.assertIs(table["links-resolve"]["ok"], False)
+        self.assertIn("/gone (404)", table["links-resolve"]["detail"])
+
+
+class LogoutComparison(unittest.TestCase):
+    """Item 11: after logging out, the signed-in content must be gone; a page that still shows it fails."""
+
+    def test_a_logout_that_keeps_the_signed_in_page_fails(self):  # item 11
+        table = by_id(acceptance.run_scenarios(FakeSite(logout_works=False)))
+        self.assertIs(table["logout-ends-session"]["ok"], False, table["logout-ends-session"])
+        self.assertIn("still shows the signed-in page", table["logout-ends-session"]["detail"])
+
+    def test_a_logout_that_redirects_to_the_login_passes(self):  # item 11
+        table = by_id(acceptance.run_scenarios(FakeSite()))
+        self.assertIs(table["logout-ends-session"]["ok"], True)
+
+
+class FactualLabels(unittest.TestCase):
+    """Item 12: labels shown to the model are factual and carry no design words."""
+
+    def test_no_label_names_a_design_choice(self):  # item 12
+        for _id, label, _fn in acceptance._SCENARIOS:
+            for word in ("through a form", "user name and password", "hashed"):
+                self.assertNotIn(word, label.lower(), label)
+
+
+class LargePage(unittest.TestCase):
+    """Timing: a page of 300,000 characters is read, its controls found and an item picked in under two seconds."""
+
+    def test_a_page_of_300000_characters_is_handled_in_under_two_seconds(self):
+        rows = "".join(
+            '<tr><td>item %d</td><td><a href="/edit/%d">Edit</a> <form method="post" '
+            'action="/delete/%d"><input type="hidden" name="id" value="%d"><button>Delete</button>'
+            "</form></td></tr>" % (n, n, n, n) for n in range(1, 2000))
+        page = {"path": "/", "html": ("<table>" + rows + "</table>")[:300000]}
+        started = time.perf_counter()
+        acceptance._visible(page["html"])
+        acceptance._controls(page)
+        acceptance._pick(page, "item 900", acceptance._is_delete)
         self.assertLess(time.perf_counter() - started, 2.0)
 
 

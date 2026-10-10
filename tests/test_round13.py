@@ -160,7 +160,10 @@ class GuardedFixTests(Base):
     PLAN = {"action": "plan", "steps": [{"name": "page", "spec": "(page x) -> page"}]}
 
     def _app(self, replies):
-        sess = self.session(replies, tools=[ROUTER, {"name": "page", "definition": "(defun page (x) :old)"}])
+        # the router calls page: a planned function nothing calls would fail the build's proof of doneness
+        router = {"name": "handle-request", "definition":
+                  "(defun handle-request (request state) (page 1) (list :status 200 :body \"x\"))"}
+        sess = self.session(replies, tools=[router, {"name": "page", "definition": "(defun page (x) :old)"}])
         sess._app, sess.max_calls = True, 20
         sess._smoke()
         return sess
@@ -220,7 +223,8 @@ class GuardedFixTests(Base):
         sess._behaviour_fix()
         self.assertIn("THE FINISHED APP WAS TRIED AND THESE CHECKS FAILED: an item can be added "
                       "(the added item did not appear).", self.prompts[0])
-        self.assertIn("SHOW THESE PROBLEMS: an item can be added", self.prompts[1])       # the step is told too
+        self.assertIn("THE APP WAS TRIED AND THESE CHECKS FAILED: an item can be added",
+                      self.prompts[1])                                # the step is told too
         self.assertIn(":fixed", next(t for t in sess.registry.load() if t["name"] == "page")["definition"])
         calls = sess.model_calls
         sess._behaviour_fix()                                         # once per build

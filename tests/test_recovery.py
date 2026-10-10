@@ -27,8 +27,11 @@ RIGHT = ('(defun parse-rate (s) "Reads a decimal number from a string." '
 TESTS = [{"call": '(parse-rate "6.5")', "expect": "6.5"}, {"call": '(parse-rate "7")', "expect": "7"}]
 COMMAND = {"action": "build", "name": "handle-command", "description": "Runs one command",
            "definition": '(defun handle-command (args state now) "Runs one command." '
-                         '(declare (ignore state now)) (list :output (if (equal (first args) "help") '
-                         '"commands: rate, help" "unknown command, try help")))',
+                         '(declare (ignore state now)) (list :output (cond '
+                         '((equal (first args) "help") "commands: rate, help") '
+                         '((equal (first args) "rate") (if (second args) '
+                         '(format nil "monthly ~a" (/ (parse-rate (second args)) 12)) "usage: rate NUMBER")) '
+                         '(t "unknown command, try help"))))',
            "call": "(getf (handle-command '(\"help\") '() 0) :output)",
            "tests": [{"call": "(getf (handle-command '(\"help\") '() 0) :output)",
                       "expect": '"commands: rate, help"'}]}

@@ -460,6 +460,25 @@ def dispatch(method, path, body, ctx):
                     return 400, {"error": "invalid JSON body"}
                 return 200, mounts.command(pid, payload.get("args")
                                            if isinstance(payload, dict) else None)
+            if pid and pid.endswith("/integration"):
+                pid = pid[:-len("/integration")]
+                if not agent.projects.exists(pid) and pid != "scratch":
+                    return 404, {"error": "unknown project"}
+                import requirements as user_requirements
+                if method == "PUT" or method == "POST":
+                    try:
+                        payload = json.loads(body.decode("utf-8") if body else "{}")
+                    except (ValueError, UnicodeDecodeError):
+                        return 400, {"error": "invalid JSON body"}
+                    ok, err = agent.projects.set_integration(
+                        pid, payload.get("text") if isinstance(payload, dict) else None)
+                    if not ok:
+                        return 400, {"error": err}
+                elif method != "GET":
+                    return 404, {"error": "unknown endpoint"}
+                text = agent.projects.integration(pid)
+                parsed, errors = user_requirements.parse(text)
+                return 200, {"text": text, "count": len(parsed), "errors": errors[:20]}
             if pid and pid.endswith("/requirements"):
                 pid = pid[:-len("/requirements")]
                 if not agent.projects.exists(pid) and pid != "scratch":
@@ -479,7 +498,8 @@ def dispatch(method, path, body, ctx):
                 text = agent.projects.requirements(pid)
                 parsed, errors = user_requirements.parse(text)
                 return 200, {"text": text, "count": len(parsed), "errors": errors[:20],
-                             "fingerprint": user_requirements.fingerprint(text)}
+                             "fingerprint": user_requirements.fingerprint(text),
+                             "integration": agent.projects.integration(pid)}
             if pid and pid.endswith("/mount"):
                 pid = pid[:-len("/mount")]
                 if not agent.projects.exists(pid):

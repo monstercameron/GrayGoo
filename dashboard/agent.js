@@ -2415,6 +2415,25 @@
       else if (rqNo > 0) row(BAD, "v-warn", rqMet + " of your " + rq.total + " requirements met; " + rqNo + " could not be checked (see the lines marked in Your requirements)");
       else row(OK, "v-ok", "all " + rq.total + " of your own requirements are met, checked as you wrote them");
     }
+    var gl = v.goal && typeof v.goal === "object" ? v.goal : null;
+    if (gl) {
+      var glMissing = Array.isArray(gl.missing) ? gl.missing : [];
+      if (glMissing.length) row(BAD, "v-warn", "a review against your words found this missing: " + glMissing.slice(0, 3).join("; "));
+      else row(OK, "v-ok", "a review of the functions, their tests and the answer against your words found nothing missing" + (gl.rounds ? " (after " + gl.rounds + " round" + (gl.rounds === 1 ? "" : "s") + " of building what was missing)" : ""));
+    }
+    var cn = v.connections && typeof v.connections === "object" ? v.connections : null;
+    if (cn && cn.checked > 0) {
+      var cnLeft = Array.isArray(cn.left) ? cn.left : [];
+      if (cnLeft.length) row(BAD, "v-warn", cnLeft.length + " of " + cn.checked + " functions did not fit the others when tried on their real data: " + cnLeft.slice(0, 4).join(", "));
+      else row(OK, "v-ok", "each of the " + cn.checked + " functions was tried on the others' real data as it was built" + (cn.rebuilt ? " (" + cn.rebuilt + " rebuilt to fit)" : ""));
+    }
+    var it = v.integration && typeof v.integration === "object" ? v.integration : null;
+    if (it && it.total > 0) {
+      if (it.unmet > 0) row(BAD, "v-warn", it.unmet + " of " + it.total + " integration tests fail" +
+        (Array.isArray(it.unmet_texts) && it.unmet_texts.length ? ": " + it.unmet_texts.slice(0, 3).join("; ") : ""));
+      else if (it.met > 0) row(OK, "v-ok", "all " + it.met + " integration tests pass (whole paths through the app, written from the goal)");
+      else row(NA, "v-muted", "the integration tests could not be run");
+    }
     var relaxed = Array.isArray(v.tests_relaxed) ? v.tests_relaxed.filter(function (r) { return r && r.name; }) : [];
     if (relaxed.length) row("!", "v-warn", plural(relaxed.length, "function", "functions") + " passed only after the harness replaced or dropped a test expectation: " +
       relaxed.map(function (r) { return String(r.name); }).join(", ") + " (the original expectations are kept with each function)");
@@ -2453,17 +2472,35 @@
     var vis = m.visual && typeof m.visual === "object" ? m.visual : null;
     var ver = m.verification && typeof m.verification === "object" ? m.verification : null;
     var verRows = ver ? verificationRows(ver) : [];
+    // the qualifier's own proofs about the whole app; the other proofs are the rows above
+    var qual = m.qualification && typeof m.qualification === "object" ? m.qualification : null;
+    var qualProofs = qual && Array.isArray(qual.proofs) ? qual.proofs : [];
+    qualProofs.forEach(function (p) {
+      if (!p || ["wired", "commands", "replay"].indexOf(p.id) < 0) return;
+      verRows.push({ mark: p.ok === true ? "✓" : p.ok === false ? "✗" : "–", cls: p.ok === true ? "v-ok" : p.ok === false ? "v-warn" : "v-muted",
+                     text: String(p.label || "") + (p.detail ? ": " + String(p.detail) : "") });
+    });
+    // a command-line app has no pages to visit: its commands were typed instead (the rows just added)
+    if (qualProofs.some(function (p) { return p && p.id === "commands"; }))
+      verRows = verRows.filter(function (r) { return r.text !== "the app was not tried like a visitor"; });
+    var verdict = qual ? String(qual.verdict || "") : "";
     var verBad = verRows.some(function (r) { return r.mark === "✗"; });
     // a finished run with missing features, a failed self-check, unfixed screenshot problems or a failed independent check is not a plain success
-    var incomplete = m.outcome === "success" && (missing.length > 0 || (!!smoke && smoke.ok === false) || (!!vis && vis.done === false) || verBad);
+    var notProven = m.outcome === "success" && verdict === "unproven";
+    var disproven = verdict === "disproven" && m.outcome !== "cancelled" && m.outcome !== "error" && m.built && m.built.length > 0;
+    var incomplete = (m.outcome === "success" && (missing.length > 0 || (!!smoke && smoke.ok === false) || (!!vis && vis.done === false) || verBad)) || notProven || disproven;
     box.className = "ag-sumcard " + (incomplete || m.outcome === "cancelled" ? "warn" : m.outcome === "success" ? "ok" : "bad");
     var title;
-    if (incomplete) {
+    if (disproven) {
+      title = "Built, but not proven done";
+    } else if (notProven) {
+      title = "Built, not proven";
+    } else if (incomplete) {
       title = "Built, but incomplete";
     } else if (m.outcome === "success") {
       title = m.flow === "cache" ? "\u2713 Answered instantly from a saved tool"
         : m.flow === "reuse" ? "\u2713 Answered by a tool you already had"
-        : m.flow === "plan" ? "\u2713 Done: built " + m.built.length + " tools and put them together"
+        : m.flow === "plan" ? (verdict === "proven" ? "\u2713 Done and proven: built " : "\u2713 Done: built ") + m.built.length + " tools and put them together"
         : m.flow === "build" ? "\u2713 Built and verified a new tool" : "\u2713 Done";
     } else if (m.outcome === "cancelled") {
       title = "Cancelled";
@@ -2492,7 +2529,8 @@
     if (m.outcome === "cancelled") box.appendChild(h("div", "sum-l", "You stopped this build. What was saved before that is kept; Continue picks it up from there."));
     if (missing.length) box.appendChild(h("div", "sum-l sum-miss", "Not built yet: " + joinWords(missing) + ". Continue builds these on what is saved."));
     if (ver) {
-      box.appendChild(h("div", "sum-v-t", "Checked by the harness itself"));
+      box.appendChild(h("div", "sum-v-t", qual ? "Proof of doneness" : "Checked by the harness itself"));
+      if (qual && qual.basis) box.appendChild(h("div", "sum-l " + (verdict === "proven" ? "smoke-ok" : "sum-miss"), String(qual.basis)));
       var verBox = h("div", "sum-v");
       verRows.forEach(function (r) {
         var rowEl = h("div", "sum-v-r");
@@ -2501,6 +2539,19 @@
         verBox.appendChild(rowEl);
       });
       box.appendChild(verBox);
+      var typedRows = qual && Array.isArray(qual.transcript) ? qual.transcript.filter(function (r) { return r && r.typed; }) : [];
+      if (typedRows.length) {
+        // what the harness typed into the finished app, and what came back: the evidence itself
+        var tr = h("details", "sum-typed");
+        tr.appendChild(h("summary", "", "What the harness typed and what the app printed (" + typedRows.length + " command" + (typedRows.length === 1 ? "" : "s") + ")"));
+        typedRows.forEach(function (r) {
+          var line = h("div", "sum-typed-r" + (r.ok ? "" : " bad"));
+          line.appendChild(h("code", "sum-typed-in", "$ " + String(r.typed)));
+          line.appendChild(h("span", "sum-typed-out", (r.ok ? "" : "error: ") + String(r.printed || "(nothing)")));
+          tr.appendChild(line);
+        });
+        box.appendChild(tr);
+      }
     }
     if (m.capability_gaps && m.capability_gaps.length) {
       box.appendChild(h("div", "sum-l cap-sum",
@@ -2540,7 +2591,7 @@
         (m.planned ? " \u2014 " + m.built.length + " of " + m.planned + " planned tools" : "") + "."));
       if (m.outcome !== "cancelled") {   // a cancelled build has no failure to explain
         if (m.stopped && m.stopped.detail) box.appendChild(h("div", "sum-l", "Where it stopped: " + String(m.stopped.detail).split("; ")[0].slice(0, 200)));
-        if (m.stopped && m.stopped.hint) box.appendChild(h("div", "sum-l", "Likely cause: " + m.stopped.hint));
+        if (m.stopped && m.stopped.hint) box.appendChild(h("div", "sum-l", (m.stopped.app ? "Next: " : "Likely cause: ") + m.stopped.hint));
         if (m.error) box.appendChild(h("div", "sum-l", /429|rate|traffic|queue/i.test(m.error)
           ? "The model API is rate-limited right now, not a problem with your prompt. Try again in a minute."
           : m.error.slice(0, 200)));
@@ -2868,6 +2919,62 @@
       case "spend_resumed":
         say("Going on: you allowed more, up to $" + (Number(ev.limit_usd) || 0).toFixed(2) + " for this build.", "note");
         break;
+      case "goal_review":
+        var grMissing = Array.isArray(ev.missing) ? ev.missing : [];
+        if (!grMissing.length) say("Reviewed what was built against your words" + (ev.round > 1 ? " again" : "") + ": nothing is missing.", "pass");
+        else {
+          say("Reviewed what was built against your words" + (ev.round > 1 ? " again" : "") + ". It does not do this yet:", "fail");
+          grMissing.slice(0, 4).forEach(function (m) { say("missing: " + String(m), "fail"); });
+          say(ev.fixing ? "Building what is missing now." : "No round of work is left in this build for it.", "note");
+        }
+        break;
+      case "detour":
+        say("The fix was in " + ev.fixed + ", a function that " + ev.back_to + " calls. Saved it, and went back to " + ev.back_to + ".", "build");
+        break;
+      case "connection":
+        var cnFaults = Array.isArray(ev.faults) ? ev.faults : [];
+        var cnRan = [];
+        if (ev.chains) cnRan.push("ran it on the data " + ev.chains + " other call" + (ev.chains === 1 ? "" : "s") + " really produced");
+        if (ev.lines) cnRan.push(ev.lines + " integration test" + (ev.lines === 1 ? "" : "s"));
+        if (ev.entry) {
+          say("Sanity check now that " + ev.name + " connects the app: " + cnFaults.length + " of " + ev.lines + " integration tests fail. They are worked on once the build is checked as a whole.", "fail");
+          cnFaults.slice(0, 4).forEach(function (f) { say("fails: " + String(f), "fail"); });
+        } else if (cnFaults.length) {
+          say((ev.second ? "After the rebuild, " + ev.name + " still does not fit: " : "Sanity check: " + ev.name + " passes its own tests but does not fit the others: ") + cnFaults.slice(0, 3).join("; ") + "." +
+            (ev.rebuilding ? " Rebuilding it to fit." : ev.second ? " The proof at the end takes it from here." : ""), "fail");
+        } else if (cnRan.length || ev.second) {
+          say((ev.second ? "After the rebuild, " + ev.name + " fits" : "Sanity check: " + ev.name + " fits the others") + (cnRan.length ? " (" + cnRan.join(", ") + ")" : "") + ".", "pass");
+        }
+        break;
+      case "integration_written":
+        var iwLines = Array.isArray(ev.lines) ? ev.lines : [];
+        var iwEased = Array.isArray(ev.eased) ? ev.eased : [];
+        if (iwEased.length) say(iwEased.length + " of the lines expected a heading or a format nobody has seen the app print yet; " + (iwEased.length === 1 ? "it was" : "they were") + " kept as \u201cworks\u201d checks (the commands must run without an error).", "note");
+        if (iwLines.length) loadIntegration();      // the box shows what was just stored
+        if (iwLines.length) {
+          say((ev.added ? "Added " : "Wrote ") + iwLines.length + " integration test" + (iwLines.length === 1 ? "" : "s") + (ev.added ? " for what this prompt adds" : " for this project from the goal") + ". The finished app has to pass them (you can edit them under \u201cYour requirements\u201d):", "note");
+          iwLines.slice(0, 8).forEach(function (line) { say(String(line), "note"); });
+        } else say("No usable integration test could be written for this project.", "note");
+        break;
+      case "integration":
+        var itRes = Array.isArray(ev.results) ? ev.results : [];
+        say("Ran the " + itRes.length + " integration test" + (itRes.length === 1 ? "" : "s") + " through the app: " + (ev.met || 0) + " pass" +
+          (ev.unmet ? ", " + ev.unmet + " fail" : "") + (ev.unchecked ? ", " + ev.unchecked + " could not be run" : "") + ".", ev.unmet ? "fail" : "pass");
+        itRes.filter(function (r) { return r && r.ok === false; }).slice(0, 8).forEach(function (r) {
+          say("fails: " + String(r.text || "").replace(/\s+/g, " ") + (r.detail ? " \u2014 " + String(r.detail) : ""), "fail");
+        });
+        break;
+      case "precheck":
+        say("Before planning: trying the app as it is saved, to tell the planner what it fails today.", "note");
+        break;
+      case "qualification":
+        var qp = Array.isArray(ev.proofs) ? ev.proofs.filter(function (p) { return p && p.ok === false; }) : [];
+        if (ev.verdict === "proven") say("Proof of doneness: proven. " + String(ev.basis || ""), "pass");
+        else if (ev.verdict === "disproven") {
+          say("Not proven done: " + qp.length + " proof" + (qp.length === 1 ? "" : "s") + " failed.", "fail");
+          qp.slice(0, 5).forEach(function (p) { say(String(p.label || "") + ": " + String(p.detail || ""), "fail"); });
+        } else say("Not proven: " + String(ev.basis || "nothing showed the app doing its job."), "note");
+        break;
       case "recovery":
         var rvFailed = Array.isArray(ev.failed) ? ev.failed.filter(Boolean).map(String) : [];
         say("Recovery round " + (ev.round || 1) + " of " + (ev.of || 1) + ": " + rvFailed.join(", ") +
@@ -2891,6 +2998,12 @@
           "). The Lisp process was restarted from the saved functions.", "fail");
         break;
       case "retired":
+        if (ev.orphans) {
+          var orNames = (ev.tools || []).map(function (t) { return t.name; });
+          say("Put away " + orNames.length + " leftover function" + (orNames.length === 1 ? "" : "s") + " that nothing in the app calls and this build did not make (kept on disk, no longer offered to the model): " + orNames.slice(0, 12).join(", ") + (orNames.length > 12 ? ", and " + (orNames.length - 12) + " more" : "") + ".", "build");
+          reloadTools();
+          break;
+        }
         (ev.tools || []).forEach(function (t) {
           say("Retired the leftover function " + t.name + ": it " + t.reason + ". It is kept on disk but no longer offered to the model.", "build");
         });
@@ -2911,7 +3024,7 @@
       case "gave_up":
         if (ev.app) { say((ev.detail || "The app is not complete.") + (ev.hint ? " " + ev.hint : ""), "fail"); break; }
         say("Gave up after " + ev.attempts + " attempts. Nothing was saved: the tool never passed its own tests. " +
-          (ev.hint ? "Likely cause: " + ev.hint + " " : "") +
+          (ev.hint ? (ev.app ? "Next: " : "Likely cause: ") + ev.hint + " " : "") +
           "Try a smaller, more specific prompt (for example one function with concrete inputs); big tasks work better as small tools built one at a time.", "fail");
         break;
       case "repair":
@@ -3643,9 +3756,43 @@
     errs.slice(0, 8).forEach(function (e) {
       list.appendChild(h("li", "", "Line " + e.line + " could not be read: " + String(e.problem || "") ));
     });
+    if (data && typeof data.integration === "string") showIntegration(data.integration, "");
     $("ag-reqs-status").textContent = saved
       ? (n ? "Saved. " + n + " requirement" + (n === 1 ? "" : "s") + " will be checked after the next build." : "Saved. This project has no requirements.")
       : "";
+  }
+  // The integration tests the agent wrote for this project. The box appears once there are some.
+  function showIntegration(text, status) {
+    var lines = String(text || "").split("\n").filter(function (x) { return x.trim(); });
+    if (lines.length) $("ag-integ").hidden = false;
+    else if (!status) $("ag-integ").hidden = true;
+    $("ag-integ-text").value = text || "";
+    $("ag-integ-count").textContent = lines.length ? "(" + lines.length + ")" : "(none)";
+    if ($("ag-integ-badge")) $("ag-integ-badge").textContent = lines.length ? " + " + lines.length + " integration test" + (lines.length === 1 ? "" : "s") + " from the agent" : "";
+    $("ag-integ-status").textContent = status || "";
+  }
+  function loadIntegration() {
+    if (window.location.protocol === "file:") return;
+    var pid = state.project;
+    api("GET", "/api/agent/projects/" + encodeURIComponent(pid) + "/integration").then(function (r) {
+      if (pid === state.project && r.status === 200) showIntegration(r.data.text, "");
+    }).catch(function () {});
+  }
+  function saveIntegration() {
+    var pid = state.project, btn = $("ag-integ-save");
+    btn.disabled = true;
+    $("ag-integ-status").textContent = "Saving\u2026";
+    api("POST", "/api/agent/projects/" + encodeURIComponent(pid) + "/integration", { text: $("ag-integ-text").value }).then(function (r) {
+      btn.disabled = false;
+      if (r.status !== 200) { $("ag-integ-status").textContent = "Not saved: " + ((r.data && r.data.error) || "the server refused it"); return; }
+      if (pid !== state.project) return;
+      var bad = Array.isArray(r.data.errors) ? r.data.errors : [];
+      var n = String(r.data.text || "").split("\n").filter(function (x) { return x.trim(); }).length;
+      showIntegration(r.data.text, bad.length
+        ? "Saved, but line " + bad[0].line + " could not be read and will not be run: " + String(bad[0].problem || "")
+        : n ? "Saved. " + n + " integration test" + (n === 1 ? "" : "s") + " will be run after the next build."
+            : "Saved. The agent will write new ones on the next build.");
+    }).catch(function () { btn.disabled = false; $("ag-integ-status").textContent = "Not saved: the dashboard server did not answer."; });
   }
   function loadRequirements() {
     if (window.location.protocol === "file:") return;
@@ -3912,6 +4059,8 @@
   $("ag-paused-stop").addEventListener("click", function () { renderPaused(null); cancelRun(); });
   $("ag-mode").addEventListener("change", renderSpend);
   $("ag-reqs-save").addEventListener("click", saveRequirements);
+  $("ag-integ-save").addEventListener("click", saveIntegration);
+  $("ag-integ-text").addEventListener("input", function () { $("ag-integ-status").textContent = "Not saved yet."; });
   $("ag-reqs-text").addEventListener("input", function () { $("ag-reqs-status").textContent = "Not saved yet."; });
   $("ag-resume-x").addEventListener("click", function () {
     if (state.resumeRow) lsSet(DISMISS_KEY + state.project, state.resumeRow.session_id);

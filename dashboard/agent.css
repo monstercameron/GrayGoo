@@ -838,3 +838,18 @@ details.ag-math[open] > summary { margin-bottom: .6rem; }
 .ag-paused-t { font-weight: 700; color: var(--ag-amber); margin-bottom: .2rem; }
 .ag-paused p { margin: 0 0 .5rem; font-size: .88rem; line-height: 1.45; color: #f1f4fb; }
 .ag-paused-row { display: flex; flex-wrap: wrap; gap: .5rem; }
+#ag-askbar > .ag-reqs, #ag-askbar > .ag-spendline { grid-column: 1 / -1; }
+#ag-askbar > .ag-reqs[open] { padding: .1rem 0 .3rem; }
+.ag-reqs-help { max-width: 62rem; }
+
+/* ---- proof of doneness: the commands typed into the finished app (2026-10-10) ---- */
+.sum-typed { margin: .35rem 0 .2rem; font-size: .8rem; }
+.sum-typed > summary { cursor: pointer; color: var(--ag-cyan); }
+.sum-typed > summary:focus-visible { outline: 2px solid var(--ag-cyan); outline-offset: 2px; }
+.sum-typed-r { display: grid; grid-template-columns: minmax(0, 1fr); gap: .05rem; padding: .2rem 0; border-top: 1px solid #2a3045; }
+.sum-typed-in { font: .78rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfe8ff; overflow-wrap: anywhere; }
+.sum-typed-out { color: #d6dcec; overflow-wrap: anywhere; }
+.sum-typed-r.bad .sum-typed-out { color: var(--ag-amber); }
+.ag-integ { margin-top: .9rem; padding-top: .7rem; border-top: 1px solid #2a3147; }
+#ag-integ-text { width: 100%; box-sizing: border-box; min-height: 6.5rem; resize: vertical; padding: .5rem .6rem; border: 1px solid #3a4260; border-radius: 6px; background: #0e1016; color: #f1f4fb; font: .8rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+#ag-integ-text:focus-visible { outline: 2px solid var(--ag-cyan); outline-offset: 1px; }

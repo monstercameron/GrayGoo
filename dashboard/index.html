@@ -232,7 +232,7 @@
       <label class="ag-check"><input type="checkbox" id="ag-compare" checked> Also run without memory (on Live this roughly doubles the tokens, about half a cent per prompt)</label>
       <label class="ag-check" id="ag-visual-row"><input type="checkbox" id="ag-visual" checked> Check the finished app with screenshots (Live web apps; one or two extra model calls)</label>
       <details class="ag-reqs" id="ag-reqs">
-        <summary>Your requirements <span id="ag-reqs-count" class="muted">(none yet)</span></summary>
+        <summary>Your requirements <span id="ag-reqs-count" class="muted">(none yet)</span><span id="ag-integ-badge" class="muted"></span></summary>
         <p class="ag-reqs-lede">Say what the finished app must do, one check per line. After every build the harness sends these requests or types these commands itself and reports each line as met or not met. They are checked exactly as you wrote them: nothing rewrites or drops a line.</p>
         <label for="ag-reqs-text" class="ag-reqs-label">Requirements for this project</label>
         <textarea id="ag-reqs-text" rows="5" spellcheck="false" aria-describedby="ag-reqs-help ag-reqs-status"
@@ -242,6 +242,15 @@
           <span id="ag-reqs-status" class="muted" role="status"></span>
         </div>
         <ul id="ag-reqs-errors" class="ag-reqs-errors" hidden></ul>
+        <div id="ag-integ" class="ag-integ" hidden>
+          <label for="ag-integ-text" class="ag-reqs-label">Integration tests the agent wrote for this project <span id="ag-integ-count" class="muted"></span></label>
+          <p class="ag-reqs-lede" id="ag-integ-help">The agent writes these once from your goal, before any code, and adds a few when a later prompt adds a feature. After every build the harness types or requests each line through the finished app. A build is not called done while one fails. They are yours to change: fix a line that expects the wrong thing, delete one you do not want, or clear the box to have new ones written on the next build.</p>
+          <textarea id="ag-integ-text" rows="5" spellcheck="false" aria-describedby="ag-integ-help ag-integ-status"></textarea>
+          <div class="ag-reqs-row">
+            <button type="button" id="ag-integ-save" class="ag-ghost">Save integration tests</button>
+            <span id="ag-integ-status" class="muted" role="status"></span>
+          </div>
+        </div>
         <div id="ag-reqs-help" class="ag-reqs-help">
           <div class="muted">How to write a line</div>
           <code>GET /notes shows "Hello"</code>
@@ -249,6 +258,7 @@
           <code>GET /missing answers 404</code>
           <code>run "calc 150000 6.5 30" prints "948.10"</code>
           <code>run "put blue kite" then run "show" prints "blue kite"</code>
+          <code>run "put blue kite" then run "show" works</code>
           <div class="muted">Use <code class="ag-inl">does not show</code> or <code class="ag-inl">does not print</code> for the opposite. Lines indented under <code class="ag-inl">scenario: a name</code> run in order on the same data and count as one requirement.</div>
         </div>
       </details>
