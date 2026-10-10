@@ -8,6 +8,7 @@ Auth: reads ``CEREBRAS_API_KEY`` (preferred) or ``CEREBRAS`` from the
 environment / project ``.env``. The key value is never printed.
 """
 
+import base64
 import os
 import sys
 import time
@@ -119,12 +120,25 @@ def generate(
     temperature: float = 0.2,
     reasoning_effort: str | None = None,
     timeout: float = 60.0,
+    max_retries: int | None = None,
+    images: list | None = None,
 ) -> dict:
     """One chat-completion call. Returns text plus usage/latency accounting.
 
     ``reasoning_effort``: the model defaults to high reasoning; pass "none"
     to disable it for cheap deterministic calls. ``None`` leaves the API
     default in place.
+
+    ``max_retries``: ``None`` keeps the SDK's own silent retries; a caller
+    that does its own rate-limit handling passes 0 so it sees every 429.
+
+    ``images``: PNG or JPEG images shown to the model with the prompt, each
+    given as bytes or as a file path. They travel as base64 data URIs in the
+    user message (the only form the API accepts); ``image_tokens`` in the
+    result says what they cost in prompt tokens.
+
+    When the model reasoned, ``reasoning_tokens`` and ``reasoning`` (the
+    reasoning text, may be ``None``) say how much and what.
 
     The result also carries ``request_id`` (API completion id, may be
     ``None``) and ``cost_usd`` (qwen-3.8-27b pricing, ``None`` when usage
@@ -133,7 +147,18 @@ def generate(
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    content = prompt
+    if images:
+        content = [{"type": "text", "text": prompt}]
+        for item in images:
+            if not isinstance(item, (bytes, bytearray)):
+                with open(item, "rb") as handle:
+                    item = handle.read()
+            kind = "jpeg" if bytes(item[:3]) == bytes([255, 216, 255]) else "png"
+            content.append({"type": "image_url", "image_url": {
+                "url": "data:image/%s;base64,%s"
+                       % (kind, base64.b64encode(bytes(item)).decode("ascii"))}})
+    messages.append({"role": "user", "content": content})
 
     kwargs: dict = {
         "model": model,
@@ -146,14 +171,24 @@ def generate(
         kwargs["reasoning_effort"] = reasoning_effort
 
     start = time.monotonic()
-    completion = get_client().chat.completions.create(**kwargs)
+    client = get_client()
+    if max_retries is not None:
+        client = client.with_options(max_retries=max_retries)
+    completion = client.chat.completions.create(**kwargs)
     latency_ms = (time.monotonic() - start) * 1000
 
     choice = completion.choices[0]
     usage = completion.usage
     input_tokens = usage.prompt_tokens if usage else None
     output_tokens = usage.completion_tokens if usage else None
+    thought = getattr(getattr(usage, "completion_tokens_details", None),
+                      "reasoning_tokens", None)
+    reasoning = getattr(choice.message, "reasoning", None) or \
+        getattr(choice.message, "reasoning_content", None)
     return {
+        "reasoning_tokens": thought if type(thought) is int else None,
+        "reasoning": reasoning if isinstance(reasoning, str) else None,
+        "image_tokens": seen if type(seen := getattr(usage, "image_tokens", None)) is int else None,
         "text": choice.message.content,
         "finish_reason": choice.finish_reason,
         "model": completion.model,

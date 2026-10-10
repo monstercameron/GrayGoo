@@ -35,7 +35,13 @@ import risk
 import s_expr
 import toolmeta
 import webkit
+import goalcheck
+import lispserver
 import lispstyle
+import compaction
+import modelgate
+import screenshot
+import visualcheck
 import oracle as orc
 import workers
 
@@ -45,13 +51,68 @@ MAX_MODEL_CALLS = 5          # per session: quick check + plan + repairs
 MAX_REPAIRS = 3
 REWRITE_TEMPERATURE = 0.7    # fresh-rewrite repairs sample for a different idea
 MAX_PLAN_STEPS = 6
+MAX_APP_STEPS = 10           # an app (web or command line) needs more parts than a tool
+FAST_REHEARSAL = True        # run tests in one warm SBCL process instead of one per test
 MAX_MODEL_CALLS_PLAN = 80    # when a goal is split into small tools
-# Measured on 80 live sessions: a "thinking" rewrite passed its tests 23% of
-# the time, a plain repair 24%, at four times the cost and over three times
-# the wait. So thinking is the exception: only a step's LAST attempt, once a
-# run. A low-effort deep call gets 3500 tokens (was 5000): one run spent all
-# 5000 on reasoning and returned an empty reply.
-MAX_DEEP_CALLS = 1
+# THINKING. A deep call lets the model reason before it answers: about 2-3 s
+# and $0.007 instead of 0.4 s and $0.002. It goes where one better answer
+# saves many calls: the plan of a large goal, extending or splitting a plan,
+# and a step's LAST rewrite. In the logs 36 thinking rewrites, all on steps
+# that had already failed twice, passed 31% of the time; 5 of them were lost
+# because the reasoning used the whole 3500/5000-token budget. So the budget
+# is 8000 (the largest complete reply used 4242), and a reply that comes back
+# empty or cut off is asked again without thinking instead of being lost.
+MAX_DEEP_CALLS = 8           # thinking calls per session
+THINK_TOKENS = {"low": 8000, "medium": 12000}
+# First live run with thinking (4 sessions, 11 thinking calls): the 8 that
+# answered used 1022-4843 tokens; the 3 that used all 8000 and answered nothing
+# were all asked to fix UNBALANCED PARENTHESES in a test call. Counting parens
+# is not something reasoning helps with, so a rewrite or a split thinks only
+# when the code itself is wrong, and gets a smaller budget than a plan.
+THINK_TOKENS_REPAIR = 5000
+# TIMEOUTS AND REPLY SIZE, from the second live run with lanes (4 sessions):
+# - A plain call answers in about a second (the slowest that answered took 16 s),
+#   yet a call that hung was waited on for the full 60 s, twice, turning 45 s
+#   builds into two-minute ones. A hung call is now given up after 30 s and
+#   asked again at once: a timeout is not a rate limit, there is nothing to wait for.
+# - A thinking rewrite that answers does so in 2-3 s; the ones that ran away
+#   took 6-10 s and answered nothing. It gets 8 s, then the plain answer.
+# - 9 page replies were cut off at 2200 tokens (a styled page is longer than
+#   that) and each had to be asked again. A reply may now be 4500 tokens long.
+CALL_TIMEOUT_S = 30.0
+THINK_TIMEOUT_S = 60.0
+THINK_REPAIR_TIMEOUT_S = 8.0
+REPLY_TOKENS = 4500
+REPLY_TOKENS_RETRY = 8000
+THINK_CLASSES = ("IMPLEMENTATION_WRONG", "RUNTIME_ERROR", "TEST_WRONG", "AMBIGUOUS",
+                 "REGRESSION")
+THINK_PLAN_WORDS = 12        # a goal this long (and every app) gets a thought-out plan
+# CONCURRENCY. Plan steps that do not call each other are built at the same
+# time, each in its own lane; a step waits only for the planned functions it
+# calls. PARALLEL_STEPS caps the model calls one session has in flight; the
+# shared modelgate.GATE lowers the real number when the API answers 429 and
+# raises it again after a quiet spell. 1 builds strictly in order.
+PARALLEL_STEPS = 8
+# SCREENSHOT CHECK. A finished web app is opened the way a visitor would (front
+# page, sign-in when its state holds a user, the first links behind it); each
+# page is rendered in a headless browser and the pictures go to the model with
+# the goal. What it still sees wrong is built as one more round of changes,
+# then the pages are looked at once more. Costs one or two model calls plus up
+# to 2304 prompt tokens per picture.
+VISUAL_PAGES = 3             # pictures per look (the API's free tier allows 2 per call)
+MAX_VISUAL_FIXES = 2         # rounds of changes after the first look; a round that does
+                             # not leave FEWER problems than the look before ends the loop
+VISUAL_SYSTEM = (
+    "You check a finished web app against what its user asked for by looking at "
+    "screenshots of its pages. Answer with ONE JSON object and nothing else: "
+    '{"done": true or false, "problems": ["one short, concrete, VISIBLE problem", ...], '
+    '"fix": "one instruction that would fix the problems, or an empty string"}. '
+    "Judge only what the pictures show: something the goal asks for that is "
+    "missing from the pages, a broken or unreadable layout, a page with no styling "
+    "when styling was asked for, raw code, markup or an error message shown as text, "
+    "an empty page. A page you were not shown is not a problem. Do not ask for "
+    "anything the goal does not mention. If the pages do what the goal asks, "
+    'answer {"done": true, "problems": [], "fix": ""}.')
 MAX_SPLIT_DEPTH = 1         # a failed step may be split once into smaller tools
 
 # Tolerant test comparison, defined in every rehearsal: numbers compare within
@@ -68,27 +129,66 @@ GG_CHECK = (
     "(t (equal a b))))\n"
     "(defun gg-nl (s) (let ((p (search \"~%\" s))) (if p (concatenate 'string "
     "(subseq s 0 p) (string #\\Newline) (gg-nl (subseq s (+ p 2)))) s)))\n"
-    "(defun gg-check (got want) (if (gg-near got want) t (list :got got)))")
+    # A response plist is compared by MEANING, because a test cannot know the
+    # incidental parts: status must match; each expected header must be there
+    # (a cookie is compared by name=value, not by its attributes); "..." in an
+    # expected body stands for any text; :state is compared when expected, and
+    # :state-unchanged S accepts a response that leaves :state out.
+    "(defun gg-cookie (s) (subseq s 0 (or (position #\\; s) (length s))))\n"
+    "(defun gg-body (got want) (or (string= got want) (string= got (gg-nl want)) "
+    "(and (search \"...\" want) (let ((pos 0) (start 0)) (loop (let* ((cut (search "
+    "\"...\" want :start2 start)) (part (subseq want start (or cut (length want)))) "
+    "(at (search part got :start2 pos))) (unless at (return nil)) (setf pos (+ at "
+    "(length part))) (if cut (setf start (+ cut 3)) (return t))))))))\n"
+    "(defun gg-headers (got want) (every (lambda (h) (let ((g (find (first h) got "
+    ":key (function first) :test (function string-equal)))) (and g (if (string-equal "
+    "(first h) \"Set-Cookie\") (string= (gg-cookie (second g)) (gg-cookie (second h))) "
+    "(equal (second g) (second h)))))) want))\n"
+    "(defun gg-resp (got want) (and (consp got) (eql (getf got :status) (getf want "
+    ":status)) (gg-headers (getf got :headers) (getf want :headers)) "
+    "(or (not (member :body want)) (and (stringp (getf got :body)) (stringp (getf want "
+    ":body)) (gg-body (getf got :body) (getf want :body)))) "
+    "(or (not (member :state want)) (gg-near (getf got :state) (getf want :state))) "
+    "(or (not (member :state-unchanged want)) (not (member :state got)) "
+    "(gg-near (getf got :state) (getf want :state-unchanged)))))\n"
+    # expect T is a property test: any true value passes, as in Lisp itself
+    "(defun gg-check (got want) (if (or (if (and (consp want) (eq (car want) :status)) "
+    "(gg-resp got want) (gg-near got want)) (and (eq want t) got)) "
+    "t (list :got got)))")
 LIVE_SPEND_CAP_USD = 1.00   # per server process; live sessions refuse past it
 WORKER_TIMEOUT_S = 15.0
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 
 SYSTEM_PROMPT = (
-    "You are the planner of a self-extending Common Lisp REPL (SBCL). "
-    "Answer with ONE JSON object and nothing else. Either reuse a tool:\n"
-    '{"action":"use","call":"(tool-name arg ...)","why":"..."}\n'
-    "or build a new tool:\n"
+    "You write small Common Lisp (SBCL) functions for a self-extending REPL. "
+    "Answer with ONE JSON object and nothing else.\n"
+    "FORMAT - one of:\n"
+    '{"action":"use","call":"(tool-name arg ...)","why":"..."}  reuse a saved tool\n'
     '{"action":"build","name":"kebab-name","description":"one line",'
     '"definition":"(defun kebab-name (...) ...)",'
     '"tests":[{"call":"(kebab-name ...)","expect":"printed result"}],'
-    '"call":"(kebab-name ...)"}\n'
-    "Rules: pure ANSI Common Lisp only (no I/O, files, network, processes, "
-    "reader eval). Keep each tool small and single-purpose; for a big task, build small helper tools one at a time and compose them. In LET, bindings cannot see each other: use LET* when a binding uses an earlier one. If the goal clearly needs several functions (for example a ray tracer, a parser, a simulation), do NOT build it in one go: reply with a PLAN instead: {\"action\":\"plan\",\"steps\":[{\"name\":\"vec-dot\",\"spec\":\"one function, exact name and arguments, with a concrete example and its result\"}]} of at most 6 small single-function steps in dependency order; the last step is the top-level function. Represent vectors, points, colors and records as plain quoted lists like '(0 0 -5); never use #( ) vector literals, structs or hash tables, so tools fit together. NEVER invent expected values you cannot compute by hand (hash outputs, random numbers, timestamps, crypto, floating-point digits). For those, write PROPERTY tests whose expect is T, e.g. call (let ((h (my-hash \"abc\"))) (and (integerp h) (= h (my-hash \"abc\")) (/= h (my-hash \"abd\")))) with expect T; only use an exact value when you are certain of it (a published test vector or simple arithmetic). SETF takes flat place/value pairs, (setf a 1 b 2), with no parentheses around a pair; a later pair must not be wrapped like (b 2). Existing tools are already loaded and may be called by "
-    "new tools. 'expect' is the PRIN1 text of the result, e.g. \"25\" or "
-    "\"\\\"abc\\\"\" or \"(1 2 3)\". Give 2-4 tests on inputs whose results you can compute exactly by hand "
-    "(numbers are compared with a small tolerance, so 0.6 matches 3/5). 'call' answers the "
-    "user's request using the literal data from the goal; quote list "
-    "literals, e.g. '(1 2 3). "
+    '"call":"(kebab-name ...)"}  build one new tool\n'
+    '{"action":"plan","steps":[{"name":"vec-dot","spec":"one function: exact '
+    'name and arguments, with a concrete example and its result"}]}  when the '
+    "goal needs several functions (an app, a parser, a ray tracer): at most 6 "
+    "small single-function steps in dependency order, the top-level function "
+    "last; a spec names every other planned function it calls.\n"
+    "RULES\n"
+    "- Pure ANSI Common Lisp: no I/O, files, network, processes or reader eval. "
+    "Exactly ONE defun per tool; saved tools are already loaded and may be "
+    "called.\n"
+    "- Data are plain quoted lists such as '(0 0 -5): no #( ) vectors, structs "
+    "or hash tables. Quote every list literal.\n"
+    "- In LET a binding cannot use an earlier one: use LET*.\n"
+    "TESTS\n"
+    "- Give 2-4 tests whose results you can compute by hand. 'expect' is the "
+    "PRIN1 text of the result: \"25\", \"\\\"abc\\\"\", \"(1 2 3)\", \"T\", \"NIL\". "
+    "Numbers compare with a small tolerance.\n"
+    "- Every test call is one form that calls the tool being built.\n"
+    "- Never guess a value you cannot compute (hashes, digits of a float): use "
+    "a property test whose expect is T, e.g. (let ((h (my-hash \"abc\"))) (and "
+    "(integerp h) (= h (my-hash \"abc\")))).\n"
+    "- 'call' answers the user's request with the literal data from the goal.\n"
 ) + lispstyle.STYLE_GUIDE
 
 
@@ -154,6 +254,30 @@ def tool_line(t, with_example=True):
     return line
 
 
+# CONTEXT COMPACTION. Measured over four live builds of a 36-function app: of
+# 384k input tokens a third was the REGISTRY block (4,200 characters in every
+# step, repair and rewrite call, 7,500 in every plan) and repairs sent whole
+# functions back to change one line. So each call now gets its context inside
+# a budget, compacted automatically, in this order, only as far as needed:
+#   1. the registry: tools the call names keep a full line with an example; the
+#      others shrink to "name (args)"; kit helpers to one line of signatures;
+#      then the examples go, then the descriptions (see compact_registry);
+#   2. the project note becomes one sentence outside planning calls;
+#   3. a repair says what failed once, with advice for THAT kind of failure;
+#   4. the reply is compacted too: a repair may be a few small edits, a reply
+#      may leave out tests it does not change, and a test repair returns only
+#      tests (compaction.merge_reply puts the full candidate back together).
+# Every model_call event records what was sent and what compaction saved.
+# Thinking is not part of this: its budgets and where it is used are unchanged.
+REGISTRY_BUDGET = 2600        # characters of REGISTRY in a working call
+REGISTRY_BUDGET_PLAN = 4800   # ...and in a planning call, which has to see every tool
+EDIT_OFFER = (
+    "ANSWER IN THE SHORTEST FORM THAT WORKS. For a small fix reply "
+    '{"action":"edit","name":"%s","edits":[{"old":"exact text copied from the '
+    'definition","new":"its replacement"}]}: each old must occur exactly once in '
+    "the definition, and the tests are kept unless you add \"tests\". Otherwise "
+    "reply with build JSON; you may leave out \"tests\" and \"call\" to keep them "
+    "as they are.")
 FOCUS_OVER = 8          # registries larger than this are sent focused
 FOCUS_RECENT = 4        # the newest tools are the likeliest dependencies
 
@@ -190,20 +314,88 @@ def registry_text(tools, focus=None):
                               + "; ".join(rest) if rest else "")
 
 
+def _is_kit(t):
+    return bool(t.get("kit")) or t.get("session") == "web-kit"
+
+
+def _sig(t):
+    """``name (args)``: enough to call a tool."""
+    return "%s %s" % (t["name"], signature(t["definition"]).split(" ", 1)[1][:-1])
+
+
+def compact_registry(tools, focus=None, budget=None):
+    """``(text, level)``: the REGISTRY block made to fit BUDGET characters.
+
+    Level 0 is ``registry_text`` unchanged and is used whenever it fits, so a
+    small project loses nothing. Past the budget the block is rebuilt, each
+    level giving up the least useful text first:
+
+    working call (FOCUS is the call's own text)
+      1  tools the text names: full line with example; other tools: ``name
+         (args)``; kit helpers: one line of signatures
+      2  as 1, without the examples
+      3  named tools: ``name (args)``; the rest: names only
+    planning call (no FOCUS: every tool matters, none more than another)
+      1  every own tool with its description, no example; kit signatures
+      2  descriptions cut to a few words
+
+    The last level is returned even if it is still over the budget.
+    """
+    plain = registry_text(tools, focus)
+    if not tools or budget is None or len(plain) <= budget:
+        return plain, 0
+    kit = [t for t in tools if _is_kit(t)]
+    own = [t for t in tools if not _is_kit(t)]
+    kit_head = "KIT TOOLS (harness helpers, callable the same way): "
+    if focus is None:
+        levels = [[tool_line(t, with_example=False) for t in own],
+                  ["TOOL " + compact_line(t) for t in own]]
+        for n, lines in enumerate(levels, 1):
+            text = "\n".join(lines + ([kit_head + "; ".join(_sig(t) for t in kit)] if kit else []))
+            if len(text) <= budget or n == len(levels):
+                return text, n
+    named = {t["name"] for t in tools if re.search(
+        r"(?<![^\s('\"#])%s(?![^\s)\".,;:])" % re.escape(t["name"]), focus or "", re.I)}
+    levels = [(tool_line, _sig),
+              (lambda t: tool_line(t, with_example=False), _sig),
+              (lambda t: "TOOL " + _sig(t), lambda t: t["name"])]
+    for n, (full, brief) in enumerate(levels, 1):
+        parts = [full(t) for t in tools if t["name"] in named]
+        rest = [brief(t) for t in own if t["name"] not in named]
+        helpers = [brief(t) for t in kit if t["name"] not in named]
+        if rest:
+            parts.append("OTHER SAVED TOOLS (callable the same way): " + "; ".join(rest))
+        if helpers:
+            parts.append(kit_head + "; ".join(helpers))
+        text = "\n".join(parts)
+        if len(text) <= budget or n == len(levels):
+            return text, n
+
+
 # One line for every non-planning call of a web app (the full contract goes to the planner).
 WEB_REMINDER = (
     "WEB APP: REQUEST is a plist (read it with the kit tools or GETF, never "
     "ASSOC); STATE is a list of (name rows) tables, e.g. '((\"posts\" ()) "
     "(\"users\" ())); responses are plists made with html-page, redirect-to, "
-    "with-state and with-cookie.")
+    "with-state and with-cookie. TESTS of a page or handler: call it directly "
+    "and expect a response plist holding only what matters, e.g. (:status 303 "
+    ":headers ((\"Location\" \"/login\"))) or (:status 200 :body "
+    "\"...Widget...\") where ... matches any text. Do not wrap the call in "
+    "LET, compare a whole page, or pick a response apart with ASSOC, SECOND or "
+    "SUBSEQ. HTML needs no line breaks: never write \\n in a string (Lisp reads "
+    "it as the letter n) and use ~% only inside a FORMAT control string. In "
+    "FORMAT use only ~a, one per argument; build repeated HTML with (apply "
+    "#'concatenate 'string (mapcar ...)), not ~{ ~}. (/ a b) on integers is a "
+    "ratio like 40/3: show (float ...) of it. Keep every definition under 3000 "
+    "characters: a longer page is split into helper functions.")
 
 # Fixing test calls needs the output format and the data rules, not the whole build brief.
 TEST_SYSTEM = (
     "You repair the TESTS of a Common Lisp tool. Answer with ONE JSON object and "
-    "nothing else: {\"action\":\"build\",\"name\":\"...\",\"description\":\"...\","
-    "\"definition\":\"(defun ...)\",\"tests\":[{\"call\":\"(name ...)\","
-    "\"expect\":\"printed result\"}],\"call\":\"(name ...)\"}. Keep the name, "
-    "description and definition exactly as given. Each call is exactly one Lisp "
+    "nothing else: {\"action\":\"build\",\"name\":\"...\","
+    "\"tests\":[{\"call\":\"(name ...)\",\"expect\":\"printed result\"}]}. "
+    "Send ONLY the tests: the definition is kept as it is and must not be "
+    "repeated. Each call is exactly one Lisp "
     "form that calls the tool. Quote data lists with one leading quote, e.g. "
     "'(1 \"a\"), and put no quote marks inside quoted data. 'expect' is the "
     "PRIN1 text of the result, e.g. \"25\" or \"\\\"abc\\\"\" or \"(1 2)\"; use "
@@ -363,25 +555,48 @@ BASE_TEMPERATURE = 0.0        # evidence_run --temperature sets this
 _RETRY_WAITS = (3, 8, 20)    # seconds between retries of transient API errors
 
 
-def _with_retry(fn):
-    """Call FN, retrying rate limits / overload / timeouts with visible progress."""
-    for i in range(len(_RETRY_WAITS) + 1):
+GATE = modelgate.GATE         # shared by every live call of this process
+
+
+def _timed_out(exc):
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
+
+
+def _with_retry(fn, tries=None):
+    """Call FN through the shared gate; retry rate limits, overload and timeouts.
+
+    A 429 lowers how many calls may run at once and holds every new call back
+    for the wait the API asked for, so concurrent lanes slow down together
+    instead of hammering the limit. A call that timed out is asked again at
+    once. TRIES=1 makes a single attempt. Progress goes to ``_TEMP.notify``.
+    """
+    last = (len(_RETRY_WAITS) if tries is None else tries - 1)
+    for i in range(last + 1):
         try:
-            return fn()
-        except Exception as exc:  # noqa: BLE001 - classify by message
-            text = str(exc).lower()
-            transient = any(x in text for x in (
-                "429", "rate", "too_many", "traffic", "queue", "timed out",
-                "timeout", "503", "502", "overloaded", "connection"))
-            if not transient or i == len(_RETRY_WAITS):
+            with GATE.slot():
+                res = fn()
+            GATE.succeeded()
+            return res
+        except Exception as exc:  # noqa: BLE001 - classified by modelgate
+            if not modelgate.transient(exc) or i == last:
                 raise
+            limited = modelgate.rate_limited(exc)
+            wait = 0.5 if (_timed_out(exc) and not limited) else \
+                modelgate.retry_after(exc, _RETRY_WAITS[i])
+            extra = {"rate_limited": True, "limit": GATE.throttled(wait),
+                     "wait_s": round(wait, 1)} if limited else {}
             note = getattr(_TEMP, "notify", None)
             if note:
-                note("The model API is busy (%s). Retrying in %ds (attempt %d of %d)..."
-                     % (text.split(":")[0][:40] or "temporary error",
-                        _RETRY_WAITS[i], i + 2, len(_RETRY_WAITS) + 1))
-            time.sleep(_RETRY_WAITS[i])
+                note("The model API is busy (%s). Retrying in %gs (attempt %d of %d)..."
+                     % (str(exc).lower().split(":")[0][:40] or "temporary error",
+                        wait, i + 2, last + 1), **extra)
+            time.sleep(wait)
 
+
+def _usable(res):
+    """A reply that has text and was not cut off by its token budget."""
+    return bool((res.get("text") or "").strip()) and res.get("finish_reason") != "length"
 
 
 def live_generate(system, user):
@@ -389,30 +604,58 @@ def live_generate(system, user):
     if not status["available"]:
         raise RuntimeError("live mode unavailable: " + status["reason"])
     import cerebras_client
-    deep = getattr(_TEMP, "deep", False)       # hard retries: let the model think
     temp = getattr(_TEMP, "value", None)
     temp = BASE_TEMPERATURE if temp is None else temp
-    if not deep:
+
+    def call(effort, max_tokens, timeout=CALL_TIMEOUT_S, tries=None):
+        # max_retries=0: the gate has to see every 429, not the SDK's silent retries
+        shown = getattr(_TEMP, "images", None)
         return _with_retry(lambda: cerebras_client.generate(
-            user, system=system, max_tokens=getattr(_TEMP, "max_tokens", 2200),
-            temperature=temp, reasoning_effort="none"))
-    effort = getattr(_TEMP, "effort", "low")
-    if effort != "medium":
-        return _with_retry(lambda: cerebras_client.generate(
-            user, system=system, max_tokens=3500, temperature=temp,
-            reasoning_effort="low", timeout=120.0))
-    res = _with_retry(lambda: cerebras_client.generate(
-        user, system=system, max_tokens=8000, temperature=temp,
-        reasoning_effort="medium", timeout=120.0))
-    if not (res.get("text") or "").strip():       # thinking ate the budget
-        res2 = _with_retry(lambda: cerebras_client.generate(
-            user, system=system, max_tokens=8000, temperature=temp,
-            reasoning_effort="low", timeout=120.0))
-        res2["input_tokens"] = (res2.get("input_tokens") or 0) + (res.get("input_tokens") or 0)
-        res2["output_tokens"] = (res2.get("output_tokens") or 0) + (res.get("output_tokens") or 0)
-        res2["cost_usd"] = (res2.get("cost_usd") or 0) + (res.get("cost_usd") or 0)
-        return res2
-    return res
+            user, system=system, max_tokens=max_tokens, temperature=temp,
+            reasoning_effort=effort, timeout=timeout, max_retries=0,
+            **({"images": shown} if shown else {})), tries=tries)
+
+    if not getattr(_TEMP, "deep", False):
+        return call("none", getattr(_TEMP, "max_tokens", REPLY_TOKENS))
+    effort = getattr(_TEMP, "effort", "low")       # deep: let the model think first
+    effort = effort if effort in THINK_TOKENS else "low"
+    budget = getattr(_TEMP, "think_tokens", None)
+    if budget:
+        # a repair: one short try. Thinking that has not answered in a few
+        # seconds is running away, and the plain answer is the better use of time.
+        try:
+            res = call(effort, budget, THINK_REPAIR_TIMEOUT_S, tries=1)
+        except Exception as exc:  # noqa: BLE001 - only a timeout falls through to the plain call
+            if not _timed_out(exc):
+                raise
+            res = {"text": "", "finish_reason": "timeout",
+                   "latency_ms": THINK_REPAIR_TIMEOUT_S * 1000.0}
+    else:
+        res = call(effort, THINK_TOKENS[effort], THINK_TIMEOUT_S)
+    if _usable(res):
+        res["thinking"] = effort
+        return res
+    # The reasoning used the whole budget and left no complete answer. Ask
+    # again without it: a plain answer now beats a second expensive silence.
+    plain = call("none", getattr(_TEMP, "max_tokens", REPLY_TOKENS))
+    for key in ("input_tokens", "output_tokens", "cost_usd", "latency_ms"):
+        plain[key] = (plain.get(key) or 0) + (res.get(key) or 0)
+    plain["thinking"], plain["thinking_fallback"] = None, True
+    plain["reasoning_tokens"] = res.get("reasoning_tokens") or res.get("output_tokens")
+    plain["reasoning"] = res.get("reasoning")
+    return plain
+
+
+def step_deps(steps):
+    """For each plan step, the positions of the EARLIER steps its spec names.
+
+    A plan is written in dependency order, so only an earlier step can be a
+    dependency; a later name in a spec ("used by render-page") is not one.
+    """
+    names = [(x.get("name") or "").lower() for x in steps]
+    return [[j for j in range(i) if names[j] and names[j] != names[i] and re.search(
+        r"(?<![^\s('\"#])%s(?![^\s)\".,;:])" % re.escape(names[j]),
+        x.get("spec") or "", re.I)] for i, x in enumerate(steps)]
 
 
 # Extra scripted examples for the demo model. Each entry fires when ALL
@@ -965,13 +1208,30 @@ def balance_call(call, definition):
 _STR_LIT = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
+def _fix_string_escapes(literal):
+    """One string literal with ``\\n`` turned into a line break and ``\\t`` into a space."""
+    out, i, n = [], 0, len(literal)
+    while i < n:
+        c = literal[i]
+        if c == "\\" and i + 1 < n:
+            nxt = literal[i + 1]
+            out.append("\n" if nxt == "n" else " " if nxt == "t" else c + nxt)
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def newline_escapes(text):
     """Turn ``\\n`` inside string literals into a real line break.
 
-    Lisp has no ``\\n`` escape (it reads as the letter n), so a model that
-    writes it always means a newline.
+    Lisp has no ``\\n`` escape: it reads as the letter n, so a page built from
+    such strings shows stray n characters all over (the screenshot check found
+    exactly that, 38 of them in one saved page). A model that writes it always
+    means a newline. An escaped backslash (``\\\\``) is left alone.
     """
-    return _STR_LIT.sub(lambda m: m.group(0).replace("\\n", "\n"), text)
+    return _STR_LIT.sub(lambda m: _fix_string_escapes(m.group(0)), text)
 
 
 def quote_bare_string(expect):
@@ -1012,6 +1272,141 @@ def one_line(printed):
             out.append(c)
         i += 1
     return "".join(out).strip()
+
+
+def _paren_depth(text):
+    """Open minus closed parentheses in TEXT, ignoring strings and character literals."""
+    depth, i, n = 0, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c == "#" and text[i + 1:i + 2] == "\\":
+            i += 2
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        i += 1
+    return depth
+
+
+def balance_let_call(call, definition):
+    """Rebalance ``(let ((r (TOOL arg ...))) BODY)`` when the parens after the arguments are off.
+
+    After deeply nested state data a model miscounts the run of ``)`` that has
+    to close the data, the call, the binding and the binding list, and it
+    miscounts again when told to recount. The tool's ``defun`` says how many
+    arguments it takes, so they are read one whole form at a time; then exactly
+    three ``)`` close the call, the binding and the binding list, and the end of
+    the form is closed or trimmed to balance. Only an UNBALANCED call of this
+    exact shape is touched, and only if the result reads as that shape.
+    """
+    m = re.match(r"\s*\(defun\s+(\S+)\s+\(([^)]*)\)", definition or "")
+    if not m or "&" in m.group(2) or _paren_depth(call) == 0:
+        return call
+    name, argc = m.group(1), len(m.group(2).split())
+    head = re.match(r"\s*\(let\*?\s*\(\(\s*[^\s()]+\s+\(%s(?=[\s)])" % re.escape(name),
+                    call, re.I)
+    if not head:
+        return call
+    i, n = head.end(), len(call)
+    for _ in range(argc):
+        while i < n and call[i].isspace():
+            i += 1
+        j = i
+        while j < n and call[j] in "'`":
+            j += 1
+        if j >= n:
+            return call
+        if call[j] == "(":
+            end = _form_end(call, j)
+            if end < 0:
+                return call
+            i = end + 1
+        elif call[j] == '"':
+            k = j + 1
+            while k < n and call[k] != '"':
+                k += 2 if call[k] == "\\" else 1
+            if k >= n:
+                return call
+            i = k + 1
+        else:
+            k = j
+            while k < n and not call[k].isspace() and call[k] not in "()":
+                k += 1
+            if k == j:
+                return call                  # a ")" where an argument should be
+            i = k
+    args_end = i
+    while i < n and (call[i] == ")" or call[i].isspace()):
+        i += 1
+    if not call[i:].strip():
+        return call
+    fixed = call[:args_end] + "))) " + call[i:]
+    depth = _paren_depth(fixed)
+    if 0 < depth <= 3:
+        fixed += ")" * depth
+    elif depth < 0:
+        fixed = trim_surplus_parens(fixed)
+    try:
+        form = s_expr.parse(fixed)
+    except s_expr.SExprError:
+        return call
+    try:
+        bound = form[1][0][1]
+        ok = str(form[0]).lower() in ("let", "let*") and len(form) >= 3 and \
+            len(form[1]) == 1 and str(bound[0]).lower() == name.lower() and \
+            len(bound) == argc + 1
+    except (IndexError, TypeError):
+        ok = False
+    return fixed if ok else call
+
+
+def error_cause(err):
+    """The part of a worker error that says what is wrong, on one line.
+
+    SBCL reports a function that does not compile as "Execution of a form
+    compiled with errors", then prints the whole form, and only then the
+    cause. Cut to a line, the model saw the form and never the cause.
+    """
+    text = (err or "failed").split("--- backtrace ---")[0]
+    if "Compile-time error:" in text:
+        cause = text.split("Compile-time error:", 1)[1]
+        cause = cause.replace("Use\n*BREAK-ON-SIGNALS* to intercept.", "").replace(
+            "Use *BREAK-ON-SIGNALS* to intercept.", "")
+        return "does not compile: " + " ".join(cause.split())
+    return " ".join(text.split())
+
+
+def unchanged_state(expect, call, name, state_at):
+    """Mark an expected response whose ``:state`` equals the state passed IN.
+
+    The contract lets a handler leave ``:state`` out when nothing changed, but
+    models still write it into the expected value. ``:state S`` becomes
+    ``:state-unchanged S``, which the checker accepts with or without the key.
+    """
+    try:
+        want = s_expr.parse(expect)
+        form = s_expr.parse(call)
+    except s_expr.SExprError:
+        return expect
+    if not (isinstance(want, list) and want and want[0] == ":status" and ":state" in want
+            and isinstance(form, list) and str(form[0]).lower() == name
+            and len(form) > state_at + 1):
+        return expect
+    arg, at = form[state_at + 1], want.index(":state")
+    given = arg[1] if isinstance(arg, list) and len(arg) == 2 and arg[0] == "quote" else None
+    nil = lambda x: [] if isinstance(x, str) and not isinstance(x, s_expr.SString) \
+        and x.lower() == "nil" else ([nil(y) for y in x] if isinstance(x, list) else x)
+    if given is None or at + 1 >= len(want) or nil(want[at + 1]) != nil(given):
+        return expect
+    try:
+        return webkit.data_source(want[:at] + [":state-unchanged"] + want[at + 1:])
+    except ValueError:
+        return expect
 
 
 def trim_surplus_parens(text):
@@ -1061,6 +1456,11 @@ def normalize_plan(plan):
     if isinstance(plan.get("definition"), str):
         d = step("trimmed-surplus-paren", trim_surplus_parens, plan["definition"])
         d = step("completed-missing-paren", complete_parens, d)
+        d = step("newline-escape-in-string", newline_escapes, d)
+        d = step("css-rule-commas", lispstyle.fix_css_commas, d)
+        # "width:100%%" is a habit from printf: here it reaches the page as it stands
+        d = step("doubled-percent", lambda x: _STR_LIT.sub(
+            lambda m: re.sub(r"(\d)%%", r"\1%", m.group(0)), x), d)
         d = step("flattened-setf", fix_setf, d)
         d = step("let-to-let-star", lispstyle.let_to_let_star, d)
         if plan.get("action") == "build":
@@ -1074,18 +1474,21 @@ def normalize_plan(plan):
     state_at = parts[1].index("state") if parts and "state" in parts[1] else None
 
     def fix_call(text):
+        text = step("rebalanced-let-around-call", lambda x: balance_let_call(x, defn), text)
         text = step("restored-paren-in-call", lambda x: balance_call(x, defn), text)
+        text = step("trimmed-surplus-paren-in-call", trim_surplus_parens, text)
         text = step("quoted-data-list", quote_literals, text)
         if state_at is not None:
-            # the STATE argument is always a list of (name rows) tables
-            text = step("nested-state-data",
-                        lambda x: webkit.fix_state_args(x, parts[0], state_at), text)
+            # the STATE argument is ONE list of (name rows) tables
+            text = step("nested-state-data", lambda x: webkit.fix_state_args(
+                x, parts[0], state_at, len(parts[1])), text)
         return text
 
     for t in plan.get("tests") or []:
         if isinstance(t, dict) and isinstance(t.get("expect"), str):
             e = step("quoted-bare-expected-string", quote_bare_string, t["expect"])
             e = step("newline-escape-in-expected-string", newline_escapes, e)
+            e = step("trimmed-surplus-paren-in-expected-value", trim_surplus_parens, e)
             t["expect"] = step("completed-paren-in-expected-value", complete_parens, e)
 
     if isinstance(plan.get("call"), str):
@@ -1093,6 +1496,10 @@ def normalize_plan(plan):
     for t in plan.get("tests") or []:
         if isinstance(t, dict) and isinstance(t.get("call"), str):
             t["call"] = fix_call(t["call"])
+            if state_at is not None and isinstance(t.get("expect"), str):
+                t["expect"] = step("unchanged-state-in-expected-response",
+                                   lambda x: unchanged_state(x, t["call"], parts[0], state_at),
+                                   t["expect"])
     # Tests that are prose or call some other (often non-existent) function are
     # dropped when usable tests remain: one bad extra test must not cost a
     # whole repair round. With none left, validation reports the problem.
@@ -1121,6 +1528,10 @@ def normalize_plan(plan):
 
 class BudgetExhausted(RuntimeError):
     """The session reached its model-call limit."""
+
+
+class Cancelled(RuntimeError):
+    """The user stopped the session."""
 
 
 class BadReply(ValueError):
@@ -1199,7 +1610,13 @@ def _extract_balanced(text, start):
     raise ValueError("unterminated JSON object")
 
 
-JSON_RETRY_TEMPS = (0.4, 0.8)     # a retry at the same temperature repeats the slip
+# A plain call sampled above temperature 0 sometimes answers with NOTHING (one
+# token, then stop): 17 times in the logs, every one at 0.4-0.8, never at 0. So
+# only thinking calls and the "identical candidate" retry still sample. A retry
+# after unreadable JSON gets a changed prompt, which changes the answer by
+# itself, and an empty reply is simply asked again at 0.
+JSON_RETRY_TEMPS = (0.0, 0.4)
+MAX_DEFINITION_CHARS = 7000       # a longer function is cut off, slow and breaks JSON
 
 
 def validate_build(plan, frozen=None):
@@ -1210,10 +1627,16 @@ def validate_build(plan, frozen=None):
     definition = plan.get("definition")
     if not isinstance(definition, str) or not definition.strip():
         return "definition missing"
+    if len(definition) > MAX_DEFINITION_CHARS:
+        return ("the definition is %d characters long: keep it under %d by moving parts into "
+                "helper functions, or by shortening the CSS (fewer rules, no repeated values)"
+                % (len(definition), MAX_DEFINITION_CHARS))
     for problem in lispstyle.purity_problems(definition):
         return "not a pure function: " + problem
     for problem in lispstyle.case_problems(definition):
         return problem
+    for problem in lispstyle.escape_problems(definition):
+        return "unescaped text in HTML: " + problem
     for problem in lispstyle.security_problems(name, plan.get("description"), definition):
         return "unsafe secret comparison: " + problem
     tests = plan.get("tests")
@@ -1341,7 +1764,16 @@ WEB_APP_CONTRACT = (
     "nothing changed. Redirect with :status 303 and a (\"Location\" \"/\") "
     "header; set a cookie with a (\"Set-Cookie\" \"sid=VALUE; HttpOnly; Path=/\") "
     "header. Stay pure: take the time from :now and randomness (session ids, "
-    "salts) from :nonce. Escape all user text before putting it in HTML. "
+    "salts) from :nonce. Wrap EVERY piece of stored or submitted text in "
+    "(html-escape ...) before it goes into HTML. A page that lists items also "
+    "shows the form to add one and links to the other pages; a POST handler "
+    "refuses empty required fields; pages put what the stylesheet function returns in "
+    "<head>: bare CSS goes inside a <style> tag, but a result that already holds "
+    "tags (<style>, <script>, <link>) is inserted as it is, never wrapped again. TESTS and examples of pages never expect a whole page: "
+    "give the expected response as a plist with only what matters, such as "
+    "(page-fn request state) => (:status 200 :body \"...Widget...\") where "
+    "... matches any text, or (:status 303 :headers ((\"Location\" "
+    "\"/login\"))). "
     "Keep handle-request small: it only routes on method and path to other "
     "tools, each of which is (request state) -> response plist or a helper. "
 ) + webkit.USAGE
@@ -1462,6 +1894,13 @@ class Session:
         self._warned = set()              # lessons already shown to the model in this run
         self._recurred = set()            # ...that happened again anyway (counted once)
         self._eval_ms = []                # timings of the latest rehearsal's tests
+        self._features = []               # what the goal asks for (goalcheck.goal_features)
+        self._app = False                 # building a web or command-line app
+        self._max_steps = MAX_PLAN_STEPS
+        self._drafts = {}                 # step name -> Future of a first draft
+        self._later = set()               # plan steps still to be built after this one
+        self._failed_steps = []           # app-plan steps that could not be built
+        self.prior_goals = []             # earlier prompts of this project
         self.project = projects.BUILTIN   # which program this session works on
         self.project_note = ""            # one line of project context for the model
         self.events = []
@@ -1482,21 +1921,52 @@ class Session:
         self._seen_expect = {}      # call -> every expected value ever proposed
         self._fails = []            # one record per failed rehearsal
         self._lock = threading.Lock()
+        self._tl = threading.local()      # what THIS thread's lane is working on
+        self._turn = threading.Lock()     # one lane does harness work at a time
+        self.parallel = PARALLEL_STEPS if generate is live_generate else 1
+        self._calls_sem = None            # caps this session's model calls in flight
+        self._in_flight = 0
+        self._peak_calls = 0
+        self._lanes = 0                   # plan steps built concurrently in this run
+        self._lane_index = {}             # step name -> position in the plan
+        self._lane_done = []              # one Event per plan step, set when it ends
+        self._pending = set()             # plan steps not finished yet
+        self._halt = False                # a plan that is not an app stops at a failed step
+        self._think = {"calls": 0, "fallbacks": 0, "reasoning_tokens": 0}
+        self._kept = []                   # planned changes the model declined to make
+        self._cancel = False              # the user asked to stop
+        self._ctx = {"prompt_chars": 0, "saved_chars": 0, "edits": 0, "edit_failures": 0,
+                     "kept": 0, "warm_evals": 0}       # what compaction did in this run
+        self._fixing = False              # building what a look at the screenshots asked for
+        self._fix_failed = []             # ...and the changes of such a round that failed
+        self._look_problems = []          # what the latest look found, for the fix steps
+        self.visual = generate is live_generate   # check a finished web app with screenshots
+        self.capture_fn = screenshot.capture_html
+        self.shots_dir = AGENT_DIR / "shots" / self.id
+        self._visual = {"checked": False, "rounds": 0, "done": None, "problems": [],
+                        "shots": [], "skipped": None, "unfixed": [], "undefined_classes": []}
+        self._style_gaps = {"undefined": [], "defined": [], "framework": False}
+        self._plan_note = ""              # what the planner was told about this goal
+        self._smoke_ok = False
+        self._incomplete = False          # the app answers but a planned function is missing
         self._log_path = Path(log_path) if log_path else \
             AGENT_DIR / "sessions" / ("%s.jsonl" % self.id)
 
     # -- events ---------------------------------------------------------
     def emit(self, kind, **data):
-        with self._lock:
+        lane = getattr(self._tl, "lane", None)
+        if lane and "lane" not in data:
+            data["lane"] = lane       # which concurrently built function this is about
+        with self._lock:              # the file too: lanes must not interleave lines
             ev = {"i": len(self.events), "t": round(time.time(), 3),
                   "kind": kind, **data}
             self.events.append(ev)
-        try:
-            self._log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._log_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(ev) + "\n")
-        except OSError:
-            pass
+            try:
+                self._log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._log_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(ev) + "\n")
+            except OSError:
+                pass
         return ev
 
     def snapshot(self, since=0):
@@ -1509,11 +1979,70 @@ class Session:
                     "output_tokens": self.output_tokens,
                     "events": self.events[since:], "next": len(self.events)}
 
+    # A lane's own view of how its build went (each lane is a thread).
+    @property
+    def _last_failure(self):
+        return getattr(self._tl, "last_failure", {})
+
+    @_last_failure.setter
+    def _last_failure(self, value):
+        self._tl.last_failure = value
+
+    @property
+    def _last_stuck(self):
+        return getattr(self._tl, "last_stuck", False)
+
+    @_last_stuck.setter
+    def _last_stuck(self, value):
+        self._tl.last_stuck = value
+
+    def _context_of(self, user_text):
+        """``{"chars", "saved", "level"}`` for the prompt this thread built last."""
+        made = getattr(self._tl, "ctx", None) or {}
+        self._tl.ctx = None
+        saved = made.get("saved", 0) if made.get("text") == user_text else 0
+        with self._lock:
+            self._ctx["prompt_chars"] += len(user_text)
+            self._ctx["saved_chars"] += saved
+        return {"chars": len(user_text), "saved": saved,
+                "level": made.get("level", 0) if saved else 0}
+
+    def cancel(self):
+        """Ask the session to stop. It ends as soon as the calls in flight return."""
+        if self._cancel or self.state != "running":
+            return False
+        self._cancel = True
+        self.emit("cancel_requested")
+        return True
+
+    def _check_cancel(self):
+        if self._cancel:
+            raise Cancelled("cancelled by the user")
+
     # -- model ----------------------------------------------------------
+    def _generate(self, system, text):
+        """The model call itself. A lane gives up its turn while it waits for the reply."""
+        if not getattr(self._tl, "turn", False):
+            return self.generate(system, text)
+        self._turn.release()
+        try:
+            with self._calls_sem:
+                with self._lock:
+                    self._in_flight += 1
+                    self._peak_calls = max(self._peak_calls, self._in_flight)
+                try:
+                    return self.generate(system, text)
+                finally:
+                    with self._lock:
+                        self._in_flight -= 1
+        finally:
+            self._turn.acquire()
+
     def _ask(self, user_text, label, system=None, temperature=None, effort="low",
-             deep=False):
+             deep=False, prefetched=None, think_tokens=None, images=None):
         """One model call. TEMPERATURE varies the answer at no extra cost; DEEP
         turns reasoning on (slow and expensive) and is rationed per session."""
+        self._check_cancel()
         if self.model_calls >= self.max_calls:
             raise BudgetExhausted("model call budget (%d) exhausted"
                                   % self.max_calls)
@@ -1526,28 +2055,49 @@ class Session:
         self.emit("model_call", label=label, prompt=user_text,
                   system=self._system_id(system or SYSTEM_PROMPT),
                   temperature=BASE_TEMPERATURE if temperature is None else temperature,
-                  deep=deep, effort=effort if deep else "none")
+                  deep=deep, effort=effort if deep else "none",
+                  ahead=prefetched is not None, **({"images": len(images)} if images else {}),
+                  context=self._context_of(user_text))
+        _TEMP.images = images             # screenshots shown to the model with this call
         _TEMP.effort = effort
         _TEMP.value = temperature
         _TEMP.deep = deep
-        _TEMP.notify = lambda msg: self.emit("model_wait", message=msg)
+        _TEMP.think_tokens = think_tokens
+        _TEMP.notify = lambda msg, **kw: self.emit("model_wait", message=msg, **kw)
         try:
-            res = self.generate(system or SYSTEM_PROMPT, user_text)
+            # PREFETCHED: this reply was requested earlier, alongside other drafts
+            res = prefetched or self._generate(system or SYSTEM_PROMPT, user_text)
         finally:
             _TEMP.notify = None
             _TEMP.value = None
             _TEMP.deep = False
+            _TEMP.think_tokens = None
+            _TEMP.images = None
         self.cost_usd += res.get("cost_usd") or 0.0
         self.input_tokens += res.get("input_tokens") or 0
         self.output_tokens += res.get("output_tokens") or 0
+        self._check_cancel()              # the reply was paid for and counted; nothing is built from it
+        think = {}
+        if deep:
+            self._think["calls"] += 1
+            self._think["fallbacks"] += 1 if res.get("thinking_fallback") else 0
+            self._think["reasoning_tokens"] += res.get("reasoning_tokens") or 0
+            think = {"thinking": res.get("thinking"),
+                     "thinking_fallback": bool(res.get("thinking_fallback")),
+                     "reasoning_tokens": res.get("reasoning_tokens"),
+                     "reasoning": (res.get("reasoning") or "")[:600]}
         self.emit("model_reply", text=res.get("text"),
                   model=res.get("model"),
                   input_tokens=res.get("input_tokens"),
                   output_tokens=res.get("output_tokens"),
                   estimated=bool(res.get("estimated")),
                   cost_usd=res.get("cost_usd"),
-                  latency_ms=res.get("latency_ms"))
+                  latency_ms=res.get("latency_ms"),
+                  finish_reason=res.get("finish_reason"), **think)
         try:
+            if res.get("finish_reason") == "length":
+                # a tolerant parse would keep half a function and drop its tests
+                raise ValueError("the reply was cut off at the token limit")
             return self._parsed(res.get("text"), label)
         except ValueError as exc:
             err = exc
@@ -1561,21 +2111,24 @@ class Session:
             if self.lessons is not None:
                 self.lessons.record_harness("invalid-json-reply")
             self.model_calls += 1
-            retry_text = (
+            empty = not (res.get("text") or "").strip()
+            # an empty reply was not cut off: the same question is simply asked again
+            retry_text = user_text if empty else (
                 user_text + "\nYOUR PREVIOUS REPLY WAS CUT OFF OR NOT VALID "
                 "JSON (%s). Reply with ONE complete JSON object only. Close "
                 "every string with a double quote before the next } or ], "
                 "and keep the Lisp definition compact." % str(err)[:120])
-            self.emit("model_call", label=label + " (retry: invalid JSON)",
+            self.emit("model_call", label=label + (" (retry: empty reply)" if empty
+                                                   else " (retry: invalid JSON)"),
                       prompt=retry_text,
                       system=self._system_id(system or SYSTEM_PROMPT),
                       temperature=temp, deep=False)
-            _TEMP.max_tokens = 5000
+            _TEMP.max_tokens = REPLY_TOKENS_RETRY
             _TEMP.value = temp
             try:
-                res = self.generate(system or SYSTEM_PROMPT, retry_text)
+                res = self._generate(system or SYSTEM_PROMPT, retry_text)
             finally:
-                _TEMP.max_tokens = 2200
+                _TEMP.max_tokens = REPLY_TOKENS
                 _TEMP.value = None
             self.cost_usd += res.get("cost_usd") or 0.0
             self.input_tokens += res.get("input_tokens") or 0
@@ -1586,8 +2139,11 @@ class Session:
                       output_tokens=res.get("output_tokens"),
                       estimated=bool(res.get("estimated")),
                       cost_usd=res.get("cost_usd"),
-                      latency_ms=res.get("latency_ms"))
+                      latency_ms=res.get("latency_ms"),
+                      finish_reason=res.get("finish_reason"))
             try:
+                if res.get("finish_reason") == "length":
+                    raise ValueError("the reply was cut off at the token limit")
                 return self._parsed(res.get("text"), label)
             except ValueError as exc:
                 err = exc
@@ -1622,18 +2178,32 @@ class Session:
         return plan
 
     def _user_prompt(self, extra="", goal=None, full=False):
-        """The user message of a model call.
+        """The user message of a model call, compacted to the call's budget.
 
-        ``full`` (the planner) gets every tool with its example. Every other
-        call gets a registry focused on what the call is about, the short web
-        reminder, and only the two most frequent lessons.
+        ``full`` (the planner) sees every tool. Every other call gets a
+        registry focused on what the call is about, the short web reminder,
+        the two most frequent lessons and a one-sentence project note. What
+        compaction saved is remembered for the call's log entry.
         """
         tools = self.registry.load()
         target = goal or self.prompt
         focus = None if full else "%s\n%s" % (target, extra)
-        text = "REGISTRY:\n%s\nGOAL: %s\n%s" % (registry_text(tools, focus), target, extra)
+        plain = registry_text(tools, focus)
+        block, level = compact_registry(
+            tools, focus, REGISTRY_BUDGET_PLAN if full else REGISTRY_BUDGET)
+        saved = len(plain) - len(block)
+        text = "REGISTRY:\n%s\nGOAL: %s\n%s" % (block, target, extra)
         if self.project_note:
-            text = self.project_note + "\n" + text
+            note = self.project_note
+            if not full:
+                # the planner got the whole note; a working call needs one rule of it
+                m = re.match(r"PROJECT: (.*?)\. Its saved tools", note)
+                short = ("PROJECT: %s. Change a saved tool by building it again under "
+                         "the SAME name, keeping its argument shapes." % (m.group(1) if m else ""))
+                if m and len(short) < len(note):
+                    saved += len(note) - len(short)
+                    note = short
+            text = note + "\n" + text
         if not full and any(t["name"] == "handle-request" or t.get("kit") for t in tools):
             text += "\n" + WEB_REMINDER
         if self.lessons is not None and not full:
@@ -1645,21 +2215,60 @@ class Session:
                 fresh = [k for k in keys if k not in self._warned]
                 self.lessons.mark_shown(fresh)
                 self._warned.update(fresh)
+        self._tl.ctx = {"text": text, "saved": max(0, saved), "level": level}
         return text
 
     # -- REPL -----------------------------------------------------------
-    def _repl(self, code, label):
-        env = self.worker_fn(code)
-        self.emit("repl", label=label, code=code, ok=env.get("ok"),
+    def _session_repl(self):
+        """The session's warm SBCL process, holding the checker and every saved tool; or None.
+
+        One long-lived REPL per build instead of a new SBCL process per form:
+        a form costs well under a millisecond there against about 120 ms cold.
+        None for injected workers (tests) and when fast rehearsal is off.
+        """
+        if not FAST_REHEARSAL or self.worker_fn is not _worker_fn:
+            return None
+        base = "%s\n%s" % (GG_CHECK, self.registry.prelude())
+        return lispserver.cached_server("rehearse:" + self.id, base, WORKER_TIMEOUT_S)
+
+    @staticmethod
+    def _repl_down(env):
+        """True when the warm REPL itself failed (not the form): use a fresh process."""
+        return bool(env.get("timed_out")) or (env.get("error") or "").startswith(
+            ("the Lisp server", "sbcl executable", "failed to spawn", "the definitions failed"))
+
+    def _repl(self, code, label, form=None):
+        """Evaluate and log one form. FORM is the same thing without the prelude:
+        when the warm REPL is available it runs there, else CODE runs in a fresh process."""
+        env, warm = None, False
+        server = self._session_repl() if form is not None else None
+        if server is not None:
+            env = server.eval(form)
+            warm = not self._repl_down(env)
+            if warm:
+                self._ctx["warm_evals"] += 1
+        if not warm:
+            env = self.worker_fn(code)
+        self.emit("repl", label=label, code=form if warm else code, ok=env.get("ok"),
                   value=env.get("return_value"), stdout=env.get("stdout"),
                   error=(env.get("error") or "")[:600],
-                  elapsed_ms=env.get("elapsed_ms"))
+                  elapsed_ms=env.get("elapsed_ms"), **({"warm": True} if warm else {}))
         return env
 
     # -- main -----------------------------------------------------------
     def run(self):
         try:
+            self._run_guarded()
+        finally:
+            lispserver.drop("rehearse:" + self.id)     # this session's warm test process
+
+    def _run_guarded(self):
+        try:
             self._run()
+        except Cancelled:
+            # the user's decision, not a failure: what was saved stays saved
+            self.state = "cancelled"
+            self.emit("cancelled", saved=list(dict.fromkeys(n for n, _ in self._built)))
         except BudgetExhausted:
             # not a crash: the work so far is saved and the next prompt builds on it
             names = [n for n, _ in self._built]
@@ -1749,13 +2358,15 @@ class Session:
         planned = next((len(e["steps"]) for e in ev
                         if e["kind"] == "plan" and not e.get("sub")), 0)
         outcome = ("success" if self.state == "done" else
-                   "error" if self.state == "error" else "failed")
+                   "error" if self.state == "error" else
+                   "cancelled" if self.state == "cancelled" else "failed")
         m = re.match(r"\s*\(\s*(\S+)", (last or {}).get("call") or "")
+        built = list({n: t for n, t in self._built}.items())    # last build of a name wins
         return {
             "outcome": outcome, "flow": kind,
-            "built": [{"name": n, "tests": t} for n, t in self._built],
+            "built": [{"name": n, "tests": t} for n, t in built],
             "planned": planned,
-            "tests_passed": sum(t for _, t in self._built),
+            "tests_passed": sum(t for _, t in built),
             "repairs": count("repair"), "splits": count("replan"),
             "model_calls": self.model_calls,
             "tokens": self.input_tokens + self.output_tokens,
@@ -1771,7 +2382,32 @@ class Session:
             "error": errs[-1].get("message") if errs else None,
             "capability_gaps": next((e.get("gaps") for e in ev
                                      if e["kind"] == "capability_notice"), None) or [],
+            "missing_features": self._missing_now(),
+            "unused_functions": goalcheck.unused_functions(self.registry.load())
+            if self._app else [],
+            "smoke": next(({"call": e.get("call"), "ok": e.get("ok"),
+                            "status": e.get("status"), "error": e.get("error")}
+                           for e in reversed(ev) if e["kind"] == "smoke"), None),
+            "concurrency": {
+                "parallel": self._lanes > 1, "lanes": self._lanes,
+                "peak": self._peak_calls,
+                "limit": GATE.limit if self.generate is live_generate else self.parallel,
+                "throttles": sum(1 for e in ev if e["kind"] == "model_wait"
+                                 and e.get("rate_limited"))},
+            "thinking": dict(self._think),
+            "kept": list(self._kept),
+            "visual": dict(self._visual),
+            "compaction": dict(self._ctx),
         }
+
+    def _missing_now(self):
+        """Labels of goal features that no SAVED function provides."""
+        if not self._features and not self._failed_steps:
+            return []
+        texts = ["%s %s %s" % (t["name"], t.get("description", ""), t.get("definition", ""))
+                 for t in self.registry.load() if not t.get("kit")]
+        return [f["label"] for f in goalcheck.missing(self._features, texts)] + [
+            "the function %s (it kept failing its tests)" % n for n in self._failed_steps]
 
     def _run(self):
         tools = self.registry.load()
@@ -1836,10 +2472,44 @@ class Session:
         elif "COMMAND-LINE APP CONTRACT" not in note and \
                 any(t["name"] == "handle-command" for t in tools):
             note = (note + " " + CLI_APP_CONTRACT).strip()
-        plan = self._ask(self._user_prompt(note, full=True), "plan")
+        earlier = [g for g in dict.fromkeys(self.prior_goals) if g and g != self.prompt][-3:]
+        self._features = goalcheck.goal_features(" . ".join([self.prompt] + earlier))
+        if earlier:
+            note += (" EARLIER GOALS OF THIS PROJECT (still required): "
+                     + " | ".join(g[:240] for g in earlier) + ".")
+        self._app = bool(needs & {"web server", "command line"} or
+                         names & {"handle-request", "handle-command"})
+        if self._app:
+            self._max_steps = MAX_APP_STEPS
+            note += (" This is an app: you may plan up to %d steps." % MAX_APP_STEPS)
+        if self._features:
+            note += (" THE GOAL ASKS FOR ALL OF THESE, and the plan must cover each: "
+                     + "; ".join("%s (%s)" % (f["label"], f["hint"])
+                                 for f in self._features) + ".")
+        facts = self._style_facts()
+        if facts and facts["used"]:
+            note += (" STYLE FACTS, read from the saved code: the pages use the classes %s. The "
+                     "stylesheet function %s defines %s.%s A styling request is met by keeping "
+                     "the class names the pages already use and giving EACH of them a rule in "
+                     "%s; a stylesheet rewritten with other class names leaves the pages unstyled."
+                     % (", ".join(facts["used"][:60]), facts["sheet"],
+                        ", ".join(facts["defined"][:60]) or "no classes",
+                        " These %d used classes have NO rule and render unstyled now: %s."
+                        % (len(facts["missing"]), ", ".join(facts["missing"][:40]))
+                        if facts["missing"] else "", facts["sheet"]))
+        self._plan_note = note
+        # the plan decides every later call: a large goal gets a thought-out one
+        plan = self._ask(self._user_prompt(note, full=True), "plan", deep=(
+            self._app or len(self.prompt.split()) > THINK_PLAN_WORDS))
         if plan.get("action") == "plan":
+            plan = self._cover(plan, note)
             if not self._run_steps(plan):
                 return
+            if self._app and self._smoke():
+                if self._smoke_ok:
+                    self._style_repair()     # every class the pages use gets a rule
+                    self._visual_review()    # it answers: now look at what it shows
+                return                       # the app answered its own check: done
             plan = self._ask(self._user_prompt(
                 "All planned helper tools are built and saved. Now finish the "
                 "original goal: reply with action use and a call of the "
@@ -1856,52 +2526,585 @@ class Session:
             return
         if action != "build":
             raise ValueError("model returned unknown action %r" % (action,))
-        self._build_loop(plan, prelude)
+        built = self._build_loop(plan, prelude)
+        if built and self._app and self.state == "running" and self._smoke() and self._smoke_ok:
+            # one function was changed, not a plan: the app is checked all the same.
+            # (Three "fix the styling" prompts in a row each rewrote the stylesheet
+            # alone, with new class names, and nothing looked at the result.)
+            self._style_repair()
+            self._visual_review()
 
     # -- planner: a big goal becomes a few small, individually tested tools ---
+    # -- goal coverage ---------------------------------------------------
+    def _plan_texts(self, plan):
+        """What a plan plus the already saved tools say they provide."""
+        texts = ["%s %s" % (x.get("name", ""), x.get("spec", ""))
+                 for x in plan.get("steps") or [] if isinstance(x, dict)]
+        return texts + ["%s %s" % (t["name"], t.get("description", ""))
+                        for t in self.registry.load() if not t.get("kit")]
+
+    def _cover(self, plan, note):
+        """Check the plan against what the goal asks for; ask once for what is missing."""
+        if not self._features or not isinstance(plan.get("steps"), list):
+            return plan                     # a malformed plan is rejected by _run_steps
+        gone = goalcheck.missing(self._features, self._plan_texts(plan))
+        extended = False
+        if gone and self.model_calls < self.max_calls:
+            more = self._ask(self._user_prompt(
+                note + " YOUR PLAN LEAVES OUT: " + "; ".join(
+                    "%s (%s)" % (f["label"], f["hint"]) for f in gone)
+                + ". Return the COMPLETE plan again (action plan): keep these steps: "
+                + ", ".join(x.get("name", "") for x in plan.get("steps") or [])
+                + ", and add steps for what is missing, at most %d steps in all, "
+                  "the top-level function last." % self._max_steps, full=True),
+                "extend-plan", deep=True)
+            steps = more.get("steps") if more.get("action") == "plan" else None
+            if isinstance(steps, list) and len(plan.get("steps") or []) <= len(steps) \
+                    <= self._max_steps:
+                plan, extended = more, True
+                gone = goalcheck.missing(self._features, self._plan_texts(plan))
+        state = goalcheck.covered(self._features, self._plan_texts(plan))
+        self.emit("coverage", extended=extended,
+                  features=[{"key": f["key"], "label": f["label"],
+                             "covered": bool(state.get(f["key"]))} for f in self._features],
+                  missing=[f["label"] for f in gone])
+        return plan
+
+    def _smoke(self):
+        """Zero-token check that the finished app answers; replaces the 'final' model call.
+
+        A web app gets ``GET /`` against its initial state, a command-line app
+        gets ``help``. The state is a throwaway file. Returns True when the
+        check was run (pass or fail), False when there is no app entry point.
+        """
+        import mount                               # mount imports this module
+        names = {t["name"] for t in self.registry.load()}
+        if not names & {"handle-request", "handle-command"}:
+            return False
+        folder = Path(tempfile.mkdtemp(prefix="gg-smoke-"))
+        try:
+            app = mount.MountedApp(self.registry, mount.StateStore(folder / "state.sqlite"),
+                                   run_lisp=self.worker_fn)
+            if "handle-request" in names:
+                status, _, body = app.handle("GET", "/", {})
+                call, ok = "GET /", 200 <= status < 400
+                value, error = body, "" if ok else "status %d: %s" % (status, body[:300])
+            else:
+                out = app.run_command(["help"])
+                call, ok, status = "help", bool(out["ok"]), 200 if out["ok"] else 500
+                value, error = out["output"], out["error"]
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        self._smoke_ok = bool(ok)
+        self.emit("smoke", call=call, ok=ok, status=status, error=error[:400])
+        self.emit("result", call=call, ok=ok, value=value[:4000], expected_ok=None,
+                  error=error[:600])
+        if ok and not self._failed_steps and self.state == "failed" and self._incomplete:
+            self.state, self._incomplete = "running", False     # a later round built what was missing
+        if ok and self._failed_steps:
+            self.state, self._incomplete = "failed", True
+            self.emit("gave_up", attempts=0, app=True, detail=(
+                "The app answers, but %d planned function(s) could not be built: %s."
+                % (len(self._failed_steps), ", ".join(self._failed_steps))),
+                hint="Send the prompt again to continue from what is saved.")
+        if not ok:
+            self.state = "failed"
+            self.emit("gave_up", detail="The app was built but failed its own check (%s): %s"
+                      % (call, error[:300]), hint="Send the prompt again to repair it.",
+                      attempts=0, app=True)
+        return True
+
+    def _take_shots(self, rnd):
+        """Screenshots of the app's pages for look RND: ``[(page, png_path)]``."""
+        import mount                               # mount imports this module
+        from concurrent.futures import ThreadPoolExecutor
+        folder = Path(tempfile.mkdtemp(prefix="gg-look-"))
+        try:
+            app = mount.MountedApp(self.registry, mount.StateStore(folder / "state.sqlite"),
+                                   run_lisp=self.worker_fn)
+            pages = visualcheck.collect_pages(app, limit=VISUAL_PAGES)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        self.emit("visual_start", round=rnd, pages=len(pages))
+        gaps = visualcheck.style_gaps(pages)
+        self._style_gaps = gaps
+        if pages and not gaps["framework"]:
+            self._visual["undefined_classes"] = gaps["undefined"][:40]
+            self.emit("style_check", round=rnd, undefined=gaps["undefined"][:40],
+                      defined=len(gaps["defined"]))
+        if not pages:
+            return []
+        outs = [self.shots_dir / ("r%d-%d.png" % (rnd, n)) for n in range(1, len(pages) + 1)]
+        with ThreadPoolExecutor(max_workers=len(pages)) as pool:    # one browser run each
+            results = list(pool.map(lambda pair: self.capture_fn(pair[0]["html"], pair[1]),
+                                    zip(pages, outs)))
+        shots = []
+        for n, (page, out, res) in enumerate(zip(pages, outs, results), 1):
+            ok = bool(res.get("ok"))
+            url = "/api/agent/shots/%s/%s" % (self.id, out.name) if ok else None
+            self.emit("screenshot", round=rnd, n=n, label=page["label"], path=page["path"],
+                      status=page["status"], ok=ok, url=url,
+                      error=(res.get("error") or "")[:300], ms=res.get("ms"))
+            if ok:
+                shots.append((page, out))
+                self._visual["shots"].append({"label": page["label"], "url": url, "round": rnd})
+        return shots
+
+    def _visual_review(self, rnd=1):
+        """Show the model screenshots of the finished web app; build what it still sees wrong.
+
+        The harness can prove that the app answers. Only a look at the page says
+        whether it is what was asked for: styled, complete, readable. One look,
+        at most ``MAX_VISUAL_FIXES`` rounds of changes, then a last look whose
+        verdict is reported as it is.
+        """
+        names = {t["name"] for t in self.registry.load()}
+        if not self.visual or "handle-request" not in names:
+            return
+        self._check_cancel()
+        before = len(self._visual["problems"]) if rnd > 1 else None
+        skip = None
+        if self.model_calls >= self.max_calls:
+            skip = "the model call limit was reached"
+        elif self.capture_fn is screenshot.capture_html and not screenshot.find_browser():
+            skip = "no Edge or Chrome browser was found to take the pictures"
+        shots = [] if skip else self._take_shots(rnd)
+        if not skip and not shots:
+            skip = "no page could be rendered"
+        if skip:
+            self._visual["skipped"] = self._visual["skipped"] or skip
+            self.emit("visual_review", round=rnd, skipped=skip, done=None, problems=[], fix="")
+            return
+        goals = [g for g in dict.fromkeys(self.prior_goals) if g and g != self.prompt][-3:]
+        text = "GOAL: %s\n%sPAGES SHOWN, in the order of the pictures:\n%s\nFUNCTIONS OF THE APP: %s" % (
+            self.prompt,
+            "EARLIER GOALS OF THIS PROJECT (still required): %s\n" % " | ".join(
+                g[:240] for g in goals) if goals else "",
+            "\n".join("%d. %s" % (n, page["label"]) for n, (page, _) in enumerate(shots, 1)),
+            ", ".join(sorted(t["name"] for t in self.registry.load() if not t.get("kit"))))
+        try:
+            verdict = self._ask(text, "visual-review", system=VISUAL_SYSTEM,
+                                images=[str(out) for _, out in shots])
+        except BadReply as exc:
+            self._visual["skipped"] = "the model's answer could not be read"
+            self.emit("visual_review", round=rnd, skipped=self._visual["skipped"], done=None,
+                      problems=[], fix="", reason=str(exc)[:200])
+            return
+        problems = [" ".join(str(p).split())[:300] for p in (verdict.get("problems") or [])
+                    if str(p).strip()][:6] if isinstance(verdict.get("problems"), list) else []
+        done = bool(verdict.get("done")) and not problems
+        fix = " ".join(str(verdict.get("fix") or "").split())[:500]
+        self._visual.update(checked=True, rounds=rnd, done=done, problems=problems)
+        self.emit("visual_review", round=rnd, done=done, problems=problems, fix=fix,
+                  shots=[s["url"] for s in self._visual["shots"] if s["round"] == rnd])
+        if done or not problems or rnd > MAX_VISUAL_FIXES or self.model_calls >= self.max_calls:
+            return
+        if before is not None and len(problems) >= before:
+            return               # the last round of changes did not help: more of the same will not
+        self._look_problems = problems
+        self.emit("visual_fix", round=rnd, problems=problems)
+        plan = self._ask(self._user_prompt(
+            self._plan_note + " SCREENSHOTS OF THE BUILT APP WERE CHECKED AGAINST THE GOAL "
+            "AND SHOW THESE PROBLEMS: %s.%s Plan ONLY the changes that fix them (action "
+            "plan, at most %d steps): name each saved function to change with its SAME "
+            "name, add new ones only if needed, and include handle-request only if the "
+            "routing changes.%s" % ("; ".join(problems), " Suggested fix: %s." % fix if fix else "",
+                                    self._max_steps, self._gap_note()), full=True),
+            "visual-fix", deep=True)
+        if plan.get("action") == "build":       # one function is enough: treat it as a one-step plan
+            plan = {"action": "plan", "steps": [{
+                "name": plan.get("name", ""),
+                "spec": "%s. Fixes: %s" % (plan.get("description") or plan.get("name") or "",
+                                           "; ".join(problems))}]}
+        if plan.get("action") != "plan":
+            return
+        self._fixing = True
+        try:
+            built = self._run_steps(plan)
+        finally:
+            self._fixing = False
+        self._visual["unfixed"] = list(dict.fromkeys(self._fix_failed))
+        if not built:
+            return
+        self._smoke()
+        if self._smoke_ok:
+            self._visual_review(rnd + 1)
+
+    def _gap_note(self):
+        """One sentence for the fix planner when the pages use classes no stylesheet rule covers."""
+        gaps = self._style_gaps
+        if gaps["framework"] or not gaps["undefined"]:
+            return ""
+        return (" A CHECK OF THE PAGES' HTML FOUND THE LIKELY CAUSE OF UNSTYLED PARTS: the pages "
+                "use these classes, and the stylesheet has no rule for them: %s. The stylesheet "
+                "defines: %s. Either add rules for the missing classes to the stylesheet function, "
+                "or change the pages to the classes it defines."
+                % (", ".join(gaps["undefined"][:30]), ", ".join(gaps["defined"][:40]) or "none"))
+
     def _run_steps(self, plan):
         steps = plan.get("steps")
-        ok = isinstance(steps, list) and 1 <= len(steps) <= MAX_PLAN_STEPS and \
+        ok = isinstance(steps, list) and 1 <= len(steps) <= self._max_steps and \
             all(isinstance(x, dict) and isinstance(x.get("spec"), str) for x in steps)
         if not ok:
             self.state = "failed"
             self.emit("gave_up", detail="the plan was malformed or had more "
-                      "than %d steps" % MAX_PLAN_STEPS, hint="", attempts=1)
+                      "than %d steps" % self._max_steps, hint="", attempts=1)
             return False
         self.max_calls = MAX_MODEL_CALLS_PLAN
         self.emit("decision", action="plan", plan={
             "why": "this goal needs several functions: building %d small "
-                   "tools in order" % len(steps)})
+                   "tools, each with its own tests" % len(steps)})
         self.emit("plan", steps=[{"name": x.get("name", ""), "spec": x["spec"]}
                                  for x in steps])
         self._in_step = True
+        names = [(x.get("name") or "").lower() for x in steps]
+        if self.parallel > 1 and len(steps) > 1 and all(names) and \
+                len(set(names)) == len(names):
+            try:
+                return self._run_lanes(steps)
+            finally:
+                self._in_step = False
+                self._pending = set()
+        pool = self._draft_ahead(steps)
         try:
             for i, step in enumerate(steps, 1):
                 self.emit("step", i=i, n=len(steps), name=step.get("name", ""),
                           spec=step["spec"])
+                self._later = {(x.get("name") or "").lower() for x in steps[i:]}
                 if not self._build_step(step, 0):
-                    self.state = "failed"
                     fail = getattr(self, "_last_failure", {}) or {}
+                    if self._fixing or (self._app and i < len(steps)):
+                        # One part failing must not leave the app unwired: note it,
+                        # build the rest, and report the gap at the end. A change
+                        # asked for by the screenshot check simply stays unmade.
+                        (self._fix_failed if self._fixing else self._failed_steps).append(
+                            step.get("name", ""))
+                        self.emit("step_failed", name=step.get("name", ""),
+                                  detail=fail.get("detail", "")[:400])
+                        continue
+                    self.state = "failed"
                     self.emit("gave_up", detail=fail.get("detail", ""),
                               hint=fail.get("hint", ""),
                               attempts=fail.get("attempts", 0), step=True)
                     return False
         finally:
             self._in_step = False
+            self._drafts = {}
+            self._later = set()
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
         return True
 
+    def _run_lanes(self, steps):
+        """Build the plan's steps at the same time, each in its own lane (a thread).
+
+        A lane first waits for the earlier steps its spec names, then builds
+        its function exactly as the in-order path does. Lanes take turns at
+        harness work (prompts, tests, the registry): ``_turn`` is held except
+        while a lane waits for the model, which is where the time goes. So
+        the model calls overlap and everything else still happens one at a time.
+        """
+        names = [x["name"] for x in steps]
+        deps = step_deps(steps)
+        done = [threading.Event() for _ in steps]
+        out = [None] * len(steps)             # None: built; else why it was not
+        errors = []
+        self._lane_index = {n.lower(): i for i, n in enumerate(names)}
+        self._lane_done = done
+        self._pending = {n.lower() for n in names}
+        self._halt = False
+        self._lanes = len(steps)
+        self._calls_sem = threading.BoundedSemaphore(max(1, self.parallel))
+        self.emit("parallel", names=names, limit=min(
+            self.parallel, GATE.limit if self.generate is live_generate else self.parallel))
+
+        def lane(i):
+            step, name, ok = steps[i], names[i], False
+            try:
+                waits = [names[j] for j in deps[i] if not done[j].is_set()]
+                if waits:
+                    self.emit("step_wait", name=name, on=waits, lane=name)
+                for j in deps[i]:
+                    done[j].wait()
+                with self._turn:
+                    self._tl.turn = True
+                    try:
+                        self._check_cancel()
+                        if self._halt:
+                            out[i] = {"skipped": True, "detail":
+                                      "not built: an earlier step of the plan failed"}
+                            return
+                        self.emit("step", i=i + 1, n=len(steps), name=name,
+                                  spec=step["spec"], lane=name)
+                        ok = self._build_step(step, 0)
+                        if not ok:
+                            out[i] = dict(self._last_failure or {})
+                            self._halt = self._halt or not self._app
+                    finally:
+                        self._tl.turn = False
+            except BaseException as exc:  # noqa: BLE001 - re-raised by the coordinator
+                errors.append(exc)
+                out[i] = {"skipped": True, "detail": str(exc)}
+                self._halt = True
+            finally:
+                self._pending.discard(name.lower())
+                self.emit("step_done", name=name, ok=ok, lane=name)
+                done[i].set()
+
+        threads = [threading.Thread(target=lane, args=(i,), daemon=True,
+                                    name="lane-%s" % names[i]) for i in range(len(steps))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if errors:
+            raise next((e for e in errors if isinstance(e, Cancelled)), None) or \
+                next((e for e in errors if isinstance(e, BudgetExhausted)), errors[0])
+        stop = at = None
+        for i, fail in enumerate(out):
+            if fail is None:
+                continue
+            if self._fixing:
+                # a change asked for by the screenshot check: the saved version stays
+                self._fix_failed.append(names[i])
+                self.emit("step_failed", name=names[i], detail=(fail.get("detail") or "")[:400])
+            elif self._app and i < len(steps) - 1:
+                # One part failing must not leave the app unwired: note it and
+                # report the gap at the end. The other lanes went on regardless.
+                self._failed_steps.append(names[i])
+                self.emit("step_failed", name=names[i], detail=(fail.get("detail") or "")[:400])
+            elif stop is None or (stop.get("skipped") and not fail.get("skipped")):
+                stop, at = fail, i
+        if stop is None:
+            return True
+        self.state = "failed"
+        self.emit("gave_up", detail=stop.get("detail", ""), hint=stop.get("hint", ""),
+                  attempts=stop.get("attempts", 0), step=True, lane=names[at])
+        return False
+
+    def _await_callees(self, step, plan):
+        """Wait for planned functions this draft calls that are still being built.
+
+        The spec did not name them, so the lane did not wait up front. Only
+        EARLIER steps are waited for, so two lanes can never wait on each other.
+        """
+        me = self._lane_index.get((step.get("name") or "").lower())
+        if me is None or not getattr(self._tl, "turn", False):
+            return
+        text = plan.get("definition") or ""
+        waits = [(n, j) for n, j in self._lane_index.items()
+                 if j < me and not self._lane_done[j].is_set() and re.search(
+                     r"(?<![^\s('])%s(?![^\s)])" % re.escape(n), text, re.I)]
+        if not waits:
+            return
+        self.emit("step_wait", name=step.get("name", ""), on=[n for n, _ in waits])
+        self._turn.release()
+        try:
+            for _, j in waits:
+                self._lane_done[j].wait()
+        finally:
+            self._turn.acquire()
+
+    BUILD_STEP = ("BUILD exactly this one small tool now (action build). "
+                  "Use LET* when a binding uses an earlier one. Vectors and "
+                  "points are plain lists like '(0 0 -5), never #( ) arrays; "
+                  "reuse the helper tools already in the registry.")
+
+    def _draft_ahead(self, steps):
+        """Start the first draft of every LEAF step at once (live model only).
+
+        A leaf's spec names no other planned step, so its draft cannot depend
+        on how the other steps turn out. The drafts are consumed in order by
+        ``_build_step``; nothing about testing or repair changes.
+        """
+        if self.generate is not live_generate or len(steps) < 3:
+            return None
+        names = [(x.get("name") or "").lower() for x in steps]
+        leaves = [x for x in steps if x.get("name") and not any(
+            n and n != x["name"].lower() and re.search(
+                r"(?<![^\s('\"#])%s(?![^\s)\".,;:])" % re.escape(n), x["spec"], re.I)
+            for n in names)]
+        if len(leaves) < 2:
+            return None
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=min(4, len(leaves)))
+
+        def draft(prompt):
+            try:
+                return self.generate(SYSTEM_PROMPT, prompt)
+            except Exception:                   # the step simply asks again itself
+                return None
+        for x in leaves:
+            prompt = self._step_prompt(x)
+            self._drafts[x["name"]] = (prompt, pool.submit(draft, prompt))
+        return pool
+
     def _build_step(self, step, depth):
+        """Build one planned tool; in a lane, tag everything it emits with its name."""
+        if not getattr(self._tl, "turn", False):
+            return self._build_one(step, depth)
+        outer, ok = getattr(self._tl, "lane", None), False
+        self._tl.lane = step.get("name") or outer
+        try:
+            ok = self._build_one(step, depth)
+            return ok
+        finally:
+            if depth:                      # a top-level lane reports its own end
+                self.emit("step_done", name=step.get("name", ""), ok=bool(ok))
+            self._tl.lane = outer
+
+    REPLACE_STEP = (" A tool named %s is ALREADY SAVED, and the user now asks: \"%s\". "
+                    "This step CHANGES it: reply with action build and a new definition "
+                    "under the SAME name that does what the step says. The saved version "
+                    "does not do it yet, so action use is not an answer here.")
+
+    def _saved(self, name):
+        name = (name or "").lower()
+        return bool(name) and any(t["name"].lower() == name for t in self.registry.load())
+
+    def _step_prompt(self, step):
+        """The first prompt of a planned step. A step named after a saved tool is a change to it.
+
+        Without that the model sees a saved tool with the step's name, answers
+        "use it", and the change the user asked for is silently skipped: in one
+        logged run five of seven planned page changes were dropped that way.
+        """
+        extra = self.BUILD_STEP
+        if self._saved(step.get("name")):
+            extra += self.REPLACE_STEP % (step["name"], " ".join(self.prompt.split())[:300])
+        if self._fixing and self._look_problems:
+            extra += (" SCREENSHOTS OF THE APP AS IT IS NOW SHOW THESE PROBLEMS: %s. Fix every "
+                      "one of them that this function causes." % "; ".join(self._look_problems))
+        extra += self._class_note(step)
+        return self._user_prompt(extra, goal=step["spec"])
+
+    def _style_facts(self, candidate=None):
+        """How the saved pages and the stylesheet fit together: a dict, or None when not a web app.
+
+        ``sheet`` is the stylesheet function's name, ``defined`` the classes it
+        has a rule for, ``used`` the classes the page functions that are in
+        use put into their HTML, ``missing`` the used ones without a rule.
+        CANDIDATE, a build plan for the stylesheet, is judged in its place.
+        Nothing is ``missing`` when the app loads a CSS framework.
+        """
+        if not self._app:
+            return None
+        tools = [t for t in self.registry.load() if not _is_kit(t)]
+        sheet = self._stylesheet(tools)
+        if sheet is None and candidate is not None:
+            sheet = self._stylesheet([candidate])
+        if sheet is None:
+            return None
+        dead = set(goalcheck.unused_functions(tools))
+        used, framework = [], False
+        for t in tools:
+            if t["name"] == sheet["name"] or t["name"] in dead:
+                continue
+            framework = framework or any(w in t["definition"].lower() for w in visualcheck._FRAMEWORK)
+            used += [c for c in visualcheck.html_classes(t["definition"]) if c not in used]
+        source = candidate["definition"] if candidate and candidate.get("name") == sheet["name"] \
+            else sheet["definition"]
+        framework = framework or any(w in source.lower() for w in visualcheck._FRAMEWORK)
+        defined = visualcheck.css_classes(source)
+        return {"sheet": sheet["name"], "defined": defined, "used": used,
+                "missing": [] if framework else [c for c in used if c not in defined]}
+
+    def _style_problem(self, plan):
+        """Why a candidate STYLESHEET cannot be saved: the pages use classes it has no rule for.
+
+        This is what keeps the two sides from drifting apart: a stylesheet that
+        is rewritten with new class names would pass its own tests and leave
+        every page unstyled. Page functions are not held to it (a new page may
+        need a new class); the stylesheet is brought up to date after them.
+        """
+        if not (isinstance(plan.get("definition"), str) and isinstance(plan.get("name"), str)):
+            return None
+        facts = self._style_facts(plan)
+        if not facts or facts["sheet"] != plan["name"] or not facts["missing"]:
+            return None
+        return ("the stylesheet has no rule for %d class(es) that the saved pages use: %s. Add a "
+                "rule for each under exactly these names (the pages are not changed here); an "
+                "edit that adds the rules is enough"
+                % (len(facts["missing"]), ", ".join(facts["missing"][:40])))
+
+    def _style_repair(self):
+        """After the app answers: give the stylesheet a rule for every class the pages use.
+
+        One step, built like any other (so tested, and held to ``_style_problem``),
+        and only when the saved code shows the gap. A failure leaves the build as it is.
+        """
+        facts = self._style_facts()
+        if not facts or not facts["missing"] or self.model_calls >= self.max_calls:
+            return False
+        self.emit("style_repair", sheet=facts["sheet"], missing=facts["missing"][:40])
+        self._fixing, was_in_step = True, self._in_step
+        self._in_step = True
+        try:
+            if not self._build_step({"name": facts["sheet"], "spec": (
+                "(%s) -> the app's stylesheet text. Keep what it has and ADD a rule for each "
+                "of these classes, which the pages use and it does not style: %s"
+                % (facts["sheet"], ", ".join(facts["missing"][:40])))}, 0):
+                self._fix_failed.append(facts["sheet"])       # the saved stylesheet stays
+                self.emit("step_failed", name=facts["sheet"], detail=(
+                    (self._last_failure or {}).get("detail") or "")[:400])
+        finally:
+            self._fixing, self._in_step = False, was_in_step
+        return True
+
+    def _stylesheet(self, tools):
+        """The saved function that returns the app's CSS, or None."""
+        for t in tools:
+            parts = lispstyle.defun_parts(t["definition"])
+            if parts and not parts[1] and re.search(r"css|style", t["name"], re.I) and \
+                    visualcheck.css_classes(t["definition"]):
+                return t
+        return None
+
+    def _class_note(self, step):
+        """What a step has to know so that pages and stylesheet use the SAME class names.
+
+        A page step is told which classes the saved stylesheet defines; the
+        stylesheet step is told which classes the saved pages use. Empty for
+        anything that is not a web app, and before a stylesheet exists.
+        """
+        if not self._app:
+            return ""
+        tools = [t for t in self.registry.load() if not _is_kit(t)]
+        sheet = self._stylesheet(tools)
+        name = (step.get("name") or "").lower()
+        if sheet is None:
+            return ""
+        if name == sheet["name"].lower():
+            used = (self._style_facts() or {}).get("used") or []     # the pages in use, not dead ones
+            return (" THE SAVED PAGES USE THESE CLASSES: %s. Keep a rule for every one of them "
+                    "under exactly these names." % ", ".join(used[:70])) if used else ""
+        if re.match(r"handle-|initial-state$", name):
+            return ""
+        have = visualcheck.css_classes(sheet["definition"])
+        return (" THE STYLESHEET %s DEFINES ONLY THESE CLASSES: %s. Use these names: a class "
+                "it does not define gets no styling." % (sheet["name"], ", ".join(have[:70]))) if have else ""
+
+    def _build_one(self, step, depth):
         """Build one planned tool; on failure split it once into smaller tools."""
         spec = step["spec"]
-        first = self._ask(self._user_prompt(
-            "BUILD exactly this one small tool now (action build). "
-            "Use LET* when a binding uses an earlier one. Vectors and "
-            "points are plain lists like '(0 0 -5), never #( ) arrays; "
-            "reuse the helper tools already in the registry.", goal=spec),
-            "step" if depth == 0 else "sub-step")
+        changing = depth == 0 and self._saved(step.get("name"))
+        ahead = self._drafts.pop(step.get("name"), None) if depth == 0 else None
+        if ahead and ahead[1].result() is not None:
+            first = self._ask(ahead[0], "step", prefetched=ahead[1].result())
+        else:
+            first = self._ask(self._step_prompt(step) if depth == 0
+                              else self._user_prompt(self.BUILD_STEP, goal=spec),
+                              "step" if depth == 0 else "sub-step")
         self.emit("decision", action=first.get("action"), plan=first)
         if first.get("action") != "build":
+            if changing:
+                # asked to change a saved tool and the model kept it: say so
+                self._kept.append(step["name"])
+                self.emit("step_kept", name=step["name"],
+                          why=str(first.get("why") or "")[:300])
             return True               # the model says it already exists
+        if depth == 0:
+            self._await_callees(step, first)
         if self._build_loop(first, self.registry.prelude(), goal=spec, quiet=True):
             return True
         if depth >= MAX_SPLIT_DEPTH:
@@ -1913,7 +3116,8 @@ class Session:
             "failures: %s\nSplit it into at most 3 SMALLER single-function "
             "tools that it can then call (reply with action plan and steps, "
             "each with name and spec, in dependency order)."
-            % (spec, fail.get("detail", "")[:400]), goal=spec), "split")
+            % (spec, fail.get("detail", "")[:400]), goal=spec), "split",
+            think_tokens=THINK_TOKENS_REPAIR, deep=fail.get("cls") in THINK_CLASSES)
         subs = sp.get("steps") if sp.get("action") == "plan" else None
         if not (isinstance(subs, list) and 1 <= len(subs) <= 3 and all(
                 isinstance(x, dict) and isinstance(x.get("spec"), str)
@@ -1923,7 +3127,9 @@ class Session:
                                  for x in subs], sub=True)
         for j, sub in enumerate(subs, 1):
             self.emit("step", i=j, n=len(subs), name=sub.get("name", ""),
-                      spec=sub["spec"], sub=True)
+                      spec=sub["spec"], sub=True,
+                      **({"lane": sub["name"]} if sub.get("name") and
+                         getattr(self._tl, "turn", False) else {}))
             if not self._build_step(sub, depth + 1):
                 return False
         want = (step.get("name") or "").lower()
@@ -1970,16 +3176,20 @@ class Session:
         prev_got, defs_seen, rescued = {}, set(), False
         self._last_stuck = False
         for attempt in range(MAX_REPAIRS + 1):
-            problem = validate_build(plan, self._frozen)
+            problem = validate_build(plan, self._frozen) or self._style_problem(plan)
             ndef = (orc.norm_definition(plan.get("definition")),
                     tuple((t.get("call"), t.get("expect"))
                           for t in (plan.get("tests") or [])
                           if isinstance(t, dict)))
             if problem:
                 verdict = {"ok": False, "reason": problem, "stage": "schema",
-                           "detail": problem, "got_map": {},
+                           "detail": problem, "got_map": {}, "error_text": problem,
                            "class": ("SPEC_INCONSISTENT"
                                      if problem.startswith("SPEC_INCONSISTENT")
+                                     # the code was never the problem: fix only the tests
+                                     else "TEST_CALL_INVALID"
+                                     if problem.startswith("test call ") and
+                                     isinstance(plan.get("definition"), str)
                                      else "SCHEMA")}
                 self.emit("verdict", **verdict)
             elif ndef in defs_seen:
@@ -2028,13 +3238,18 @@ class Session:
                 plan = self._ask(self._user_prompt(
                     "Your code returned the same results across attempts, so "
                     "the exact expected values in your tests were probably "
-                    "guesses. Return build JSON with the definition EXACTLY "
-                    "unchanged:\n%s\nbut replace every exact-value test you "
-                    "cannot verify by hand with PROPERTY tests whose expect "
-                    "is T (determinism, type, range, length, different "
-                    "inputs give different results). Keep exact values only "
-                    "for results you are certain of." % saved["definition"],
+                    "guesses. The definition stays EXACTLY as it is:\n%s\n"
+                    "Return JSON {\"action\":\"build\",\"name\":\"%s\",\"tests\":[...]} "
+                    "with ONLY the tests (do not send the definition): replace "
+                    "every exact-value test you cannot verify by hand with "
+                    "PROPERTY tests whose expect is T (determinism, type, range, "
+                    "length, different inputs give different results). Keep exact "
+                    "values only for results you are certain of."
+                    % (saved["definition"], saved.get("name", "")),
                     goal=goal), "property-tests")
+                plan = compaction.merge_reply(saved, plan)
+                for key in ("kept", "edited", "saved_chars"):
+                    plan.pop(key, None) if isinstance(plan, dict) else None
                 self.emit("decision", action=plan.get("action"), plan=plan)
                 if plan.get("action") == "build" and \
                         plan.get("definition") == saved["definition"] and \
@@ -2076,10 +3291,15 @@ class Session:
                     "different results), or delete them."
                     % ", ".join(stuck[:2]))
                 self._last_stuck = True
-            head = ("PREVIOUS ATTEMPT FAILED (%s, %s): %s\nFailing tests: %s\n"
-                    % (verdict.get("stage"), verdict.get("class") or "?",
-                       verdict["reason"], verdict.get("detail") or "n/a"))
+            detail = verdict.get("detail") or ""
+            head = ("PREVIOUS ATTEMPT FAILED (%s, %s): %s\n%s"
+                    % (verdict.get("stage"), verdict.get("class") or "?", verdict["reason"],
+                       # the validator's message IS the detail: say it once
+                       "" if not detail or detail == verdict["reason"]
+                       else "Failing tests: %s\n" % detail))
             temp = None
+            deep_now = False            # the last rewrite of code that is wrong thinks first
+            offered = False             # this prompt invites an edit or a partial reply
             kept = plan                 # the rehearsed plan; its definition is reused
             if verdict.get("class") == "TEST_CALL_INVALID":
                 # the definition is right: only the test calls are not valid Lisp
@@ -2096,49 +3316,83 @@ class Session:
                         "never a bare (1 \"alice\") list; no quote marks nested "
                         "inside quoted data; every call is exactly ONE Lisp form; "
                         "only call functions that exist (the definition's function "
-                        "or a saved tool in the REGISTRY).\n"
+                        "or a saved tool in the REGISTRY). If the tool returns a "
+                        "response plist, call it directly and expect a plist with "
+                        "only what matters, e.g. (:status 303 :headers "
+                        "((\"Location\" \"/\"))) or (:status 200 :body "
+                        "\"...text...\") where ... matches anything, instead "
+                        "of wrapping the call in LET.\n"
                         "The worker said: %s\n"
-                        "%sCurrent definition (keep it exactly):\n%s\n"
-                        "Return build JSON with the same name and definition and "
-                        "corrected tests."
+                        "%sCurrent definition (it is kept exactly; do NOT send it "
+                        "back):\n%s\n"
+                        "Return JSON {\"action\":\"build\",\"name\":\"%s\",\"tests\":[...]} "
+                        "with ONLY the corrected tests."
                         % (" ".join((verdict.get("error_text") or "n/a").split())[:400],
                            ("Verified expected values that must NOT change: %s\n"
                             % "; ".join(frozen)) if frozen else "",
-                           kept["definition"]))
+                           kept["definition"], kept["name"]))
             elif verdict.get("class") == "COMPILER_ERROR":
                 # syntax first: a narrow repair, not a rewrite of the algorithm
                 body = ("The code does not COMPILE. Fix ONLY the compile "
                         "error(s) shown: keep the algorithm and the tests "
                         "exactly as they are and change as little as "
-                        "possible.\n%sPrevious JSON: %s\nReturn corrected "
-                        "build JSON." % (hint + "\n" if hint else "",
-                                         json.dumps(plan)))
+                        "possible.\n%sPrevious JSON: %s\n%s"
+                        % (hint + "\n" if hint else "", json.dumps(plan),
+                           EDIT_OFFER % plan.get("name", "")))
+                offered = True
             elif verdict.get("class") == "REPEATED_CANDIDATE":
                 body = ("Your last candidate was IDENTICAL to an earlier failed "
                         "one. Change the approach: restructure the code and "
                         "re-derive the formula before answering.\n%sReturn "
                         "build JSON." % (hint + "\n" if hint else ""))
                 temp = REWRITE_TEMPERATURE
+            elif attempt == 0 and verdict.get("class") in ("SCHEMA", "RUNTIME_ERROR"):
+                # nothing to trace: the message names the problem
+                body = ("%s\n%sPrevious JSON: %s\n%s" % (
+                    "Fix exactly what the message above says and change nothing else."
+                    if verdict.get("class") == "SCHEMA" else
+                    "The code CRASHED. Fix the form that raises this error; keep the "
+                    "tests unless a test call itself is wrong.",
+                    hint + "\n" if hint else "", json.dumps(plan),
+                    EDIT_OFFER % plan.get("name", "")))
+                offered = True
             elif attempt == 0:
+                offered = True
                 body = ("Either the code or the expected value may be wrong. "
                         "Trace the FIRST failing test through your code by "
                         "hand, line by line, find the line whose result "
                         "differs from what the test expects, and fix that "
                         "line. Numbers compare with a small tolerance, so 0.6 "
                         "equals 3/5. Do not change the expected value of a "
-                        "test unless you can prove it wrong by hand.\n"
-                        "%sPrevious JSON: %s\nReturn corrected build JSON."
-                        % (hint + "\n" if hint else "", json.dumps(plan)))
+                        "test unless you can prove it wrong by hand. Never "
+                        "delete a feature or a call to a saved tool just to "
+                        "make a test pass: if the code does what the spec "
+                        "says, the expected value is what is wrong; for long "
+                        "text or HTML replace it with a property test "
+                        "(search for the important part, expect T).\n"
+                        "%sPrevious JSON: %s\n%s"
+                        % (hint + "\n" if hint else "", json.dumps(plan),
+                           EDIT_OFFER % plan.get("name", "")))
             else:
+                think = attempt >= MAX_REPAIRS - 1 and \
+                    verdict.get("class") in THINK_CLASSES and \
+                    self._deep_calls < MAX_DEEP_CALLS
+                # Only a thinking call is told to derive and trace first. Asked of
+                # a plain call, that wording made the model answer with nothing at
+                # all (13 empty replies in the logs, every one on this prompt).
                 body = ("Your previous attempts failed the same way, so do "
-                        "NOT patch them. Rewrite the tool from scratch with a "
-                        "different structure: first re-derive the algorithm "
-                        "and any formula from its definition (check signs and "
-                        "operator order), then hand-trace the first failing "
-                        "test through the NEW code before answering. Keep it "
-                        "small; helper tools in the registry may be used.\n"
-                        "%sReturn build JSON." % (hint + "\n" if hint else ""))
-                temp = REWRITE_TEMPERATURE
+                        "NOT patch them. Write the tool again from scratch with "
+                        "a different structure. %sKeep it small; helper tools "
+                        "in the registry may be used.\n%sReturn build JSON."
+                        % ("First re-derive the algorithm and any formula from "
+                           "its definition (check signs and operator order), "
+                           "then hand-trace the first failing test through the "
+                           "NEW code before answering. " if think else "",
+                           hint + "\n" if hint else ""))
+                # a thinking rewrite samples as before; a plain one at a temperature
+                # above 0 sometimes answers with nothing, and its prompt already differs
+                temp = REWRITE_TEMPERATURE if think else None
+                deep_now = think
             test_call = verdict.get("class") == "TEST_CALL_INVALID"
             try:
                 plan = self._ask(self._user_prompt(head + body, goal=goal),
@@ -2146,7 +3400,8 @@ class Session:
                                  ("repair" if attempt == 0 else "rewrite"),
                                  system=TEST_SYSTEM if test_call else None,
                                  temperature=temp, effort="low",
-                                 deep=temp is not None and attempt >= MAX_REPAIRS - 1)
+                                 think_tokens=THINK_TOKENS_REPAIR,
+                                 deep=deep_now)
             except BadReply as exc:
                 # unusable reply: this attempt is lost, the step is not
                 self.emit("bad_reply", reason=str(exc)[:200])
@@ -2155,6 +3410,12 @@ class Session:
                 # keep the definition the tests were run against; take only the tests
                 plan = dict(kept, tests=plan.get("tests"),
                             call=plan.get("call") or kept.get("call"))
+            elif offered:
+                try:
+                    plan = self._expand(kept, plan, self._user_prompt(head + body, goal=goal))
+                except BadReply as exc:
+                    self.emit("bad_reply", reason=str(exc)[:200])
+                    continue
             self.emit("decision", action=plan.get("action"), plan=plan)
             if plan.get("action") != "build":
                 self._last_failure = {"detail": "the model stopped building",
@@ -2163,6 +3424,37 @@ class Session:
                     self.state = "failed"
                 return False
         return False
+
+    def _expand(self, kept, reply, prompt):
+        """The full candidate meant by a repair REPLY that may be an edit or leave parts out.
+
+        An edit that cannot be applied is asked for again once, as the whole
+        function, so a clumsy edit costs one call and never a lost attempt.
+        """
+        try:
+            plan = compaction.merge_reply(kept, reply)
+        except compaction.EditFailed as exc:
+            self._ctx["edit_failures"] += 1
+            self.emit("edit_failed", name=kept.get("name", ""), reason=str(exc)[:240])
+            again = self._ask(prompt + "\nYOUR EDIT COULD NOT BE APPLIED: %s. Reply with the "
+                              "complete build JSON instead." % str(exc)[:200], "repair")
+            if again.get("action") == "edit":
+                raise BadReply("the model sent another edit instead of the function")
+            plan = compaction.merge_reply(kept, again)
+        if not isinstance(plan, dict):
+            return plan
+        edited, kept_fields = plan.pop("edited", 0), plan.pop("kept", [])
+        saved = plan.pop("saved_chars", 0)
+        if edited:
+            self._ctx["edits"] += 1
+            self.emit("edit", name=plan.get("name", ""), edits=edited, saved_chars=saved)
+            plan = normalize_plan(plan)          # the edited text gets the same repairs as any reply
+            plan.pop("auto_fixes", None)
+        elif "tests" in kept_fields or "definition" in kept_fields:
+            self._ctx["kept"] += 1
+            self.emit("tests_kept", name=plan.get("name", ""),
+                      tests=len(plan.get("tests") or []), kept=kept_fields)
+        return plan
 
     def _regressions(self, plan):
         """Failing tests of OTHER saved tools if PLAN replaces a tool they call.
@@ -2179,15 +3471,27 @@ class Session:
         uses = re.compile(r"(?<![^\s('])%s(?![^\s)])" % re.escape(plan["name"]), re.I)
         prelude = "%s\n%s" % (self.registry.prelude(), plan["definition"])
         broken = []
-        for dep in tools:
-            if dep["name"] == plan["name"] or not uses.search(dep["definition"]):
-                continue
-            for t in dep.get("tests") or []:
-                env = self._repl("%s\n%s\n(gg-check %s '%s)" % (
-                    GG_CHECK, prelude, t["call"], t["expect"]), "regression")
-                if not (env.get("ok") and
-                        (env.get("return_value") or "").strip().upper() == "T"):
-                    broken.append("%s no longer gives %s" % (t["call"], t["expect"]))
+        # In the warm REPL the candidate replaces the saved version for the
+        # checks and the saved version goes back afterwards, whatever happens.
+        server = self._session_repl()
+        swapped = server is not None and bool(server.eval(plan["definition"]).get("ok"))
+        try:
+            for dep in tools:
+                if dep["name"] == plan["name"] or not uses.search(dep["definition"]):
+                    continue
+                if dep["name"].lower() in (self._later | self._pending):
+                    continue             # this plan rebuilds the caller next: its old
+                                         # tests describe the behaviour being replaced
+                for t in dep.get("tests") or []:
+                    check = "(gg-check %s '%s)" % (t["call"], t["expect"])
+                    env = self._repl("%s\n%s\n%s" % (GG_CHECK, prelude, check), "regression",
+                                     form=check if swapped else None)
+                    if not (env.get("ok") and
+                            (env.get("return_value") or "").strip().upper() == "T"):
+                        broken.append("%s no longer gives %s" % (t["call"], t["expect"]))
+        finally:
+            if swapped:
+                server.eval(old["definition"])
         return broken
 
     def _promote(self, plan):
@@ -2218,6 +3522,8 @@ class Session:
                     plan["definition"]):
                 self.registry.note_use(dep["name"], "", "")
         self._built.append((plan["name"], len(plan.get("tests") or [])))
+        if plan["name"] in self._failed_steps:        # built after all (a later round)
+            self._failed_steps.remove(plan["name"])
         self.emit("promoted", name=plan["name"],
                   tools=[t["name"] for t in self.registry.load()])
         if not self._in_step:
@@ -2283,7 +3589,8 @@ class Session:
             self._shown[code] = "%s   ;; expect %s" % (t["call"], t["expect"])
             direct.append({"code": code, "expect": "T"})
         self._eval_ms = []
-        self._prerun = self._run_side_by_side([d["code"] for d in direct])
+        self._prerun = self._run_warm(plan, prelude, direct) or \
+            self._run_side_by_side([d["code"] for d in direct])
         res = pipeline.run_candidate(
             candidate_text(plan), tests={"direct": direct},
             worker_fn=self._recording_worker(plan, prelude),
@@ -2316,8 +3623,7 @@ class Session:
                 got_map[t["call"]] = got
                 detail.append("%s: got %s, expected %s" % (t["call"], got, t["expect"]))
             else:
-                detail.append("%s: %s" % (t["call"], " ".join((err or "failed").split(
-                    "--- backtrace ---")[0].split())[:200]))
+                detail.append("%s: %s" % (t["call"], error_cause(err)[:260]))
         drift = [i["call"] for i in infos
                  if len(self._seen_expect.get(i["call"], ())) > 1]
         ok = bool(res.get("ok"))
@@ -2334,6 +3640,38 @@ class Session:
                         x["call"] for tool in self.registry.load()
                         for x in (tool.get("tests") or [])
                         if isinstance(x, dict) and x.get("call")])}
+
+    def _run_warm(self, plan, prelude, direct):
+        """``{code: result}`` for a tool's tests, run in ONE warm SBCL process.
+
+        The process already holds the checker and every saved tool, so a test
+        costs a few milliseconds instead of a fresh process (about 110 ms).
+        Only the real worker takes this path. Afterwards the candidate is taken
+        out again, so a failed attempt can never leak into later tests.
+        Returns {} to fall back to fresh processes (injected workers, server
+        trouble, or a timeout, where a clean process gives the clearer verdict).
+        """
+        if not FAST_REHEARSAL or self.worker_fn is not _worker_fn:
+            return {}
+        # One process for the whole session: a newly saved tool is added to it,
+        # so the process is not started again after every promotion.
+        base = "%s\n%s" % (GG_CHECK, prelude)
+        server = lispserver.cached_server("rehearse:" + self.id, base, WORKER_TIMEOUT_S)
+        out = {}
+        try:
+            for d, t in zip(direct, plan["tests"]):
+                env = server.eval("(progn %s\n(gg-check %s '%s))"
+                                  % (plan["definition"], t["call"], t["expect"]))
+                if env.get("timed_out") or (env.get("error") or "").startswith(
+                        ("the Lisp server", "sbcl executable", "failed to spawn",
+                         "the definitions failed")):
+                    return {}
+                out[d["code"]] = env
+        finally:
+            saved = next((x for x in self.registry.load() if x["name"] == plan["name"]), None)
+            server.eval(saved["definition"] if saved
+                        else "(fmakunbound '%s)" % plan["name"])
+        return out
 
     def _run_side_by_side(self, codes):
         """``{code: result}`` for CODES, evaluated concurrently.
@@ -2371,7 +3709,14 @@ class Session:
     def _finish_call(self, call, prelude, retry=True):
         if not isinstance(call, str) or not call.strip():
             raise ValueError("no call to evaluate")
-        call = quote_literals(call)
+        head = re.match(r"\s*\(\s*([^\s()]+)", call)
+        tool = next((t for t in self.registry.load()
+                     if head and t["name"].lower() == head.group(1).lower()), None)
+        call = quote_literals(balance_call(call, tool["definition"]) if tool else call)
+        parts = lispstyle.defun_parts(tool["definition"]) if tool else None
+        if parts and "state" in parts[1]:
+            call = webkit.fix_state_args(call, parts[0], parts[1].index("state"),
+                                         len(parts[1]))
         names = {t["name"] for t in self.registry.load()}
         problem = safe_call_check(call, names)
         if problem:
@@ -2382,7 +3727,7 @@ class Session:
                       stdout="", error=env["error"], elapsed_ms=0)
         else:
             env = self._repl("%s\n%s" % (prelude, call) if prelude else call,
-                             "answer")
+                             "answer", form=call)
         self.emit("result", call=call, ok=env.get("ok"),
                   value=env.get("return_value"),
                   expected_ok=(None if self.expected is None or self._in_step
@@ -2868,11 +4213,13 @@ class SessionManager:
                 "feature, build new tools that call the existing ones. To CHANGE a "
                 "tool, build it again under the SAME name: it replaces the old "
                 "version only if the tools that call it still pass their tests. "
-                "Keep every argument shape used by the existing tools."
+                "Keep every argument shape used by the existing tools. Never add a "
+                "renamed copy of a saved tool (render-x next to x-html): the copy is "
+                "left unused and the page keeps showing the old one."
                 % (meta["name"], " - " + meta["description"] if meta["description"] else ""))
 
     def start(self, prompt, mode="demo", compare=False, expected=None,
-              oracle=None, project=None):
+              oracle=None, project=None, visual=True):
         """Returns (session_id, None) or (None, error).
 
         ``compare`` also runs the same prompt against an empty, throwaway
@@ -2885,6 +4232,12 @@ class SessionManager:
             return None, "prompt too long"
         if mode not in self.generators:
             return None, "unknown mode"
+        if self.generators[mode] is demo_generate and \
+                self.projects.resolve(project) != projects.BUILTIN:
+            # The scripted model only knows its example prompts (a square, a ray
+            # tracer). Run inside a real project it files those under the project.
+            return None, ("the demo model only works in Scratchpad; choose the Live "
+                          "model to build in this project")
         if mode == "live" and self.live_spend >= LIVE_SPEND_CAP_USD:
             return None, ("live spend cap reached ($%.2f); restart the "
                           "dashboard to reset it" % LIVE_SPEND_CAP_USD)
@@ -2899,11 +4252,23 @@ class SessionManager:
                            postmortem_dir=AGENT_DIR / "postmortems")
             sess.project = self.projects.resolve(project)
             sess.project_note = self.project_note(project)
+            sess.visual = sess.visual and bool(visual)
+            if sess.project != projects.BUILTIN:
+                sess.prior_goals = [r.get("prompt") for r in self.history(60, sess.project)
+                                    if r.get("mode") == mode and r.get("arm") == "main"]
             sess.compare = "running" if compare else None
             self._sessions[sess.id] = sess
         threading.Thread(target=self._chain, args=(sess, compare),
                          daemon=True).start()
         return sess.id, None
+
+    def cancel(self, session_id=None):
+        """Stop the running session (or SESSION_ID). ``(cancelled, session_id)``."""
+        with self._lock:
+            running = [x for x in self._sessions.values() if x.state == "running"
+                       and (session_id is None or x.id == session_id)]
+        hit = [x.id for x in running if x.cancel()]
+        return bool(hit), (hit[0] if hit else None)
 
     def _chain(self, sess, compare):
         try:
@@ -2911,7 +4276,9 @@ class SessionManager:
             self.projects.touch(sess.project)
             if sess.mode == "live":
                 self.live_spend += sess.cost_usd
-            if compare:
+            if compare and sess.state == "cancelled":
+                sess.compare = None          # nothing to compare a stopped build with
+            if compare and sess.state != "cancelled":
                 scratch = tempfile.mkdtemp(prefix="gg-nomem-")
                 try:
                     twin = Session(
@@ -2922,6 +4289,7 @@ class SessionManager:
                         lessons=self.lessons,
                         postmortem_dir=AGENT_DIR / "postmortems")
                     twin.project = sess.project
+                    twin.visual = False
                     twin.run()
                     self.live_spend += twin.cost_usd if sess.mode == "live" else 0.0
                 finally:
@@ -3026,6 +4394,9 @@ class SessionManager:
         reg = base.for_mode(mode) if mode else base
         loaded = reg.load()
         meta = toolmeta.describe_all(loaded)
+        for name in goalcheck.unused_functions(loaded):
+            if name in meta:
+                meta[name]["unused"] = True
         return [{"name": t.get("name"), "description": t.get("description"),
                  "definition": t.get("definition"), "session": t.get("session"),
                  "created": t.get("created"), "uses": t.get("uses", 0),

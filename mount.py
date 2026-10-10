@@ -19,7 +19,9 @@ handler stays a function of its two arguments.
 """
 import argparse
 import contextlib
+import hashlib
 import json
+import os
 import re
 import secrets
 import socket
@@ -32,6 +34,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 import agent_session as ag
+import lispserver
 import projects
 import s_expr
 
@@ -230,8 +233,24 @@ class MountedApp:
         self._write_log(log)
         return out
 
+    def _run(self, code):
+        """Evaluate CODE with the project's tools loaded.
+
+        With the default worker, a long-lived SBCL process that already holds
+        the definitions answers in well under a millisecond; a fresh sandboxed
+        process (about 150 ms) is the fallback if that server cannot run.
+        """
+        prelude = self.registry.prelude()
+        if self.run_lisp is ag._worker_fn:
+            key = hashlib.sha256(prelude.encode("utf-8")).hexdigest()
+            env = lispserver.cached_server(key, prelude, ag.WORKER_TIMEOUT_S).eval(code)
+            if env.get("ok") or not env.get("error", "").startswith(
+                    ("the Lisp server", "sbcl executable", "failed to spawn")):
+                return env
+        return self.run_lisp("%s\n%s" % (prelude, code))
+
     def _eval(self, code):
-        env = self.run_lisp("%s\n%s" % (self.registry.prelude(), code))
+        env = self._run(code)
         if not env.get("ok"):
             raise RuntimeError(" ".join((env.get("error") or "the Lisp call failed")
                                         .split("--- backtrace ---")[0].split())[:400])
@@ -263,7 +282,6 @@ class MountedApp:
                 tools = self.registry.load()
                 key = None
                 if method == "GET" and self._time_free():
-                    import hashlib
                     key = hashlib.sha256(repr((
                         [t["definition"] for t in tools], state, target,
                         headers.get("Cookie") or "")).encode("utf-8")).hexdigest()
@@ -384,6 +402,34 @@ def paths_for(agent_dir, project_id):
     return folder / "state.sqlite", folder / "requests.jsonl"
 
 
+def mounts_path(agent_dir):
+    """Where the remembered mounts live: ``{"mounts": {"<project id>": port}}``."""
+    return Path(agent_dir) / "apps" / "mounts.json"
+
+
+def read_mounts(path):
+    """``{project id: port}`` remembered in PATH; ``{}`` when missing or corrupt."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    raw = data.get("mounts") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items()
+            if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+            and 1 <= v <= 65535}
+
+
+def write_mounts(path, mounts):
+    """Replace PATH atomically (write a temp file, then rename over it)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"mounts": mounts}, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def free_port():
     for port in PORTS:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -396,19 +442,59 @@ def free_port():
 
 
 class MountManager:
-    """Start and stop mounted apps, one per project."""
+    """Start and stop mounted apps, one per project.
 
-    def __init__(self, agent_dir, registry_for, mode="live"):
+    Every successful start or stop is remembered in ``apps/mounts.json`` so a
+    restart can mount the same apps again (see ``restore``). With
+    ``restore=True`` the remembered apps are mounted as soon as the manager
+    is created.
+    """
+
+    def __init__(self, agent_dir, registry_for, mode="live", restore=False):
         self.agent_dir = Path(agent_dir)
         self.registry_for = registry_for
         self.mode = mode
+        self.mounts_path = mounts_path(self.agent_dir)
         self._servers = {}
         self._lock = threading.Lock()
+        self._disk_lock = threading.Lock()
+        if restore:
+            self.restore()
 
     def info(self, project_id):
         with self._lock:
             entry = self._servers.get(project_id)
         return {"port": entry[1], "url": "http://127.0.0.1:%d/" % entry[1]} if entry else None
+
+    def _remember(self, project_id, port):
+        """Record PROJECT_ID on PORT in the mounts file; PORT None forgets it."""
+        with self._disk_lock:
+            mounts = read_mounts(self.mounts_path)
+            if port is None:
+                mounts.pop(project_id, None)
+            else:
+                mounts[project_id] = port
+            try:
+                write_mounts(self.mounts_path, mounts)
+            except OSError:
+                pass                     # remembering is a convenience, never a failure
+
+    def _open_server(self, project_id, handler, port):
+        """``(server, error)``. An explicit PORT must be free; otherwise the
+        remembered port is tried first, then any free port."""
+        if port:
+            candidates = [port]
+        else:
+            remembered = read_mounts(self.mounts_path).get(project_id)
+            candidates = ([remembered] if remembered else []) + [None]
+        last = None
+        for candidate in candidates:
+            try:
+                return ThreadingHTTPServer(("127.0.0.1", candidate or free_port()),
+                                           handler), None
+            except OSError as exc:
+                last = exc
+        return None, "could not open the port: %s" % last
 
     def start(self, project_id, port=None):
         """``(info, error)``. Starting an already mounted project returns its info."""
@@ -417,14 +503,13 @@ class MountManager:
         state_db, log = paths_for(self.agent_dir, project_id)
         app = MountedApp(self.registry_for(project_id).for_mode(self.mode),
                          StateStore(state_db), log_path=log)
-        try:
-            server = ThreadingHTTPServer(("127.0.0.1", port or free_port()),
-                                         make_handler(app))
-        except OSError as exc:
-            return None, "could not open the port: %s" % exc
+        server, err = self._open_server(project_id, make_handler(app), port)
+        if err:
+            return None, err
         threading.Thread(target=server.serve_forever, daemon=True).start()
         with self._lock:
             self._servers[project_id] = (server, server.server_address[1])
+        self._remember(project_id, server.server_address[1])
         return self.info(project_id), None
 
     def stop(self, project_id):
@@ -433,7 +518,25 @@ class MountManager:
         if entry:
             entry[0].shutdown()
             entry[0].server_close()
+            self._remember(project_id, None)
         return bool(entry)
+
+    def restore(self):
+        """Mount every remembered project that still exists and is not mounted.
+
+        Each comes back on its remembered port if that is free, else on any
+        free port. Projects that were deleted or fail to start are skipped.
+        Returns ``[{"project", "url"}]`` for the apps this call started.
+        """
+        store = projects.ProjectStore(self.agent_dir)
+        restored = []
+        for project_id in read_mounts(self.mounts_path):
+            if not store.exists(project_id) or self.info(project_id):
+                continue
+            info, err = self.start(project_id)
+            if not err:
+                restored.append({"project": project_id, "url": info["url"]})
+        return restored
 
     def report(self, project_id):
         return report(paths_for(self.agent_dir, project_id)[1])

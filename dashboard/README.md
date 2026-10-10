@@ -5,6 +5,23 @@ Stdlib-only backend, vanilla JS frontend, no CDN, no pip dependencies.
 
 ## Start
 
+Double-click `start.cmd` in the repo root, or run from the repo root:
+
+```sh
+uv run python start.py
+```
+
+It starts the dashboard on port 8150 (8150-8169 are tried if that port is taken
+by something else), waits until it answers, re-mounts the project apps that were
+mounted last time, and opens **http://127.0.0.1:8150/** in your browser. If a
+dashboard is already running it only opens the browser. Ctrl+C stops it.
+
+- `--port N` preferred port; `--no-browser` skip the browser;
+  `--status` report the running dashboard, its projects and mounted apps, then exit.
+- Mounted apps are remembered in `artifacts/agent/apps/mounts.json`.
+
+## Run the server directly
+
 From the repo root:
 
 ```sh

@@ -128,7 +128,8 @@ class RetryTests(unittest.TestCase):
             sess = self._session(tmp, gen)
             sess.run()
             self.assertEqual(sess.state, "done", sess.events)
-        self.assertEqual(temps, [None, 0.4, 0.8])
+        # the first retry stays at 0: its prompt has changed, and sampling can return nothing
+        self.assertEqual(temps, [None, 0.0, 0.4])
         self.assertIsNone(getattr(ag._TEMP, "value", None))
 
     def test_unreadable_repair_reply_costs_one_attempt_not_the_session(self):

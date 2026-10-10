@@ -525,6 +525,9 @@ def dispatch(method, path, body, ctx):
             agent.registry_for(payload.get("project") if isinstance(payload, dict)
                                else None).clear()
             return 200, {"tools": []}
+        if method == "POST" and sub == "cancel":
+            done, sid = agent.cancel()
+            return 200, {"cancelled": done, "session_id": sid}
         if method == "POST" and sub == "prompt":
             try:
                 payload = json.loads(body.decode("utf-8") if body else "{}")
@@ -535,7 +538,8 @@ def dispatch(method, path, body, ctx):
                                    bool(payload.get("compare")),
                                    payload.get("expected"),
                                    payload.get("oracle"),
-                                   payload.get("project"))
+                                   payload.get("project"),
+                                   payload.get("visual", True) is not False)
             if err == "busy":
                 return 409, {"error": "a session is already running"}
             if err:
@@ -615,6 +619,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_shot(self, clean_path):
+        """One screenshot of a build: /api/agent/shots/<session id>/r<round>-<n>.png."""
+        import agent_session
+        m = re.fullmatch(r"/api/agent/shots/([0-9a-f]{6,32})/(r\d-\d\.png)", clean_path)
+        data = None
+        if m:
+            try:
+                data = (agent_session.AGENT_DIR / "shots" / m.group(1) / m.group(2)).read_bytes()
+            except OSError:
+                data = None
+        if data is None:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         clean_path = urlparse(self.path).path
         if clean_path in ("/", "/index.html"):
@@ -626,6 +650,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if clean_path == "/api/events":
             self._send_events()
+            return
+        if clean_path.startswith("/api/agent/shots/"):
+            self._send_shot(clean_path)
             return
         status, payload = dispatch("GET", self.path, b"", self.ctx)
         self._send_json(status, payload)

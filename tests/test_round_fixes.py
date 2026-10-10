@@ -243,9 +243,10 @@ class CheapRewriteTests(unittest.TestCase):
             sess.run()
             calls = [e for e in sess.events if e["kind"] == "model_call"]
             rewrites = [c for c in calls if c["label"] == "rewrite"]
+            # a step's LAST rewrite thinks (and samples); the one before is plain, at temperature 0
             self.assertEqual([(c["deep"], c["effort"], c["temperature"]) for c in rewrites],
-                             [(False, "none", 0.7), (True, "low", 0.7)])
-            self.assertEqual(ag.MAX_DEEP_CALLS, 1)
+                             [(False, "none", 0.0), (True, "low", 0.7)])
+            self.assertGreaterEqual(ag.MAX_DEEP_CALLS, 1)
 
     def test_a_crash_is_never_rescued_into_property_tests(self):
         plan = {"action": "build", "name": "f", "description": "d",

@@ -80,6 +80,31 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual([t["name"] for t in self.mgr.tools(project="unknown-id")], ["square"])
         self.assertEqual(self.mgr.projects.get(self.blog["id"])["tools"], 1)
 
+    def test_the_scripted_demo_model_is_refused_outside_scratchpad(self):
+        # A demo ray tracer run inside a real project used to be filed under that project.
+        sid, err = self.mgr.start("write a ray tracer", mode="demo", project=self.blog["id"])
+        self.assertIsNone(sid)
+        self.assertIn("only works in Scratchpad", err)
+        self.assertFalse(self.mgr.busy())
+        self.assertEqual(self.mgr.tools(project=self.blog["id"]), [])
+        self.assertEqual(self.mgr._sessions, {})                 # nothing was started
+
+    def test_a_project_counts_its_own_functions_per_model(self):
+        reg = self.mgr.registry_for(self.blog["id"])
+        reg.for_mode("live").add({"name": "home-page", "description": "d",
+                                  "definition": "(defun home-page (s) s)"})
+        reg.for_mode("live").add({"name": "old-page", "description": "d",
+                                  "definition": "(defun old-page (s) s)"})
+        reg.for_mode("live").retire({"old-page": "is a leftover"})
+        webkit_tool = {"name": "html-page", "description": "d", "kit": True,
+                       "definition": "(defun html-page (s b) b)"}
+        reg.for_mode("live").add(webkit_tool)
+        reg.for_mode("demo").add({"name": "vec-dot", "description": "d",
+                                  "definition": "(defun vec-dot (a b) 0)"})
+        got = self.mgr.projects.get(self.blog["id"])["counts"]
+        self.assertEqual(got, {"demo": 1, "live": 1})        # kit and retired are not the project's own
+        self.assertEqual(self.mgr.projects.get("scratch")["counts"], {"demo": 0, "live": 0})
+
     def test_project_note_tells_the_model_how_to_refine(self):
         note = self.mgr.project_note(self.blog["id"])
         self.assertIn("PROJECT: Blog - a blog", note)

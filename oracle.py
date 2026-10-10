@@ -282,6 +282,16 @@ HINTS = (
      "plist. A plist such as the REQUEST is read with (getf plist :key), or "
      "with the kit tools (cookie-value request \"sid\"), (form-value request "
      "\"title\"), (request-field request :path). Never ASSOC a plist."),
+    ("format-directive", r"error in format",
+     "A FORMAT control string is wrong (a ~{ without its ~}, or more directives "
+     "than arguments). Use FORMAT only with ~a, one per argument, and build "
+     "repeated HTML with (apply #'concatenate 'string (mapcar ... rows)) or "
+     "join-strings instead of ~{ ~} loops."),
+    ("plist-vs-string", r"malformed property list",
+     "GETF (or a kit tool) was called on something that is not a plist, usually a "
+     "STRING. A page or handler returns a RESPONSE PLIST: read its text with "
+     "(getf response :body). An html helper returns a STRING: use it directly, "
+     "never (getf html :body). Check which of the two each function returns."),
     ("string-of-strings", r"is not of type character when setting an element",
      "CONCATENATE 'STRING was given a LIST of strings as one argument, so it "
      "tried to store whole strings as characters. Join a list of strings with "

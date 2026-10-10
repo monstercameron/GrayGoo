@@ -74,14 +74,34 @@ class ProjectStore:
             data = json.loads(self.tools_path(project_id).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return 0
-        return len(data) if isinstance(data, list) else len(data.get("tools", [])) \
-            if isinstance(data, dict) else 0
+        if not isinstance(data, list):
+            return 0
+        # retired leftovers stay on disk but are no longer part of the project
+        return sum(1 for t in data if isinstance(t, dict) and not t.get("retired"))
+
+    def _own_counts(self, project_id):
+        """How many functions of its own the project has per model: ``{"demo": n, "live": n}``.
+
+        Kit helpers supplied by the harness and retired leftovers are not counted,
+        so the number matches what the project actually built.
+        """
+        counts = {"demo": 0, "live": 0}
+        try:
+            data = json.loads(self.tools_path(project_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return counts
+        for t in data if isinstance(data, list) else []:
+            if isinstance(t, dict) and not t.get("retired") and not t.get("kit"):
+                mode = t.get("mode") or "demo"
+                if mode in counts:
+                    counts[mode] += 1
+        return counts
 
     def _builtin(self):
         return {"id": BUILTIN, "name": "Scratchpad",
                 "description": "Shared tools, the guided demo and one-off prompts.",
                 "created": 0, "updated": 0, "builtin": True,
-                "tools": self._tool_count(BUILTIN)}
+                "tools": self._tool_count(BUILTIN), "counts": self._own_counts(BUILTIN)}
 
     def get(self, project_id):
         if project_id == BUILTIN:
@@ -96,7 +116,8 @@ class ProjectStore:
         return {"id": project_id, "name": meta.get("name") or project_id,
                 "description": meta.get("description") or "",
                 "created": meta.get("created") or 0, "updated": meta.get("updated") or 0,
-                "builtin": False, "tools": self._tool_count(project_id)}
+                "builtin": False, "tools": self._tool_count(project_id),
+                "counts": self._own_counts(project_id)}
 
     def list(self):
         """Built-in first, then the others by creation time."""

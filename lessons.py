@@ -581,6 +581,13 @@ class LessonRegistry:
         """Return the lesson with *lesson_id*, or None."""
         return self._lessons.get(lesson_id)
 
+    def __len__(self):
+        return len(self._lessons)
+
+    def __iter__(self):
+        """Iterate the registered lessons (what :func:`precision` aggregates)."""
+        return iter(self._lessons.values())
+
     @staticmethod
     def _score(lesson, tags, failure_class):
         # Failure-class match dominates (memory.md section 13), then tag

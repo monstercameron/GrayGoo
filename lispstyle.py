@@ -13,30 +13,26 @@ Pure Python and pure functions: text in, findings out. No model, no SBCL.
 import re
 
 STYLE_GUIDE = (
-    "STYLE - write idiomatic, clean Common Lisp. "
-    "Every tool is a PURE function: its result depends only on its arguments; "
-    "no global variables, no printing, and never modify an argument (use "
-    "REMOVE, REVERSE, (sort (copy-list xs) ...) rather than DELETE, NREVERSE or "
-    "SORT on a parameter). "
-    "One purpose per function, a few lines long; compose small tools rather "
-    "than growing one. "
-    "Prefer expressions over step-by-step mutation: MAPCAR, REDUCE, REMOVE-IF, "
-    "FIND, ASSOC, SOME, EVERY, or recursion, rather than index loops that SETF "
-    "an accumulator. To join a LIST of strings use "
-    "(apply #'concatenate 'string (mapcar ...)) or (format nil \"~{~a~}\" list); "
-    "never pass the list itself to CONCATENATE. "
-    "Give every argument one clear shape and keep it the same across tools: "
-    "records are plain lists or alists, tables are lists of records. "
-    "STRING= and CHAR= take no :TEST argument; pass :test #'string= or "
-    ":test #'equal to ASSOC, FIND, MEMBER and REMOVE when keys are strings. "
-    "A line break in a string comes from FORMAT: (format nil \"~a~%~a\" a b) or "
-    "(format nil \"~{~a~^~%~}\" lines); in an expected test value write it as ~% "
-    "inside the quoted string. In expected values symbols and keywords may be "
-    "lower case, but STRINGS keep their exact case and their double quotes. "
-    "Name predicates with a -p suffix. Compare passwords and other secrets "
-    "exactly (STRING=), never case-insensitively. "
-    "Begin each DEFUN with a one-line docstring naming the arguments and the "
-    "value returned."
+    "STYLE\n"
+    "- Every tool is a PURE function of its arguments: no globals, no printing, "
+    "no clock or random numbers, and never modify an argument (REMOVE, REVERSE, "
+    "(sort (copy-list xs) ...), not DELETE, NREVERSE or SORT on a parameter).\n"
+    "- One purpose per function, a few lines; compose small tools.\n"
+    "- Prefer MAPCAR, REDUCE, REMOVE-IF, FIND, SOME, EVERY or recursion to index "
+    "loops that SETF an accumulator.\n"
+    "- Join a LIST of strings with (apply #'concatenate 'string (mapcar ...)) or "
+    "(format nil \"~{~a~}\" list); never pass the list itself to CONCATENATE.\n"
+    "- A line break comes from FORMAT: (format nil \"~{~a~^~%~}\" lines); in an "
+    "expected test value write it as ~% inside the quoted string.\n"
+    "- Keep each argument's shape the same across tools: records are plain "
+    "lists, tables are lists of records.\n"
+    "- STRING= and CHAR= take no :TEST; pass :test #'string= to ASSOC, FIND, "
+    "MEMBER and REMOVE when keys are strings. CASE cannot match strings: use "
+    "COND with STRING=.\n"
+    "- In expected values symbols and keywords may be lower case, but STRINGS "
+    "keep their exact case and their double quotes.\n"
+    "- Compare passwords and other secrets exactly (STRING=). Name predicates "
+    "with a -p suffix."
 )
 
 _STRINGS = re.compile(r'"(?:[^"\\]|\\.)*"')
@@ -270,3 +266,205 @@ def let_to_let_star(definition):
             pos = m.end()
     out.append(definition[pos:])
     return "".join(out)
+
+
+# ---- escape_problems: raw request or record data written into HTML ----------
+
+_HTML_TAG = re.compile(
+    r"</?(?:html|head|body|title|table|tr|td|th|ul|ol|li|h[1-6]|p|a|div|span|input|"
+    r"option|select|label|button|form|img|pre|section|header|footer|nav|main|article)"
+    r"(?=[\s/>])", re.I)
+_FORMAT_NIL = re.compile(r'\(\s*format\s+nil\s+(?=")', re.I)
+_CONCATENATE = re.compile(r"\(\s*concatenate\s+'?string\b", re.I)
+_RAW_HEADS = frozenset(("first", "second", "third", "fourth", "nth", "car", "cadr", "caddr",
+                        "elt", "form-value", "query-value", "cookie-value", "request-field",
+                        "pair-value"))
+_RISKY_PARAMS = frozenset(("title", "name", "body", "text", "description", "username", "user",
+                           "message", "comment", "content", "label", "value", "query", "email",
+                           "price"))
+
+
+def _masked(definition):
+    """DEFINITION with string contents and comments blanked to spaces, same length.
+
+    Positions line up with DEFINITION, so a match in the masked text is sliced from
+    the original, and parentheses inside strings and comments are invisible.
+    """
+    text = definition or ""
+    n, i, out = len(text), 0, []
+    while i < n:
+        c = text[i]
+        if c == '"':
+            out.append('"')
+            i += 1
+            while i < n and text[i] != '"':
+                step = min(2 if text[i] == "\\" else 1, n - i)
+                out.append(" " * step)
+                i += step
+            if i < n:
+                out.append('"')
+                i += 1
+        elif c == ";":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            out.append(" " * (end - i))
+            i = end
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _is_raw_form(text, masked, begin):
+    """True when the form at BEGIN reads raw data: an accessor or a request reader."""
+    if masked[begin:begin + 1] != "(":
+        return False
+    items = _top_items(masked, begin)
+    if not items:
+        return False
+    head = masked[items[0][0]:items[0][1]].lower()
+    if head == "getf":
+        return len(items) > 1 and text[items[1][0]:items[1][1]].lower() == "request"
+    return head in _RAW_HEADS
+
+
+def _let_bindings(text, masked):
+    """``{name: (is_raw, init)}`` for each LET and LET* binding in the function."""
+    found = {}
+    for m in re.finditer(r"\(\s*let\*?(?=[\s(])", masked, re.I):
+        items = _top_items(masked, m.start())
+        if len(items) < 2 or masked[items[1][0]:items[1][0] + 1] != "(":
+            continue
+        for b, _ in _top_items(masked, items[1][0]):
+            if masked[b:b + 1] != "(":
+                continue
+            pair = _top_items(masked, b)
+            if len(pair) < 2:
+                continue
+            (name_b, name_e), (init_b, init_e) = pair[0], pair[1]
+            found[masked[name_b:name_e].lower()] = (
+                _is_raw_form(text, masked, init_b),
+                " ".join(text[init_b:init_e].split()))
+    return found
+
+
+def _html_calls(text, masked):
+    """``[(begin, first_arg)]`` of each FORMAT or CONCATENATE call that builds HTML.
+
+    A FORMAT call needs an HTML tag in its control string; a CONCATENATE call needs a
+    string argument with one. FIRST_ARG is the index of the first real argument.
+    """
+    calls = []
+    for m in _FORMAT_NIL.finditer(masked):
+        quote = m.end()
+        close = masked.find('"', quote + 1)
+        if close >= 0 and _HTML_TAG.search(text[quote:close + 1]):
+            calls.append((m.start(), 3))
+    for m in _CONCATENATE.finditer(masked):
+        items = _top_items(masked, m.start())
+        if any(masked[b:b + 1] == '"' and _HTML_TAG.search(text[b:e]) for b, e in items[2:]):
+            calls.append((m.start(), 2))
+    return calls
+
+
+def _escape_reason(src, binding=None):
+    """The reason a value written as SRC goes into HTML unescaped (BINDING: its let form)."""
+    if binding is None:
+        return ("puts %s into HTML without escaping: wrap it as (html-escape %s) "
+                "so text like <script> cannot run" % (src, src))
+    return ("puts %s into HTML without escaping: it is bound to %s, so wrap that as "
+            "(html-escape %s) so text like <script> cannot run" % (src, binding, binding))
+
+
+def escape_problems(definition):
+    """Reasons this function puts raw data into HTML without html-escape (empty when fine)."""
+    text = definition or ""
+    masked = _masked(text)
+    parts = defun_parts(text)
+    params = set(parts[1]) if parts else set()
+    bound = _let_bindings(text, masked)
+    out = []
+    for begin, first_arg in _html_calls(text, masked):
+        for b, e in _top_items(masked, begin)[first_arg:]:
+            src = " ".join(text[b:e].split())
+            if masked[b:b + 1] == '"':
+                continue
+            if masked[b:b + 1] == "(":
+                if _is_raw_form(text, masked, b):
+                    out.append(_escape_reason(src))
+                continue
+            name = masked[b:e].lower()
+            if name in bound:
+                if bound[name][0]:
+                    out.append(_escape_reason(src, bound[name][1]))
+            elif name in params and name in _RISKY_PARAMS:
+                out.append(_escape_reason(src))
+    reasons = []
+    for reason in out:
+        if reason not in reasons:
+            reasons.append(reason)
+    return reasons[:3]
+
+
+# The comma after a CSS rule. One plain repetition only: this pattern, and every
+# check made around a match, runs in time linear in the text. (The first version
+# described a whole rule with nested repetitions; on one long stylesheet from a
+# live build it backtracked for good and froze the server.)
+_CSS_COMMA = re.compile(r"\}\s*,")
+_CSS_PSEUDO = re.compile(r":[\w-]+\([^()]*\)")          # :not(.a), :nth-child(2)
+_NOT_A_SELECTOR = '()=;"\\'
+
+
+def _css_selector(text):
+    """True when TEXT can be the selector of a CSS rule (``a:hover, .b > c``)."""
+    text = _CSS_PSEUDO.sub("", text).strip()
+    return bool(text) and not text.endswith(":") and not text.startswith("@") and \
+        not any(c in text for c in _NOT_A_SELECTOR)
+
+
+def _css_rule_ends(body, close):
+    """True when the ``}`` at CLOSE ends ``selector { property: value }``."""
+    opened = body.rfind("{", 0, close)
+    if opened < 0:
+        return False
+    block = body[opened + 1:close]
+    if ":" not in block or "}" in block:
+        return False
+    start = max(body.rfind("}", 0, opened), body.rfind("{", 0, opened),
+                body.rfind(";", 0, opened)) + 1
+    return _css_selector(body[start:opened])
+
+
+def _css_rule_starts(body, at):
+    """True when a CSS rule starts at AT, or the string ends there (the next rule is the next string)."""
+    if not body[at:].strip():
+        return True
+    opened = body.find("{", at)
+    return opened >= 0 and _css_selector(body[at:opened])
+
+
+def _drop_css_commas(body):
+    out, last = [], 0
+    for m in _CSS_COMMA.finditer(body):
+        if _css_rule_ends(body, m.start()) and _css_rule_starts(body, m.end()):
+            out.append(body[last:m.start() + 1])       # up to and including the "}"
+            last = m.end()                             # ...and on after the comma
+    out.append(body[last:])
+    return "".join(out)
+
+
+def fix_css_commas(definition):
+    """Drop the commas a model puts BETWEEN CSS rules: ``a{x:1},b{y:2}`` is not CSS.
+
+    A browser that meets ``},`` throws away the rule after it, and since every
+    rule then starts with a comma, the whole stylesheet is ignored: the page
+    renders with no styling at all although every test passes. Seen live: a
+    stylesheet function built as ``"a{..}," "b{..},"`` left an app unstyled
+    through two rounds of screenshot fixes. Only a comma directly after a
+    rule's closing brace is removed, where no valid CSS has one, and only when
+    what stands before and after it reads as CSS rules: a script's
+    ``{a:1},{b:2}`` or ``{k: {a:1}, m: 2}`` is left alone.
+    """
+    if "}" not in definition:
+        return definition
+    return _STRINGS.sub(lambda m: '"%s"' % _drop_css_commas(m.group(0)[1:-1]), definition)

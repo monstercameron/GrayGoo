@@ -10,6 +10,8 @@ Each entry is pure Lisp and follows the house style. ``tests/test_webkit.py``
 runs every test below in real SBCL.
 """
 
+import re
+
 import s_expr
 
 KIT = [
@@ -275,11 +277,78 @@ def state_args_ok(text, name, index):
     return True
 
 
-def fix_state_args(text, name, index):
+def _quoted_tables(arg):
+    """The ``(name rows)`` tables that the quoted literal ARG stands for, or None.
+
+    ARG is source text such as ``'("users" ())``. A plist headed by a keyword
+    (a request, or anything shaped like one) is never state, so it gives None,
+    as does any literal that is not tables once ``nest_state`` has had its go.
+    """
+    if not arg.startswith("'("):
+        return None
+    try:
+        data = s_expr.parse(arg[1:])
+    except (s_expr.SExprError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    head = data[0] if data else None
+    if isinstance(head, str) and not isinstance(head, s_expr.SString) and head.startswith(":"):
+        return None
+    tables = nest_state(data)
+    if isinstance(tables, list) and all(_is_table(x) for x in tables):
+        return tables
+    return None
+
+
+def _merged_state(text, items, index):
+    """``(begin, end, source)`` replacing the state arguments of one call by one, or None.
+
+    ITEMS are the spans of the call's items, the head first. The argument at
+    INDEX and every argument after it must each resolve to tables; if one does
+    not, the call is left alone and None is returned.
+    """
+    tables, args, i = [], [text[b:e] for b, e in items[index + 1:]], 0
+    while i < len(args):
+        found = _quoted_tables(args[i])
+        if found is not None:
+            tables.extend(found)
+            i += 1
+            continue
+        # ... "users" '(("user" "pass")) "sessions" (): a table written as two arguments
+        rows = _rows_of(args[i + 1]) if i + 1 < len(args) else None
+        if not re.fullmatch(r'"(?:[^"\\]|\\.)*"', args[i]) or rows is None:
+            return None
+        tables.append([s_expr.parse(args[i]), rows])
+        i += 2
+    return items[index + 1][0], items[-1][1], "'" + data_source(tables)
+
+
+def _rows_of(arg):
+    """The rows a bare argument stands for (``'(("a" "b"))``, ``()``, ``nil``), or None."""
+    arg = arg.strip()
+    if arg.lower() in ("()", "'()", "nil"):
+        return []
+    if not arg.startswith("'("):
+        return None
+    try:
+        data = s_expr.parse(arg[1:])
+    except (s_expr.SExprError, ValueError):
+        return None
+    return data if isinstance(data, list) and all(isinstance(r, list) for r in data) else None
+
+
+def fix_state_args(text, name, index, arity=None):
     """TEXT with the STATE argument of every ``(NAME ...)`` call given its proper nesting.
 
     INDEX is the position of the state parameter (0-based). Only a quoted
     literal is touched, and only when ``nest_state`` recognises the slip.
+
+    ARITY, the number of parameters of NAME, is optional. When the state is the
+    last parameter and a call passes more than ARITY arguments, the state was
+    split over several quoted literals: they are merged into one quoted list of
+    tables, provided each of them resolves to tables. Otherwise the call keeps
+    its arguments and gets only the single-argument repair.
     """
     import re
     out, pos = [], 0
@@ -289,6 +358,14 @@ def fix_state_args(text, name, index):
         items = _items(text, m.start())
         if len(items) <= index + 1:
             continue
+        if arity is not None and index == arity - 1 and len(items) - 1 > arity:
+            merged = _merged_state(text, items, index)
+            if merged is not None:
+                begin, end, source = merged
+                out.append(text[pos:begin])
+                out.append(source)
+                pos = end
+                continue
         begin, end = items[index + 1]
         arg = text[begin:end]
         if not arg.startswith("'("):

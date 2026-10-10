@@ -71,7 +71,7 @@ class SessionLogTests(unittest.TestCase):
             retry = [e for e in logreview.read_jsonl(log) if e["kind"] == "model_call"
                      and "retry" in e["label"]][0]
             self.assertIn("NOT VALID JSON", retry["prompt"])
-            self.assertEqual(retry["temperature"], 0.4)
+            self.assertEqual(retry["temperature"], 0.0)
 
     def test_typed_repl_calls_are_logged_including_refusals(self):
         with tempfile.TemporaryDirectory() as tmp:

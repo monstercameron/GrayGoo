@@ -318,6 +318,8 @@ class TestClientValidationGate(unittest.TestCase):
                 "temperature",
                 "reasoning_effort",
                 "timeout",
+                "max_retries",      # added, keyword-only, default None
+                "images",           # added, keyword-only, default None
             ],
         )
 

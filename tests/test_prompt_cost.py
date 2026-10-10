@@ -57,7 +57,9 @@ class FocusedRegistryTests(unittest.TestCase):
             self.assertIn("TOOL cookie-value (request name)", step)        # named: full line
             self.assertIn("form-value (request name)", step)               # others: compact
             self.assertNotIn("TOOL form-value", step)
-            self.assertLess(len(step), 0.5 * len(plan))
+            # the planner prompt is itself compacted now, so the gap is smaller than it was
+            self.assertLess(len(step), 0.6 * len(plan))
+            self.assertLess(len(step), 3600)
 
 
 class BriefLessonTests(unittest.TestCase):

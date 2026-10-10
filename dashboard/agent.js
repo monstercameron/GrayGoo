@@ -716,8 +716,10 @@
     api("GET", "/api/agent/heldout").then(function (r) {
       var tasks = (r.data && r.data.tasks) || [];
       var chain = Promise.resolve();
+      state.cancelled = false;
       tasks.forEach(function (t, i) {
         chain = chain.then(function () {
+          if (state.cancelled) return;   // a cancelled build ends the check: no next prompt
           $("ag-demo").textContent = "Held-out " + (i + 1) + " of " + tasks.length + "\u2026";
           return runPrompt(t.prompt, "live", false, t.expected, t.oracle);
         });
@@ -730,7 +732,9 @@
   function loadSnapshots() {
     return api("GET", "/api/agent/snapshots").then(function (r) {
       state.snapshots = (r.data && r.data.snapshots) || [];
-      if (!state.picked && state.view === "session" && state.snapshots.length) {
+      // The recorded evidence run is Scratchpad's opening view only: a project always
+      // opens on its own prompts.
+      if (!state.picked && state.view === "session" && currentProject().builtin && state.snapshots.length) {
         var rec = state.snapshots.filter(function (x) { return x.kind === "recorded" && x.runs && x.runs.length > 1; })[0] ||
                   state.snapshots.filter(function (x) { return x.kind === "recorded"; })[0];
         if (rec) state.view = rec.id;
@@ -893,6 +897,14 @@
   var ENTRY_NAMES = { "handle-request": 1, "handle-command": 1 };
   var VP_MIN = 0.08, VP_MAX = 4;
   function reduced() { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+  // A long name on two lines, broken at a hyphen where possible: ["render-post-", "row"].
+  function wrapName(name, max) {
+    name = String(name || "");
+    if (name.length <= max) return [name, ""];
+    var cut = name.lastIndexOf("-", max - 1);
+    cut = cut >= Math.floor(max / 3) ? cut + 1 : max;
+    return [name.slice(0, cut), trunc(name.slice(cut), max)];
+  }
   function trunc(s, n) { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
   function ease(p) { return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2; }
   function nowMs() { return window.performance && performance.now ? performance.now() : Date.now(); }
@@ -915,7 +927,8 @@
     "plan": "M6 12h.01 M12 12h.01 M18 12h.01",
     "fail": "M6 6l12 12 M18 6L6 18",
     "fix": "M20 12a8 8 0 1 1-2.3-5.7 M20 4v5h-5",
-    "other": "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8"
+    "unused": "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M5.6 5.6l12.8 12.8",
+    "other":"M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8"
   };
   var FX = {
     "entry-point": { label: "Entry point", text: "the function the harness calls for every request or command (handle-request / handle-command)" },
@@ -948,7 +961,7 @@
     pulses: [], active: null, running: false, finished: false, replay: false, dragging: false,
     stepI: 0, stepN: 0, stepSub: false, splitOf: null, note: "", dirty: false, scene: null,
     bounds: null, raf: 0, guard: 0, fxEnd: 0, lit: null, legendSig: "", vpAnim: null, lastFit: "",
-    ready: false, vw: 0, vh: 0, namesSig: "", reloading: false, reloadAgain: false, touchedAt: 0, split: {}, rs: {}, noteBad: false, selSig: "", lastSaved: null, reloadP: null
+    ready: false, vw: 0, vh: 0, namesSig: "", reloading: false, reloadAgain: false, touchedAt: 0, split: {}, rs: {}, noteBad: false, selSig: "", lastSaved: null, reloadP: null, lanes: {}, parallel: 0
   };
 
   function iconPath(key) { return el("path", { d: ICON[key] || ICON.other }); }
@@ -981,7 +994,7 @@
     var lat = m && m.latency && typeof m.latency === "object" ? m.latency : null;
     var kinds = lat && Array.isArray(lat.kinds) ? lat.kinds.map(String) : ["cpu"];
     var ms = lat && typeof lat.cpu_ms === "number" && isFinite(lat.cpu_ms) ? lat.cpu_ms : null;
-    return { effects: eff, kinds: kinds, ms: ms, calls: m && Array.isArray(m.calls) ? m.calls.map(String) : null };
+    return { effects: eff, kinds: kinds, ms: ms, calls: m && Array.isArray(m.calls) ? m.calls.map(String) : null, unused: !!(m && m.unused === true) };
   }
   function primaryOf(eff) {
     var i, k;
@@ -998,6 +1011,7 @@
   // Everything a node can be filtered by in the legend.
   function nodeHas(n, key) {
     if (key === "fix") return n.repairs > 0;
+    if (key === "unused") return !!(n.meta && n.meta.unused);
     var kind = key.slice(0, key.indexOf(":")), v = key.slice(key.indexOf(":") + 1);
     if (kind === "st") return n.st === v;
     if (!n.meta) return false;
@@ -1012,6 +1026,7 @@
     else if (n.st === "notbuilt") lines.push("Not built: the run ended before this one.");
     else if (n.st === "failed") lines.push("Gave up: it never passed its tests; nothing was saved.");
     else if (n.st === "active") lines.push("Building now (" + (n.phaseText || "building") + ").");
+    if (n.meta && n.meta.unused) lines.push("Nothing calls this function yet.");
     if (n.repairs) lines.push(n.repairs + " repair round" + (n.repairs === 1 ? "" : "s") + " so far.");
     if (n.meta) {
       lines.push("");
@@ -1185,15 +1200,22 @@
     var prim = el("g", { "class": "prim" });
     var nm = el("text", { "class": "nm", x: -NW / 2 + 46, y: -9 });
     var sb = el("text", { "class": "sb", x: -NW / 2 + 46, y: 5 });
+    // zoomed-out graphs hide the status line, so a long name gets that room as a second line
+    var w1 = el("text", { "class": "nmw", x: -NW / 2 + 46, y: "-.3em" });
+    var w2 = el("text", { "class": "nmw", x: -NW / 2 + 46, y: ".8em" });
     var row = el("g", { "class": "row" });
     var fix = el("g", { "class": "fix" });
     fix.appendChild(el("rect", { x: NW / 2 - 52, y: -NH / 2 - 9, width: 56, height: 18, rx: 9 }));
     var ft = el("text", { x: NW / 2 - 24, y: -NH / 2 + 4 });
     fix.appendChild(ft);
     var ftt = el("title"); fix.appendChild(ftt);
-    [ring, box, disc, prim, nm, sb, row, fix].forEach(function (c) { inner.appendChild(c); });
+    // top-left badge: a function nothing calls (the text says it, so colour is not the only signal)
+    var unusedB = el("g", { "class": "unusedb" });
+    unusedB.appendChild(el("rect", { x: -NW / 2 + 8, y: -NH / 2 - 9, width: 60, height: 18, rx: 9 }));
+    unusedB.appendChild(el("text", { x: -NW / 2 + 38, y: -NH / 2 + 4 }, "unused"));
+    [ring, box, disc, prim, nm, sb, w1, w2, row, fix, unusedB].forEach(function (c) { inner.appendChild(c); });
     g.appendChild(title); g.appendChild(inner);
-    n.d = { g: g, title: title, inner: inner, box: box, prim: prim, nm: nm, sb: sb, row: row, fix: fix, ft: ft, ftt: ftt };
+    n.d = { g: g, title: title, inner: inner, box: box, prim: prim, nm: nm, sb: sb, w1: w1, w2: w2, row: row, fix: fix, ft: ft, ftt: ftt, unusedB: unusedB };
     n.r = {};
     g.addEventListener("keydown", function (e) {
       if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") { e.preventDefault(); e.stopPropagation(); selectTool(n.name); }
@@ -1213,7 +1235,8 @@
   var PHASE_TEXT = { building: "building", thinking: "thinking…", testing: "testing", repairing: "repairing", splitting: "splitting…", passed: "tests passed" };
 
   function paintNode(n) {
-    var d = n.d, cls = "gn st-" + n.st + (n.kit ? " kit" : "") + (n.entry ? " entry" : "");
+    var d = n.d, unused = !!(n.meta && n.meta.unused);
+    var cls = "gn st-" + n.st + (n.kit ? " kit" : "") + (n.entry ? " entry" : "") + (unused ? " unused" : "");
     if (n.spawnCls) cls += " " + n.spawnCls;
     if (n.flashN) cls += n.flashN % 2 ? " flash-a" : " flash-b";
     if (state.sel === n.name) cls += " sel";
@@ -1221,7 +1244,12 @@
     if (G.lit) cls += nodeHas(n, G.lit) ? " lit" : " dim";
     put(n, "cls", d.g, "class", cls);
     if (n.spawnDelay != null) { var dl = n.spawnDelay + "ms"; if (d.inner.style.animationDelay !== dl) d.inner.style.animationDelay = dl; }
-    putT(n, "nm", d.nm, trunc(n.name, 19));
+    var max = G.nmMax || 19;
+    putT(n, "nm", d.nm, trunc(n.name, max));
+    var lines = wrapName(n.name, max);
+    putT(n, "w1", d.w1, lines[0]);
+    putT(n, "w2", d.w2, lines[1]);
+    put(n, "wrapped", d.g, "data-wrapped", lines[1] ? "1" : "0");
     var sub;
     if (n.st === "active") { n.phaseText = PHASE_TEXT[n.phase] || "building"; sub = n.phaseText; }
     else if (n.st === "pending") sub = n.split ? "split into parts" : "planned";
@@ -1230,8 +1258,9 @@
     else sub = n.kit ? "web kit" : "saved" + (n.uses ? " · reused " + n.uses + "×" : "");
     putT(n, "sb", d.sb, sub);
     putT(n, "tip", d.title, tipOf(n));
-    put(n, "aria", d.g, "aria-label", n.name + ", " + (n.st === "done" ? "saved" : n.st === "notbuilt" ? "not built" : n.st === "failed" ? "gave up" : n.st === "active" ? "building, " + (n.phaseText || "") : "planned") + ". " + roleSummary(n) + ". Press Enter to show details.");
+    put(n, "aria", d.g, "aria-label", n.name + ", " + (n.st === "done" ? "saved" : n.st === "notbuilt" ? "not built" : n.st === "failed" ? "gave up" : n.st === "active" ? "building, " + (n.phaseText || "") : "planned") + ". " + roleSummary(n) + ". " + (unused ? "Unused: nothing calls it yet. " : "") + "Press Enter to show details.");
     put(n, "pressed", d.g, "aria-pressed", state.sel === n.name ? "true" : "false");
+    put(n, "unusedv", d.unusedB, "style", unused ? "" : "display:none");
     var fx = n.repairs > 0;
     put(n, "fixv", d.fix, "style", fx ? "" : "display:none");
     if (fx) { putT(n, "fixt", d.ft, "fix " + n.repairs); putT(n, "fixtt", d.ftt, n.repairs + " repair round" + (n.repairs === 1 ? "" : "s") + ": the tests failed and the code was repaired"); }
@@ -1407,6 +1436,15 @@
     var svg = $("ag-graph"), k = state.vp.k;
     svg.classList.toggle("lod-mid", k < 0.55);
     svg.classList.toggle("lod-low", k < 0.35);
+    // Names keep at least 12.5px on screen: the label size is set in graph units so that
+    // zooming out does not shrink it. A longer size gets a shorter name; the full name stays in the tooltip.
+    var fs = Math.max(13, Math.round(12.5 / k * 2) / 2);
+    if (G.nmFs !== fs) {
+      G.nmFs = fs;
+      G.nmMax = fs > 13 ? Math.max(8, Math.floor(138 / (0.56 * fs))) : 19;
+      svg.style.setProperty("--nm-fs", fs + "px");
+      Object.keys(G.nodes || {}).forEach(function (name) { var n = G.nodes[name]; if (n.d && n.r) { n.r.nm = null; paintNode(n); } });
+    }
   }
   function svgPoint(svg, cx, cy) {
     var m = svg.getScreenCTM();
@@ -1525,6 +1563,11 @@
     $("ag-zin").addEventListener("click", function () { var c = center(); zoomAt(c.x, c.y, 1.3); });
     $("ag-zout").addEventListener("click", function () { var c = center(); zoomAt(c.x, c.y, 1 / 1.3); });
     $("ag-zfit").addEventListener("click", function () { fitView(false, true); });
+    $("ag-legend-btn").addEventListener("click", function () {
+      var wrap = svg.parentNode, open = !wrap.classList.contains("legend-open");
+      wrap.classList.toggle("legend-open", open);
+      this.setAttribute("aria-expanded", open ? "true" : "false");
+    });
     if (window.ResizeObserver) {
       var rtimer = null;
       new ResizeObserver(function () {
@@ -1563,7 +1606,7 @@
       }
       n.kit = hasEff(n.meta, "kit") || tl.session === "web-kit";
       n.entry = hasEff(n.meta, "entry-point");
-      n.st = (G.running && G.active === n.name && !G.promoted[n.name]) ? "active" : "done";
+      n.st = (G.running && (G.active === n.name || G.lanes[n.name]) && !G.promoted[n.name]) ? "active" : "done";
     });
     Object.keys(G.promoted).forEach(function (name) {
       if (seen[name]) return;
@@ -1574,7 +1617,7 @@
       if (hint != null) n.hint = hint;
       if (spec) n.desc = spec;
       n.tool = n.tool || null;
-      n.st = G.failed[name] ? "failed" : (!G.running ? "notbuilt" : (G.active === name ? "active" : "pending"));
+      n.st = G.failed[name] ? "failed" : (!G.running ? "notbuilt" : ((G.active === name || G.lanes[name]) ? "active" : "pending"));
       n.split = !!G.split[name] && n.st === "pending";
       return n;
     }
@@ -1670,9 +1713,11 @@
     var box = $("ag-gstatus"), t = $("ag-gstatus-t");
     var text = G.note;
     if (!text) {
-      var n = (state.tools || []).length;
+      var all = state.tools || [], kitN = all.filter(function (t) { return t.session === "web-kit"; }).length;
+      var n = all.length - kitN;
       text = G.running ? "Working…"
-        : (n ? n + (n === 1 ? " function" : " functions") + " in " + currentProject().name + ". Select one to see its source and tests."
+        : (all.length ? n + (n === 1 ? " function" : " functions") + " in " + currentProject().name +
+            (kitN ? ", plus " + kitN + " kit helper" + (kitN === 1 ? "" : "s") + " from the harness" : "") + ". Select one to see its source and tests."
              : "No functions yet in " + currentProject().name + ". Describe what to build in the box on the left.");
     }
     if (t.textContent !== text) t.textContent = text;
@@ -1715,7 +1760,7 @@
   }
   function renderLegend(list) {
     var box = $("ag-glegend");
-    var eff = {}, lat = {}, st = {}, inh = false, fix = false;
+    var eff = {}, lat = {}, st = {}, inh = false, fix = false, unused = false;
     list.forEach(function (n) {
       if (n.meta && n.st !== "pending" && n.st !== "notbuilt") {
         n.meta.effects.forEach(function (e) { eff[e.key] = 1; if (e.via) inh = true; });
@@ -1723,6 +1768,7 @@
       }
       if (n.st !== "done") st[n.st] = 1;
       if (n.repairs > 0) fix = true;
+      if (n.meta && n.meta.unused) unused = true;
     });
     var entries = [];
     FX_ORDER.forEach(function (k) { if (eff[k]) entries.push({ key: "eff:" + k, icon: k, label: FX[k].label, text: FX[k].text }); });
@@ -1730,6 +1776,7 @@
     ["cpu", "disk", "network"].forEach(function (k) { if (lat[k]) entries.push({ key: "lat:" + k, icon: k, label: "Latency: " + LAT[k].label, text: LAT[k].text }); });
     ["pending", "active", "notbuilt", "failed"].forEach(function (k) { if (st[k]) entries.push({ key: "st:" + k, icon: ST_LEGEND[k].icon, label: ST_LEGEND[k].label, text: ST_LEGEND[k].text }); });
     if (fix) entries.push({ key: "fix", icon: "fix", label: ST_LEGEND.repairs.label, text: ST_LEGEND.repairs.text });
+    if (unused) entries.push({ key: "unused", icon: "unused", label: "Unused", text: "dashed outline: nothing calls this function yet" });
     var sig = entries.map(function (e) { return e.key; }).join(",") + "|" + inh;
     if (G.lit && !entries.some(function (e) { return e.key === G.lit; })) G.lit = null;
     if (sig === G.legendSig) return;
@@ -1875,6 +1922,7 @@
     box.hidden = false;
     clear(box);
     var sig = signatureOf(t);
+    if (t.meta && t.meta.unused === true) box.appendChild(h("div", "dt-unused", "Nothing calls this function. It was written but is not part of the app yet."));
     var top = h("div", "dt-top");
     top.appendChild(h("b", "", t.name));
     top.appendChild(h("span", "muted", " — " + (t.description || "")));
@@ -1961,24 +2009,81 @@
       box.appendChild(h("span", "pill " + s[1], s[0]));
     });
   }
+  // Every log line carries a text label (never colour alone). The label comes from the
+  // line's class and wording, so the same event always reads the same way.
+  function logKind(cls, t) {
+    if (/^Goal:/.test(t)) return ["goal", "GOAL"];
+    if (/^Plan:/.test(t)) return ["plan", "PLAN"];
+    if (/^Reasoning:/.test(t)) return ["think", "THINK"];
+    if (/^Answer:/.test(t)) return ["answer", "ANSWER"];
+    if (/^Saved\b/.test(t)) return ["saved", "SAVED"];
+    if (/^All tests passed/.test(t)) return ["passed", "PASSED"];
+    if (/^Tests FAILED|^Why\b/.test(t)) return ["failed", "FAILED"];
+    if (/^Repair round|^Repaired |kept failing|split it into|Stopping code|same code as|test call is broken|^Retired|unreadable/.test(t)) return ["repair", "REPAIR"];
+    if (/^Independent check/.test(t)) return cls === "fail" ? ["failed", "FAILED"] : ["check", "CHECK"];
+    if (/rate limiting us|model API is busy/.test(t)) return ["repair", "WAIT"];
+    if (/^Screenshot check found|^Could not take a screenshot/.test(t)) return ["failed", "LOOK"];
+    if (/^Screenshot|^Taking screenshots|^Fixing what the screenshots/.test(t)) return ["check", "LOOK"];
+    if (cls === "fail") return ["error", "ERROR"];
+    if (cls === "goal") return ["goal", "GOAL"];
+    if (cls === "answer") return ["answer", "ANSWER"];
+    if (cls === "pass") return ["passed", "PASSED"];
+    if (cls === "use") return ["reuse", "REUSE"];
+    if (cls === "build") return ["building", "BUILD"];
+    if (cls === "model") return ["model", "MODEL"];
+    return ["note", "NOTE"];
+  }
+  // "[name]" while a log line belongs to one function of a parallel build; set by onEvent only.
+  var laneTag = "";
   function say(text, cls) {
-    var d = h("div", "ag-say " + (cls || ""), text);
-    $("ag-log").appendChild(d);
-    $("ag-log").scrollTop = $("ag-log").scrollHeight;
+    var log = $("ag-log"), t = String(text == null ? "" : text);
+    // Follow the newest line only while the user is already at the bottom of the log.
+    var follow = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+    var k = logKind(cls || "", t);
+    var d = h("div", "ag-say k-" + k[0] + (cls ? " " + cls : ""));
+    d.appendChild(h("span", "ag-k", k[1]));
+    var tEl = h("span", "ag-t", laneTag ? null : t);
+    if (laneTag) { tEl.appendChild(h("span", "ag-lane", laneTag)); tEl.appendChild(document.createTextNode(" " + t)); }
+    d.appendChild(tEl);
+    if (t.length > 150) {
+      d.classList.add("clamp");
+      var b = h("button", "ag-more", "show more");
+      b.type = "button"; b.setAttribute("aria-expanded", "false");
+      b.addEventListener("click", function () {
+        var open = d.classList.toggle("open");
+        b.textContent = open ? "show less" : "show more";
+        b.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+      d.appendChild(b);
+    }
+    log.appendChild(d);
+    if (follow) log.scrollTop = log.scrollHeight;
     return d;
   }
 
   // "Asking the model" lines show a live elapsed counter so long calls never look frozen.
+  // Parallel builds can have several calls in flight: one indicator covers them all and
+  // stays up until the last of them has replied (state.inflight counts them).
   function startWait(text) {
-    stopWait();
+    state.inflight = (state.inflight || 0) + 1;
+    if (state.waitEl) { tickWait(); return; }
     state.waitEl = say(text + " (0s)", "model");
-    state.waitText = text; state.waitT0 = Date.now();
+    state.waitText = text; state.waitT0 = Date.now(); state.waitLane = laneTag;
   }
-  function stopWait() { state.waitEl = null; }
+  function stopWait() {
+    state.inflight = Math.max(0, (state.inflight || 0) - 1);
+    if (state.inflight) tickWait(); else state.waitEl = null;
+  }
+  // Goal, done and error end every call at once: hide the indicator and reset the count.
+  function forceWait() { state.inflight = 0; state.waitEl = null; }
   function tickWait() {
     if (!state.waitEl) return;
-    var sec = Math.round((Date.now() - state.waitT0) / 1000);
-    state.waitEl.textContent = state.waitText + " (" + sec + "s" + (sec > 25 ? ", still working: hard retries think longer" : "") + ")";
+    var sec = Math.round((Date.now() - state.waitT0) / 1000), n = state.inflight || 0;
+    var t = state.waitEl.querySelector(".ag-t") || state.waitEl;
+    clear(t);
+    if (n > 1) { t.appendChild(document.createTextNode("Asking the model… (" + n + " calls in flight) · " + sec + "s")); return; }
+    if (state.waitLane) { t.appendChild(h("span", "ag-lane", state.waitLane)); t.appendChild(document.createTextNode(" ")); }
+    t.appendChild(document.createTextNode(state.waitText + " (" + sec + "s" + (sec > 25 ? ", still working: hard retries think longer" : "") + ")"));
   }
 
   // Shown before the first model call: what the sandbox cannot do for this goal.
@@ -1992,10 +2097,78 @@
     gaps.forEach(function (g) { box.appendChild(h("div", "cap-l", g.need + " → " + g.instead)); });
   }
 
+  // "What the goal asks for": one checklist block appended to the build log after the plan.
+  // Every line has a text marker (covered: / MISSING:) and a glyph; colour is never the only cue.
+  function coverageBlock(ev) {
+    var missing = Array.isArray(ev.missing) ? ev.missing : [];
+    var feats = Array.isArray(ev.features) && ev.features.length ? ev.features
+      : missing.map(function (l) { return { label: l, covered: false }; });
+    if (!feats.length) return;
+    var log = $("ag-log");
+    var follow = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+    var box = h("div", "ag-cov");
+    box.appendChild(h("div", "ag-cov-t", "What the goal asks for"));
+    feats.forEach(function (f) {
+      var ok = !!(f && f.covered), label = String(f && f.label != null ? f.label : (f && f.key) || "feature");
+      box.appendChild(h("div", "ag-cov-r " + (ok ? "covered" : "missing"), (ok ? "✓ covered: " : "✗ MISSING: ") + label));
+    });
+    if (ev.extended === true) box.appendChild(h("div", "ag-cov-x", "Asked the planner to add the missing parts."));
+    log.appendChild(box);
+    if (follow) log.scrollTop = log.scrollHeight;
+  }
+
   // "a", "a and b", "a, b and c"
   function joinWords(words) {
     if (words.length < 2) return words.join("");
     return words.slice(0, -1).join(", ") + " and " + words[words.length - 1];
+  }
+
+  // Screenshots of the finished app: a row of thumbnails; a click opens the full image.
+  var shotView = null, shotOpener = null;
+  function clearShots() {
+    var row = $("ag-shots");
+    shotOpener = null; closeShot();
+    clear(row); row.hidden = true;
+  }
+  function addShot(ev) {
+    var label = String(ev.label == null ? "page" : ev.label), row = $("ag-shots");
+    var fig = h("figure", "ag-shot"), btn = h("button", "ag-shot-btn"), img = h("img", "");
+    btn.type = "button";
+    img.src = ev.url; img.alt = "Screenshot of " + label; img.loading = "lazy";
+    btn.appendChild(img);
+    var cap = h("figcaption", "", label);
+    cap.title = label;
+    if (ev.round === 2) cap.appendChild(h("span", "ag-shot-r", " round 2"));
+    btn.addEventListener("click", function () { openShot(ev.url, label, btn); });
+    fig.appendChild(btn); fig.appendChild(cap);
+    row.appendChild(fig);
+    row.hidden = false;
+  }
+  function shotKey(e) { if (e.key === "Escape") { e.preventDefault(); closeShot(); } }
+  function closeShot() {
+    if (!shotView) return;
+    document.removeEventListener("keydown", shotKey);
+    shotView.parentNode.removeChild(shotView);
+    shotView = null;
+    if (shotOpener && shotOpener.focus) shotOpener.focus();
+    shotOpener = null;
+  }
+  function openShot(src, label, opener) {
+    closeShot();
+    shotOpener = opener;
+    var ov = h("div", "ag-shot-view");
+    ov.setAttribute("role", "dialog"); ov.setAttribute("aria-modal", "true"); ov.setAttribute("aria-label", "Screenshot: " + label);
+    var box = h("figure", "ag-shot-big"), img = h("img", ""), x = h("button", "ag-shot-x", "Close");
+    x.type = "button";
+    img.src = src; img.alt = label;
+    box.appendChild(img); box.appendChild(h("figcaption", "", label));
+    x.addEventListener("click", function () { closeShot(); });
+    ov.appendChild(x); ov.appendChild(box);
+    ov.addEventListener("click", function (e) { if (e.target === ov) closeShot(); });
+    document.body.appendChild(ov);
+    shotView = ov;
+    document.addEventListener("keydown", shotKey);
+    x.focus();
   }
 
   // The clean end-of-run card: what happened, what was built, what it cost.
@@ -2003,19 +2176,30 @@
     var box = $("ag-summary");
     clear(box);
     box.hidden = false;
-    box.className = "ag-sumcard " + (m.outcome === "success" ? "ok" : "bad");
+    var missing = Array.isArray(m.missing_features) ? m.missing_features.filter(Boolean).map(String) : [];
+    var unused = Array.isArray(m.unused_functions) ? m.unused_functions.filter(Boolean).map(String) : [];
+    var smoke = m.smoke && typeof m.smoke === "object" ? m.smoke : null;
+    var vis = m.visual && typeof m.visual === "object" ? m.visual : null;
+    // a finished run with missing features, a failed self-check or unfixed screenshot problems is not a plain success
+    var incomplete = m.outcome === "success" && (missing.length > 0 || (!!smoke && smoke.ok === false) || (!!vis && vis.done === false));
+    box.className = "ag-sumcard " + (incomplete || m.outcome === "cancelled" ? "warn" : m.outcome === "success" ? "ok" : "bad");
     var title;
-    if (m.outcome === "success") {
+    if (incomplete) {
+      title = "Built, but incomplete";
+    } else if (m.outcome === "success") {
       title = m.flow === "cache" ? "\u2713 Answered instantly from a saved tool"
         : m.flow === "reuse" ? "\u2713 Answered by a tool you already had"
         : m.flow === "plan" ? "\u2713 Done: built " + m.built.length + " tools and put them together"
         : m.flow === "build" ? "\u2713 Built and verified a new tool" : "\u2713 Done";
+    } else if (m.outcome === "cancelled") {
+      title = "Cancelled";
     } else if (m.outcome === "error") {
       title = "\u2717 Stopped by an error";
     } else {
       title = "\u2717 Couldn\u2019t finish this one";
     }
     box.appendChild(h("div", "sum-t", title));
+    if (m.outcome === "cancelled") box.appendChild(h("div", "sum-l", "You stopped this build. What was saved before that is kept; Continue picks it up from there."));
     if (m.capability_gaps && m.capability_gaps.length) {
       box.appendChild(h("div", "sum-l cap-sum",
         (m.outcome === "success" ? "Built as pure functions. For " : "This goal needs ") +
@@ -2023,6 +2207,18 @@
         (m.outcome === "success" ? ", see the notice above; use Run server in the project bar to try a web app."
                                  : ", which pure functions only provide as described in the notice above.")));
     }
+    if (missing.length) box.appendChild(h("div", "sum-l sum-miss", "Not built yet: " + joinWords(missing) + ". Send a follow-up prompt for these."));
+    if (unused.length) box.appendChild(h("div", "sum-l", "Written but never used: " + unused.join(", ") + "."));
+    if (smoke && smoke.ok === true) box.appendChild(h("div", "sum-l smoke-ok", "Checked: the app answered " + (smoke.call || "the check") +
+      (smoke.status != null ? " with status " + smoke.status : "") + "."));
+    else if (smoke && smoke.ok === false) box.appendChild(h("div", "sum-l smoke-bad", "The finished app failed its own check (" + (smoke.call || "no call") + "): " +
+      String(smoke.error || "no reply").slice(0, 200)));
+    if (vis && vis.checked && vis.done === true) box.appendChild(h("div", "sum-l smoke-ok", "Screenshots checked: the pages show what the goal asks for."));
+    else if (vis && vis.checked && vis.done === false) {
+      var visProblems = Array.isArray(vis.problems) ? vis.problems.filter(Boolean).map(String) : [];
+      box.appendChild(h("div", "sum-l sum-miss", "Screenshots checked: " + visProblems.length + " problem(s) still visible: " + visProblems.join("; ") + ". Send a follow-up prompt naming what to fix."));
+    }
+    if (vis && vis.skipped) box.appendChild(h("div", "sum-l muted", "Screenshot check skipped: " + String(vis.skipped)));
     if (m.outcome === "success" && m.answer && m.answer.ok) {
       var v = String(m.answer.value == null ? "" : m.answer.value);
       var oneLine = v.indexOf("\n") < 0;
@@ -2032,12 +2228,14 @@
     if (m.outcome !== "success") {
       if (m.built.length) box.appendChild(h("div", "sum-l", "Saved before stopping (still available): " + m.built.map(function (b) { return b.name; }).join(", ") +
         (m.planned ? " \u2014 " + m.built.length + " of " + m.planned + " planned tools" : "") + "."));
-      if (m.stopped && m.stopped.detail) box.appendChild(h("div", "sum-l", "Where it stopped: " + String(m.stopped.detail).split("; ")[0].slice(0, 200)));
-      if (m.stopped && m.stopped.hint) box.appendChild(h("div", "sum-l", "Likely cause: " + m.stopped.hint));
-      if (m.error) box.appendChild(h("div", "sum-l", /429|rate|traffic|queue/i.test(m.error)
-        ? "The model API is rate-limited right now, not a problem with your prompt. Try again in a minute."
-        : m.error.slice(0, 200)));
-      box.appendChild(h("div", "sum-l muted", "Try a smaller, more specific prompt, or ask for one piece at a time."));
+      if (m.outcome !== "cancelled") {   // a cancelled build has no failure to explain
+        if (m.stopped && m.stopped.detail) box.appendChild(h("div", "sum-l", "Where it stopped: " + String(m.stopped.detail).split("; ")[0].slice(0, 200)));
+        if (m.stopped && m.stopped.hint) box.appendChild(h("div", "sum-l", "Likely cause: " + m.stopped.hint));
+        if (m.error) box.appendChild(h("div", "sum-l", /429|rate|traffic|queue/i.test(m.error)
+          ? "The model API is rate-limited right now, not a problem with your prompt. Try again in a minute."
+          : m.error.slice(0, 200)));
+        box.appendChild(h("div", "sum-l muted", "Try a smaller, more specific prompt, or ask for one piece at a time."));
+      }
     }
     var chips = h("div", "sum-chips");
     function chip(t, c) { chips.appendChild(h("span", "sc " + (c || ""), t)); }
@@ -2046,7 +2244,19 @@
     if (m.repairs) chip(m.repairs + " repair" + (m.repairs === 1 ? "" : "s"));
     if (m.splits) chip(m.splits + " split into smaller tools");
     if (m.oracle_fixes) chip(m.oracle_fixes + " expected value(s) checked by an independent reference", "ok");
+    if (Array.isArray(m.kept) && m.kept.length) chip(m.kept.length + " planned change" + (m.kept.length === 1 ? "" : "s") + " not made (left as saved): " + m.kept.join(", "), "warn");
     if (m.efficiency && m.efficiency.repeated_errors) chip(m.efficiency.repeated_errors + " repeated error(s), about " + fmt(m.efficiency.wasted_tokens) + " tokens wasted");
+    var cc = m.concurrency && typeof m.concurrency === "object" ? m.concurrency : null;
+    if (cc && cc.parallel && cc.lanes != null) chip("built " + cc.lanes + " at once" + (cc.peak != null ? " (peak " + cc.peak + " calls)" : ""), "ok");
+    if (cc && cc.throttles > 0) chip("rate limited " + cc.throttles + " time" + (cc.throttles === 1 ? "" : "s"), "warn");
+    var th = m.thinking && typeof m.thinking === "object" ? m.thinking : null;
+    if (th && th.calls > 0) chip("thought " + th.calls + " time" + (th.calls === 1 ? "" : "s"));
+    var cmp = m.compaction && typeof m.compaction === "object" ? m.compaction : null;
+    if (cmp && cmp.saved_chars > 0) {
+      var cmpPct = Math.round(100 * cmp.saved_chars / (cmp.prompt_chars + cmp.saved_chars));
+      if (cmpPct > 0 && isFinite(cmpPct)) chip("context compacted: " + cmpPct + "% less prompt text");
+    }
+    if (cmp && cmp.edits > 0) chip(cmp.edits + " repair" + (cmp.edits === 1 ? "" : "s") + " sent as small edits", "ok");
     chip(m.model_calls + " model call" + (m.model_calls === 1 ? "" : "s"));
     chip(fmt(m.tokens) + " tokens" + (m.cost_usd ? " \u00b7 $" + m.cost_usd.toFixed(4) : ""));
     chip(m.seconds + " s");
@@ -2065,13 +2275,86 @@
     REPEATED_CANDIDATE: "same code as a failed attempt"
   };
 
-  function onEvent(ev) {
-    gEvent(ev);
+  // ------------------------------------------- run meter: wall clock + average tokens per second
+  // The clock runs from the goal event to the done event (server times, so a replayed or
+  // re-attached run shows the same figure). The gauge is the model's average speed: output
+  // tokens over the time it spent answering; the demo model has no timings, so there it is
+  // output tokens over wall-clock time.
+  var M = { t0: 0, end: 0, running: false, timer: null, out: 0, timedOut: 0, ms: 0, calls: 0, cost: 0, tokens: 0, free: 0 };
+  var GAUGE_LEN = Math.PI * 30;
+  // Spend of the run so far: under a dollar it needs four decimals to show anything.
+  function spendText(usd) { return "$" + (usd >= 1 ? usd.toFixed(2) : usd > 0 ? usd.toFixed(4) : "0.00"); }
+  function clockText(sec) {
+    sec = Math.max(0, sec);
+    var m = Math.floor(sec / 60), s = Math.floor((sec - m * 60) * 10) / 10;
+    return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+  }
+  function gaugeMax(v) { return v <= 2500 ? 2500 : Math.ceil(v / 500) * 500; }
+  function meterElapsed() { return Math.max(0, (M.running ? Date.now() / 1000 : M.end) - M.t0); }
+  function meterRate() {                       // [tokens per second or null, from real timings?]
+    if (M.ms > 0) return [M.timedOut / (M.ms / 1000), true];
+    var el = meterElapsed();
+    return (!M.calls || el < 0.2) ? [null, false] : [M.out / el, false];
+  }
+  function renderMeter() {
+    if (!$("ag-meter")) return;
+    $("ag-clock-t").textContent = clockText(meterElapsed());
+    var r = meterRate(), v = r[0], max = gaugeMax(v || 0), f = v == null ? 0 : Math.min(1, v / max);
+    $("ag-gauge-val").style.strokeDasharray = (f * GAUGE_LEN).toFixed(1) + " " + (GAUGE_LEN + 1).toFixed(1);
+    $("ag-gauge-ndl").style.transform = "rotate(" + (-90 + 180 * f).toFixed(1) + "deg)";
+    $("ag-gauge-max").textContent = (max / 1000) + "k";
+    $("ag-gauge-n").textContent = v == null ? "\u2013" : Math.round(v).toLocaleString("en-US");
+    $("ag-gauge-cap").textContent = (v == null || r[1]) ? "avg tokens/s" : "avg tokens/s (wall clock)";
+    $("ag-gauge-box").title = v == null ? "Average tokens per second of this run. No model reply yet."
+      : r[1] ? "Average speed of the model in this run: " + M.timedOut.toLocaleString("en-US") + " output tokens over " +
+               (M.ms / 1000).toFixed(1) + " s of answering, in " + M.calls + " call" + (M.calls === 1 ? "" : "s") + "."
+             : "The demo model has no real timings, so this is output tokens divided by wall-clock time.";
+    $("ag-gauge").setAttribute("aria-label", v == null ? "Average tokens per second: no data yet"
+      : "Average " + Math.round(v) + " tokens per second");
+    // estimated spend: the sum of what each model call of this run cost at the model's list price
+    var demo = M.calls > 0 && M.free === M.calls;
+    $("ag-spend-n").textContent = spendText(M.cost);
+    $("ag-spend-cap").textContent = demo ? "est. spend (demo is free)" : "est. spend";
+    $("ag-spend-box").title = !M.calls ? "Estimated cost of this run's model calls. No model reply yet."
+      : demo ? "The demo model is scripted and offline, so this run costs nothing."
+             : "Estimated from the " + M.tokens.toLocaleString("en-US") + " tokens of this run's " + M.calls + " model call" +
+               (M.calls === 1 ? "" : "s") + " at the model's list price. A run compared with no memory spends about the same again.";
+  }
+  function meterEvent(ev) {
     switch (ev.kind) {
       case "goal":
-        clear(repl); clear($("ag-log")); clear($("ag-stages")); $("ag-summary").hidden = true;
+        if (M.timer) clearInterval(M.timer);
+        M = { t0: ev.t || Date.now() / 1000, end: 0, running: true, timer: null, out: 0, timedOut: 0, ms: 0, calls: 0, cost: 0, tokens: 0, free: 0 };
+        $("ag-meter").hidden = false;
+        M.timer = setInterval(renderMeter, 100);
+        renderMeter();
+        break;
+      case "model_reply":
+        M.calls++; M.out += ev.output_tokens || 0;
+        M.cost += ev.cost_usd || 0; M.tokens += (ev.input_tokens || 0) + (ev.output_tokens || 0);
+        if (ev.estimated && !ev.cost_usd) M.free++;
+        if (ev.latency_ms > 0) { M.timedOut += ev.output_tokens || 0; M.ms += ev.latency_ms; }
+        renderMeter();
+        break;
+      case "done":
+      case "error":
+        if (M.timer) { clearInterval(M.timer); M.timer = null; }
+        if (M.running) { M.running = false; M.end = ev.t || Date.now() / 1000; }
+        renderMeter();
+        break;
+    }
+  }
+
+  function onEvent(ev) {
+    gEvent(ev);
+    meterEvent(ev);
+    laneTag = ev.lane && state.parallelRun ? "[" + ev.lane + "]" : "";
+    switch (ev.kind) {
+      case "goal":
+        clear(repl); clear($("ag-log")); clear($("ag-stages")); $("ag-summary").hidden = true; clearShots();
         renderCapNotice([]);
         $("ag-answer").textContent = "…"; $("ag-answer-call").textContent = "working";
+        forceWait(); state.parallelRun = false;
         say("Goal: " + ev.prompt, "goal");
         replLine("c", ";; session " + (state.session || "") + " — " + ev.mode + " model");
         break;
@@ -2085,21 +2368,54 @@
         say("Reuse check said no. Falling back to the full build prompt.", "model");
         break;
       case "model_call":
-        startWait("Asking the model" + (ev.label ? " [" + ev.label + "]" : "") + "…");
+        var ask = (ev.deep ? "Asking the model to think it through" : "Asking the model") + (ev.label ? " [" + ev.label + "]" : "") + "…";
+        // Several calls are in flight in a parallel build, so each gets its own plain line
+        // (its reply line says how long it took) instead of one shared ticking counter.
+        if (laneTag) { say(ask, "model"); break; }
+        forceWait();                 // one call at a time: start clean
+        startWait(ask);
         break;
       case "model_wait":
-        say(ev.message, "fail");
+        if (ev.rate_limited && typeof ev.limit === "number" && typeof ev.wait_s === "number")
+          say("The model API is rate limiting us. Slowing down to " + ev.limit + " call" + (ev.limit === 1 ? "" : "s") +
+            " at a time and waiting " + (Math.round(ev.wait_s * 10) / 10) + " s.", "fail");
+        else say(ev.message, "fail");
         break;
       case "capability_notice":
         renderCapNotice(ev.gaps);
         break;
+      case "coverage":
+        coverageBlock(ev);
+        break;
       case "summary":
         renderSummary(ev);
         break;
+      case "visual_start":
+        say(ev.round === 2 ? "Taking screenshots again to check the fixes." : "Taking screenshots of " + ev.pages + " page(s) of the finished app to check the result.", "build");
+        break;
+      case "screenshot":
+        if (ev.ok) { say("Screenshot " + ev.n + ": " + ev.label); addShot(ev); }
+        else say("Could not take a screenshot of " + ev.label + ": " + (ev.error || "unknown error"), "fail");
+        break;
+      case "visual_review":
+        var visLeft = Array.isArray(ev.problems) ? ev.problems.filter(Boolean).map(String) : [];
+        if (typeof ev.skipped === "string" && ev.skipped) say("Screenshot check skipped: " + ev.skipped);
+        else if (ev.done) say("Screenshot check: the pages show what the goal asks for.", "pass");
+        else say("Screenshot check found " + visLeft.length + " problem(s): " + visLeft.join("; "), "fail");
+        break;
+      case "visual_fix":
+        say("Fixing what the screenshots showed…", "build");
+        break;
       case "model_reply":
-        stopWait();
-        say("Model replied · " + ((ev.input_tokens || 0) + (ev.output_tokens || 0)) + " tokens" +
-          (ev.estimated ? " (estimated)" : "") + (ev.cost_usd ? " · $" + ev.cost_usd.toFixed(5) : ""), "model");
+        if (!laneTag) stopWait();
+        var mr = "Model replied" + (ev.latency_ms > 0 ? " in " + (ev.latency_ms / 1000).toFixed(1) + " s" : "") +
+          " · " + ((ev.input_tokens || 0) + (ev.output_tokens || 0)) + " tokens" +
+          (ev.estimated ? " (estimated)" : "") + (ev.cost_usd ? " · $" + ev.cost_usd.toFixed(5) : "");
+        if (ev.thinking) mr += " · thought first" + (ev.reasoning_tokens != null ? " (" + ev.reasoning_tokens + " reasoning tokens)" : "");
+        if (ev.thinking_fallback) mr += " · thinking ran out of budget, answered without it";
+        say(mr, "model");
+        if (typeof ev.reasoning === "string" && ev.reasoning.length)
+          say("Reasoning: " + (ev.reasoning.length > 300 ? ev.reasoning.slice(0, 300) + "…" : ev.reasoning), "reasoning");
         break;
       case "decision":
         if (ev.action === "build") {
@@ -2108,8 +2424,10 @@
           if (ev.plan.definition) { replLine("c", ";; candidate (not saved until its tests pass)"); replLine("def", ev.plan.definition); }
         } else if (ev.action === "cache") {
           say("Decision: CACHED — " + ev.plan.why, "use");
+        } else if (ev.action === "plan") {
+          say("Decision: PLAN — " + ((ev.plan && ev.plan.why) || "split the goal into small functions"), "build");
         } else {
-          say("Decision: REUSE — " + (ev.plan.why || "existing tool"), "use");
+          say("Decision: REUSE — " + ((ev.plan && ev.plan.why) || "existing tool"), "use");
         }
         drawGraph();
         break;
@@ -2124,11 +2442,20 @@
         say((ev.ok ? "All tests passed" : "Tests FAILED") + (ev.risk ? " · risk " + ev.risk : "") + (ev.ok ? "" : " — " + ev.reason), ev.ok ? "pass" : "fail");
         break;
       case "plan":
-        say("Plan: " + ev.steps.length + " small tools, built in order: " + ev.steps.map(function (x) { return x.name || "?"; }).join(" → "), "build");
+        say("Plan: " + (ev.steps.length === 1 ? "1 small tool: " : ev.steps.length + " small tools, listed so that each comes after the ones it calls: ") + ev.steps.map(function (x) { return x.name || "?"; }).join(" → "), "build");
+        break;
+      case "parallel":
+        state.parallelRun = true;
+        say("Building " + (ev.names || []).length + " functions at the same time" + (ev.limit ? " (up to " + ev.limit + " model calls at once)" : "") +
+          ". Functions that call another one wait for it.", "build");
         break;
       case "step":
         say("Step " + ev.i + " of " + ev.n + ": " + (ev.name || "tool") + " — " + ev.spec, "build");
         replLine("c", ";; step " + ev.i + "/" + ev.n + ": " + (ev.name || ""));
+        break;
+      case "step_wait":
+        say((laneTag ? "Waiting" : ev.name + " is waiting") + " for " + (ev.on || []).join(", ") + " to be saved first, because it calls " +
+          ((ev.on || []).length === 1 ? "it" : "them") + ".", "build");
         break;
       case "oracle_corrected":
         say("Independent check: for " + ev.call + " the model expected " + ev.was + ", but the " + ev.algo + " reference says " + ev.expected + ", which is exactly what the code returns. The test was wrong, not the code.", "pass");
@@ -2141,6 +2468,29 @@
         break;
       case "kit_seeded":
         say("Added the web kit to this project (" + ev.tools.length + " tested helper tools such as " + ev.tools.slice(0, 3).join(", ") + "). No tokens used.", "build");
+        break;
+      case "style_repair":
+        say("The pages use " + (ev.missing || []).length + " class" + ((ev.missing || []).length === 1 ? "" : "es") +
+          " that the stylesheet " + (ev.sheet || "") + " has no rule for (" + (ev.missing || []).slice(0, 8).join(", ") +
+          ((ev.missing || []).length > 8 ? ", …" : "") + "). Adding the missing rules.", "build");
+        break;
+      case "style_check":
+        if (Array.isArray(ev.undefined) && ev.undefined.length)
+          say("Checked the pages' HTML against the stylesheet: " + ev.undefined.length + " class" + (ev.undefined.length === 1 ? "" : "es") +
+            " used by the pages " + (ev.undefined.length === 1 ? "has" : "have") + " no rule (" + ev.undefined.slice(0, 8).join(", ") +
+            (ev.undefined.length > 8 ? ", …" : "") + "). Those parts render unstyled.", "fail");
+        else say("Checked the pages' HTML against the stylesheet: every class the pages use has a rule.", "pass");
+        break;
+      case "step_kept":
+        say("Left " + (ev.name || "this function") + " as it was: the model judged that the saved version already does what this step asks." +
+          (ev.why ? " Its reason: " + ev.why : ""), "fail");
+        break;
+      case "step_failed":
+        say("Could not build " + (ev.name || "this function") + " after every repair attempt. Skipping it and building the rest so the app still gets wired up." + (ev.detail ? " Last failure: " + ev.detail : ""), "fail");
+        break;
+      case "smoke":
+        say(ev.ok ? "Checked the finished app with " + ev.call + ": it answered with status " + ev.status + ". No model call needed."
+                  : "The finished app failed its own check (" + ev.call + "): " + (ev.error || "no answer"), ev.ok ? "pass" : "fail");
         break;
       case "retired":
         (ev.tools || []).forEach(function (t) {
@@ -2161,12 +2511,24 @@
         say("This step kept failing its tests. Asking the model to split it into smaller tools...", "fail");
         break;
       case "gave_up":
+        if (ev.app) { say((ev.detail || "The app is not complete.") + (ev.hint ? " " + ev.hint : ""), "fail"); break; }
         say("Gave up after " + ev.attempts + " attempts. Nothing was saved: the tool never passed its own tests. " +
           (ev.hint ? "Likely cause: " + ev.hint + " " : "") +
           "Try a smaller, more specific prompt (for example one function with concrete inputs); big tasks work better as small tools built one at a time.", "fail");
         break;
       case "repair":
         say("Repair round " + ev.attempt + ": " + ev.reason, "fail");
+        break;
+      case "edit":
+        var editN = ev.edits || 0;
+        say("Repaired " + (ev.name || "the function") + " with " + editN + " small edit" + (editN === 1 ? "" : "s") + " instead of rewriting it" +
+          (ev.saved_chars > 0 ? " (about " + Math.round(ev.saved_chars / 4) + " tokens not repeated)" : "") + ".", "build");
+        break;
+      case "edit_failed":
+        say("The model's small edit could not be applied" + (ev.reason ? " (" + ev.reason + ")" : "") + ". Asking for the whole function instead.", "fail");
+        break;
+      case "tests_kept":
+        // the reply left its tests out, so the tests it already had are kept: no log line, it would be noise
         break;
       case "promoted":
         say("Saved “" + ev.name + "” to the tool registry", "pass");
@@ -2182,7 +2544,7 @@
         $("ag-answer-call").textContent = ev.call;
         break;
       case "error":
-        stopWait();
+        forceWait();
         say("Error: " + (/429|rate|traffic|queue/i.test(ev.message || "") ? "the model API is rate-limited right now (not a problem with your prompt). " : "") + ev.message, "fail");
         if (/demo model only knows/i.test(ev.message || "") && state.liveOk) {
           var sw = h("button", "ag-chip", "Switch to Live and send it again");
@@ -2191,13 +2553,25 @@
         } state.ghost = null; drawGraph();
         $("ag-answer").textContent = "—"; $("ag-answer-call").textContent = "no answer";
         break;
+      case "cancel_requested":
+        // The click already logged it; a cancel sent from another tab still needs the button to show it.
+        setCancelling();
+        break;
+      case "cancelled":
+        state.cancelled = true;
+        var saved = Array.isArray(ev.saved) ? ev.saved.filter(Boolean).map(String) : [];
+        say("Cancelled. " + (saved.length ? "Kept what was already saved: " + saved.join(", ") + "." : "Nothing new had been saved yet."));
+        forceWait(); state.ghost = null;
+        $("ag-answer").textContent = "—"; $("ag-answer-call").textContent = "cancelled, no answer";
+        break;
       case "done":
-        stopWait();
+        forceWait();
         state.ghost = null;
         say("Finished (" + ev.state + ") · " + ev.model_calls + " model call(s) · " +
           ((ev.input_tokens || 0) + (ev.output_tokens || 0)) + " tokens", "done");
         break;
     }
+    laneTag = "";
   }
 
   // ------------------------------------------- live build choreography (events -> graph)
@@ -2208,16 +2582,26 @@
   function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
 
   function resetRunState() {
-    G.plan = []; G.failed = {}; G.promoted = {}; G.spawn = {}; G.animate = {}; G.split = {}; G.rs = {};
+    G.plan = []; G.failed = {}; G.promoted = {}; G.spawn = {}; G.animate = {}; G.split = {}; G.rs = {}; G.lanes = {}; G.parallel = 0;
     G.active = null; G.stepI = 0; G.stepN = 0; G.stepSub = false; G.splitOf = null; G.kitNew = null;
     G.note = ""; G.noteBad = false; G.running = false; G.finished = false; G.lit = null; G.lastSaved = null;
   }
-  var PHASE_NOTE = { thinking: "asking the model", testing: "running tests", repairing: "tests failed, repairing", splitting: "splitting into smaller functions", passed: "tests passed" };
+  var PHASE_NOTE = { thinking: "asking the model", testing: "running tests", repairing: "tests failed, repairing", splitting: "splitting into smaller functions", passed: "tests passed", waiting: "waiting for a function it calls" };
   function buildNote() {
-    var name = G.active;
+    var lanes = Object.keys(G.lanes);
+    if (lanes.length >= 2) {
+      // several functions at once: name up to four, then count the rest
+      var more = lanes.length > 4 ? " and " + (lanes.length - 4) + " more" : "";
+      var multi = "Building " + lanes.length + " functions at once: " + lanes.slice(0, 4).join(", ") + more;
+      if (G.parallel > 0) multi += " · up to " + G.parallel + " model calls at a time";
+      G.note = multi;
+      return;
+    }
+    var name = lanes.length === 1 ? lanes[0] : G.active;
     if (!name) return;
     var r = rs(name);
-    var s = "Building " + name + (G.stepN ? " (" + G.stepI + " of " + G.stepN + ")" : "");
+    var idx = r.stepN != null ? r.stepI : G.stepI, tot = r.stepN != null ? r.stepN : G.stepN;
+    var s = "Building " + name + (tot ? " (" + idx + " of " + tot + ")" : "");
     if (G.stepSub && G.splitOf && G.splitOf !== name) s += " — part of " + G.splitOf;
     if (r.repairs) s += " · attempt " + (r.repairs + 1);
     if (PHASE_NOTE[r.phase]) s += " · " + PHASE_NOTE[r.phase];
@@ -2227,10 +2611,14 @@
   function finishRun(ev) {
     if (!G.running && G.finished) return;
     var built = Object.keys(G.promoted).length, planned = G.plan.length, failed = Object.keys(G.failed).length;
-    G.running = false; G.finished = true; G.active = null;
+    G.running = false; G.finished = true; G.active = null; G.lanes = {};
     Object.keys(G.rs).forEach(function (k) { G.rs[k].phase = ""; });
     var ok = !ev || ev.state === "done" || ev.state == null;
-    if (ok && !failed) {
+    if (ev && ev.state === "cancelled") {
+      G.noteBad = true;
+      G.note = planned ? "Cancelled — " + built + " of " + planned + " planned functions were saved before stopping."
+                       : built ? "Cancelled — " + plural(built, "function") + " saved before stopping." : "Cancelled — nothing new was saved.";
+    } else if (ok && !failed) {
       G.noteBad = false;
       G.note = built ? "Finished — saved " + (planned > built ? built + " of " + planned + " planned functions" : plural(built, "function")) + " this run."
                      : "Finished — answered with functions that already exist.";
@@ -2242,13 +2630,18 @@
   }
 
   function gEvent(ev) {
-    var name = G.active;
+    var name = ev.lane || G.active;
     switch (ev.kind) {
       case "goal":
         resetRunState();
         G.running = true;
         G.note = "Reading your goal…";
         if (!G.dragging) { state.vpTouched = false; G.lastFit = ""; }
+        break;
+      case "coverage":
+        var cmiss = Array.isArray(ev.missing) ? ev.missing : [];
+        if (cmiss.length) G.note = "Goal check: " + plural(cmiss.length, "feature") + " not covered yet" + (ev.extended ? "; asking the planner to add " + (cmiss.length === 1 ? "it" : "them") : "") + ".";
+        else if (Array.isArray(ev.features) && ev.features.length) G.note = "Goal check: every feature the goal asks for is covered.";
         break;
       case "kit_seeded":
         G.kitNew = (ev.tools || []).slice();
@@ -2259,7 +2652,8 @@
         var steps = ev.steps || [], sub = !!ev.sub;
         if (!sub) { G.plan = []; G.split = {}; }
         var D = Math.min(Math.max(steps.length - 1, 0), 4);
-        var parent = sub && G.active ? G.nodes[G.active] : null;
+        var pn = ev.lane || G.active;
+        var parent = sub && pn ? G.nodes[pn] : null;
         var ph = parent ? Math.max(0, (parent.depth || 0) - 1) : 0;
         steps.forEach(function (s, i) {
           var nm = s.name || ("step-" + (i + 1));
@@ -2271,15 +2665,30 @@
         G.note = sub ? "Splitting " + (G.splitOf || "a step") + " into " + plural(steps.length, "smaller function") + "…"
                      : "Planning " + plural(steps.length, "function") + "…";
         break;
+      case "parallel":
+        G.parallel = ev.limit || 0;
+        break;
       case "step":
         G.active = ev.name || ("step-" + ev.i);
         G.stepI = ev.i || 0; G.stepN = ev.n || 0; G.stepSub = !!ev.sub;
         rs(G.active).phase = "building";
+        rs(G.active).stepI = G.stepI; rs(G.active).stepN = G.stepN;
+        if (ev.lane) G.lanes[ev.lane] = true;
         if (!G.plan.some(function (p) { return p.name === G.active; }) && !toolByName(G.active)) {
           G.plan.push({ name: G.active, spec: ev.spec || "", hint: ev.n > 1 ? Math.round((ev.i - 1) * Math.min(ev.n - 1, 4) / (ev.n - 1)) : 0 });
         }
         delete G.failed[G.active];
         buildNote();
+        break;
+      case "step_wait":
+        rs(ev.name).phase = "waiting";
+        if (G.lanes[ev.name] || G.active === ev.name) buildNote();
+        break;
+      case "step_done":
+        delete G.lanes[ev.name];
+        rs(ev.name).phase = "";
+        if (ev.ok === false) G.failed[ev.name] = true;
+        if (Object.keys(G.lanes).length) buildNote();
         break;
       case "model_call":
         if (name) { rs(name).phase = "thinking"; buildNote(); }
@@ -2304,11 +2713,12 @@
         if (name) { rs(name).phase = "splitting"; G.split[name] = true; G.splitOf = name; buildNote(); }
         break;
       case "promoted":
-        G.promoted[ev.name] = true; delete G.failed[ev.name]; delete G.split[ev.name];
+        G.promoted[ev.name] = true; delete G.failed[ev.name]; delete G.split[ev.name]; delete G.lanes[ev.name];
         if (G.rs[ev.name]) G.rs[ev.name].phase = "";
         if (!G.replay) { G.spawn[ev.name] = true; G.animate[ev.name] = { at: nowMs() + 380, i: 0 }; }
         G.lastSaved = ev.name;
         G.note = "Saved " + ev.name;
+        if (Object.keys(G.lanes).length) buildNote();   // other functions are still being built
         reloadTools().then(function () {
           var n = G.nodes[ev.name];
           if (G.lastSaved === ev.name && n && n.tool && G.note.indexOf("Saved " + ev.name) === 0) {
@@ -2317,9 +2727,16 @@
           }
         });
         break;
+      case "step_failed":
+        if (ev.name) { G.failed[ev.name] = true; rs(ev.name).phase = ""; }
+        break;
       case "gave_up":
-        if (name) { G.failed[name] = true; rs(name).phase = ""; }
         G.noteBad = true;
+        if (ev.app) {              // about the finished app as a whole, not about one function
+          G.note = ev.detail || "The app is not complete.";
+          break;
+        }
+        if (name) { G.failed[name] = true; rs(name).phase = ""; }
         G.note = "Gave up on " + (name || "this step") + (ev.attempts ? " after " + plural(ev.attempts, "attempt") : "") + " — nothing was saved for it.";
         break;
       case "error":
@@ -2366,7 +2783,8 @@
   }
   function updateResume() {
     var box = $("ag-resume");
-    var last = state.activeChecked ? lastUnfinished() : null;
+    // A build in progress (sent from this page, or re-attached after a reload) is never "unfinished".
+    var last = state.activeChecked && !state.busy && !G.running && !state.attaching ? lastUnfinished() : null;
     if (last && lsGet(DISMISS_KEY + state.project) === last.session_id) last = null;
     box.hidden = !last;
     if (!last) return;
@@ -2463,8 +2881,28 @@
     state.busy = b;
     $("ag-send").disabled = b;
     $("ag-demo").disabled = b;
+    $("ag-cancel").hidden = !b;
+    restoreCancel();
     setProjectLock(b);
     updateResume();
+  }
+  function restoreCancel() { var cx = $("ag-cancel"); cx.disabled = false; cx.textContent = "Cancel build"; }
+  function setCancelling() { var cx = $("ag-cancel"); cx.disabled = true; cx.textContent = "Cancelling…"; }
+  // Stops the build in progress. The server stops once the model calls already under way return.
+  function cancelRun() {
+    if (!state.busy) return;
+    setCancelling();
+    say("Cancel requested. Stopping as soon as the model calls already under way return…");
+    api("POST", "/api/agent/cancel").then(function (r) {
+      var d = r.data || {};
+      if (r.status === 200 && d.cancelled === true) return;   // the run itself reports "cancelled" next
+      restoreCancel();
+      if (r.status === 200) say("Nothing was running to cancel.");
+      else say("Could not cancel the build (HTTP " + r.status + ").", "fail");
+    }, function () {
+      restoreCancel();
+      say("Could not reach the server to cancel.", "fail");
+    });
   }
 
   var POLL_MS = 150;
@@ -2510,7 +2948,10 @@
     });
     var b = api("GET", "/api/agent/history?" + projectQuery()).then(function (r) {
       if (pid !== state.project) return;
-      state.history = r.data.sessions || [];
+      // Like the functions, the prompt log is the chosen model's: a demo run must never
+      // appear among a project's real prompts (rows from before modes were recorded stay).
+      var mode = state.mode;
+      state.history = (r.data.sessions || []).filter(function (x) { return !x.mode || x.mode === mode; });
     });
     return Promise.all([a, b]).then(function () {
       if (pid !== state.project) return;
@@ -2527,7 +2968,8 @@
   function runPrompt(prompt, mode, compare, expected, oracle) {
     state.view = "session"; state.picked = true; state.pick = null;
     setBusy(true);
-    return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle, project: state.project }).then(function (r) {
+    var visual = $("ag-visual").checked && !$("ag-visual").disabled;
+    return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle, project: state.project, visual: visual }).then(function (r) {
       if (r.status !== 200) { setBusy(false); throw new Error((r.data && r.data.error) || "request failed"); }
       state.session = r.data.session_id; state.next = 0;
       setPrompt(prompt);
@@ -2538,9 +2980,16 @@
     });
   }
 
+  // Bring the build workspace to the top of the viewport once, when a run starts.
+  function showBuild() {
+    var b = $("ag-build");
+    if (b && b.scrollIntoView) b.scrollIntoView({ behavior: reduced() ? "auto" : "smooth", block: "start" });
+  }
+
   function send() {
     var prompt = $("ag-prompt").value.trim();
     if (!prompt) { $("ag-prompt").focus(); return; }
+    showBuild();
     runPrompt(prompt, $("ag-mode").value, $("ag-compare").checked)
       .catch(function (e) { say(e.message, "fail"); })
       .then(function () { setBusy(false); });
@@ -2557,6 +3006,7 @@
   ];
   function guidedDemo() {
     if ($("ag-demo").disabled) return;
+    showBuild();
     // The demo and its evidence belong to the builtin project: leave a custom project first.
     if (!currentProject().builtin) {
       var from = currentProject().name;
@@ -2569,8 +3019,10 @@
       state.tools = []; state.history = []; state.sel = null; state.view = "session"; showDetail();
       drawGraph(); redrawEvidence();
       var chain = Promise.resolve();
+      state.cancelled = false;
       DEMO_STEPS.forEach(function (p, i) {
         chain = chain.then(function () {
+          if (state.cancelled) return;   // a cancelled build ends the demo: no next prompt
           $("ag-demo").textContent = "Step " + (i + 1) + " of " + DEMO_STEPS.length + "…";
           return runPrompt(p.p, $("ag-mode").value, true, p.e);
         });
@@ -2600,7 +3052,8 @@
   function focusCurrentChip() { var b = $("ag-proj-chips").querySelector('button[aria-pressed="true"]'); if (b) b.focus(); }
 
   function demoCostText() {
-    var live = $("ag-mode").value === "live";
+    // the guided demo runs in Scratchpad, with the model Scratchpad was last set to
+    var live = (currentProject().builtin ? $("ag-mode").value : (state.scratchMode || $("ag-mode").value)) === "live";
     var base = live
       ? "Runs the live model: 7 prompts, about 2 min, roughly 1 cent of real tokens"
       : "Runs the scripted demo model: 7 prompts, about 1 min, free, estimated tokens";
@@ -2625,12 +3078,47 @@
     $("ag-ask-h").textContent = "Ask the agent — in " + n;
     $("ag-proj-hint").textContent = state.tools.length
       ? "Follow-up prompts build on this project's tools. Ask to add a feature, or to change one (for example: make post titles link to the post)."
-      : (currentProject().tools
-          ? "This project has " + currentProject().tools + " tools built with the other model. Switch the model selector to " +
+      : (currentProject().builtin && (currentProject().counts || {})[state.mode === "live" ? "demo" : "live"]
+          ? "Scratchpad has " + currentProject().counts[state.mode === "live" ? "demo" : "live"] + " functions built with the other model. Switch the model selector to " +
             (state.mode === "live" ? "Demo" : "Live") + " to see and build on them."
           : "This project is empty. Describe what to build.");
     $("ag-tools-h").textContent = "Tools in " + n;
     $("ag-reset").textContent = "Forget this project's tools";
+  }
+
+  // A project other than Scratchpad is built with the Live model only: the scripted demo
+  // model knows nothing but its example prompts. So inside a project the selector is held on
+  // Live and the Demo option is switched off; back in Scratchpad the earlier choice returns.
+  function applyProjectMode() {
+    var sel = $("ag-mode"), demo = sel.querySelector('option[value="demo"]');
+    var own = !currentProject().builtin;
+    if (own && sel.value !== "live") state.scratchMode = sel.value;
+    demo.disabled = own;
+    demo.textContent = own ? "Demo (Scratchpad only)" : "Demo (free, chips only)";
+    var want = own ? "live" : (state.scratchMode || sel.value);
+    if (!own && want === "live" && !state.liveOk && state.configLoaded) want = "demo";
+    if (sel.value !== want) sel.value = want;
+    if (!own) state.scratchMode = null;
+    state.mode = sel.value;
+    modeTexts();
+  }
+  // The lines that describe the chosen model (no reloading).
+  function modeTexts() {
+    var m = state.mode, stuck = !currentProject().builtin && !state.liveOk && state.configLoaded;
+    $("ag-mode-note").textContent = stuck
+      ? "This project needs the Live model, which is unavailable: " + NOTES.live.replace(/^Live unavailable: /, "")
+      : NOTES[m];
+    $("ag-compare").checked = m === "demo";
+    $("ag-visual").disabled = m !== "live";
+    $("ag-visual").title = m === "live" ? "" : "Screenshots are checked by the Live model";
+    $("ag-send").textContent = m === "live" ? "Send prompt (about \u00bd\u00a2)" : "Send prompt";
+  }
+  // How many functions of its own a project has, in the model its view uses.
+  function projectCount(p) {
+    if (!p.counts) return p.tools || 0;
+    // Scratchpad's number is for the model it opens with, also while another project is open
+    var scratch = currentProject().builtin ? state.mode : (state.scratchMode || state.mode);
+    return p.counts[p.builtin ? scratch : "live"] || 0;
   }
 
   function renderProjects() {
@@ -2644,7 +3132,8 @@
       b.setAttribute("aria-pressed", p.id === cur.id ? "true" : "false");
       b.title = p.description || p.name;
       b.appendChild(h("span", "ag-proj-cname", p.name));
-      b.appendChild(h("span", "ag-proj-cn", (p.tools || 0) + (p.tools === 1 ? " tool" : " tools")));
+      var cn = projectCount(p);
+      b.appendChild(h("span", "ag-proj-cn", cn + (cn === 1 ? " function" : " functions")));
       b.addEventListener("click", function () { switchProject(p.id); });
       box.appendChild(b);
     });
@@ -2713,6 +3202,8 @@
     state.tools = []; state.history = []; state.sel = null; state.ghost = null; state.hot = null;
     state.session = null; state.pick = null; state.vpTouched = false;
     resetRunState(); state.attached = false; state.attaching = false;
+    if (!currentProject().builtin) state.view = "session";   // never a recorded run in place of the project's own log
+    applyProjectMode();
     $("ag-prompt").value = lsGet(DRAFT_KEY + state.project) || "";
     $("ag-cmd-out").hidden = true; $("ag-cmd-in").value = "";
     closeProjForm(false); closeProjDel(false); setProjErr("");
@@ -2829,16 +3320,15 @@
   // ----------------------------------------------------------------- init
   var NOTES = {
     demo: "Demo model: scripted and offline, free. It only understands the example chips; use Live for anything else.",
-    live: "Live model: real Cerebras Qwen calls (reasoning off, at most 3 per prompt). Comparing with no memory doubles the tokens."
+    live: "Live model: real Cerebras Qwen calls. The plan of a large goal is thought through first, and functions that do not call each other are built at the same time. Comparing with no memory doubles the tokens."
   };
   function setModeNote() {
-    var m = $("ag-mode").value; state.mode = m;
-    $("ag-mode-note").textContent = NOTES[m];
+    state.mode = $("ag-mode").value;
+    renderProjects();            // Scratchpad's count follows the model
+    modeTexts();
     $("ag-hero-note").textContent = $("ag-hero-note").textContent || "";
     $("ag-demo-cost").textContent = demoCostText();
-    $("ag-compare").checked = m === "demo";
     if (state.snapshots) refresh();
-    $("ag-send").textContent = m === "live" ? "Send prompt (about \u00bd\u00a2)" : "Send prompt";
     paintBadge();
   }
   function paintBadge() {
@@ -2862,6 +3352,8 @@
         NOTES.live = "Live unavailable: " + (live.reason || "unknown");
         $("ag-mode").value = "demo";
       }
+      state.configLoaded = true;
+      applyProjectMode();          // a saved project opens on Live, not on the Demo default
       setModeNote();
     });
   }
@@ -2892,7 +3384,11 @@
   $("ag-jump").addEventListener("click", function () {
     var t = $("ag-prompt"); t.scrollIntoView({ behavior: "smooth", block: "center" }); t.focus();
   });
+  var replbox = $("ag-replbox");
+  replbox.open = window.innerHeight >= 900;
+  replbox.addEventListener("toggle", function () { if (replbox.open) repl.scrollTop = repl.scrollHeight; });
   $("ag-send").addEventListener("click", send);
+  $("ag-cancel").addEventListener("click", cancelRun);
   $("ag-demo").addEventListener("click", guidedDemo);
   $("ag-prompt").addEventListener("keydown", function (e) {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -2901,6 +3397,8 @@
     c.addEventListener("click", function () { if (c.getAttribute("data-p") == null) return; setPrompt(c.getAttribute("data-p")); $("ag-prompt").focus(); });
   });
   $("ag-mode").addEventListener("change", setModeNote);
+  $("ag-visual").checked = lsGet("gg-visual") !== "0";
+  $("ag-visual").addEventListener("change", function () { lsSet("gg-visual", $("ag-visual").checked ? "1" : "0"); });
   var lastW = window.innerWidth, rt = null;
   window.addEventListener("resize", function () {
     clearTimeout(rt);
@@ -2953,6 +3451,7 @@
     state.project = savedProject() || "scratch";
     $("ag-prompt").value = lsGet(DRAFT_KEY + state.project) || "";
     loadProjects().then(function () {
+      applyProjectMode();          // before the first load, so a project never shows its Demo side
       var cfg = loadConfig();
       refresh(); loadSnapshots();
       return cfg;
