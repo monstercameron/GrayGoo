@@ -1,0 +1,3370 @@
+[
+  {
+    "name": "pair-value",
+    "description": "Value for the string NAME in PAIRS, a list of (name value) lists, or NIL",
+    "definition": "(defun pair-value (pairs name)\n  \"Value for the string NAME in PAIRS, a list of (name value) lists, or NIL.\"\n  (second (assoc name pairs :test #'string=)))",
+    "kit": true,
+    "session": "web-kit",
+    "prompts": [],
+    "call": "(pair-value '((\"a\" \"1\") (\"b\" \"2\")) \"b\")",
+    "tests": [
+      {
+        "call": "(pair-value '((\"a\" \"1\") (\"b\" \"2\")) \"b\")",
+        "expect": "\"2\"",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(pair-value '((\"a\" \"1\")) \"z\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(pair-value '() \"a\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      }
+    ],
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "table-rows",
+    "description": "Rows of the table NAME in STATE, a list of (name rows) tables; NIL if absent",
+    "definition": "(defun table-rows (state name)\n  \"Rows of the table NAME in STATE, a list of (name rows) tables; NIL if absent.\"\n  (second (assoc name state :test #'string=)))",
+    "kit": true,
+    "session": "web-kit",
+    "prompts": [],
+    "call": "(table-rows '((\"posts\" ((\"Hi\" \"text\"))) (\"users\" ())) \"posts\")",
+    "tests": [
+      {
+        "call": "(table-rows '((\"posts\" ((\"Hi\" \"text\"))) (\"users\" ())) \"posts\")",
+        "expect": "((\"Hi\" \"text\"))",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(table-rows '((\"posts\" ())) \"users\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(table-rows '() \"posts\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      }
+    ],
+    "mode": "live",
+    "uses": 21
+  },
+  {
+    "name": "with-table-rows",
+    "description": "New STATE in which the table NAME holds ROWS (the table is added if absent)",
+    "definition": "(defun with-table-rows (state name rows)\n  \"New STATE in which the table NAME holds ROWS; the table is added if absent.\"\n  (if (assoc name state :test #'string=)\n      (mapcar (lambda (table)\n                (if (string= (first table) name) (list name rows) table))\n              state)\n      (append state (list (list name rows)))))",
+    "kit": true,
+    "session": "web-kit",
+    "prompts": [],
+    "call": "(with-table-rows '((\"posts\" ()) (\"users\" ())) \"posts\" '((\"Hi\" \"text\")))",
+    "tests": [
+      {
+        "call": "(with-table-rows '((\"posts\" ()) (\"users\" ())) \"posts\" '((\"Hi\" \"text\")))",
+        "expect": "((\"posts\" ((\"Hi\" \"text\"))) (\"users\" ()))",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(with-table-rows '() \"posts\" '((\"a\" \"b\")))",
+        "expect": "((\"posts\" ((\"a\" \"b\"))))",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      }
+    ],
+    "mode": "live",
+    "uses": 4
+  },
+  {
+    "name": "join-strings",
+    "description": "The strings in STRINGS joined into one string with SEPARATOR between each pair",
+    "definition": "(defun join-strings (strings separator)\n  \"The strings in STRINGS joined with SEPARATOR between each pair; \\\"\\\" for none.\"\n  (reduce (lambda (acc item) (concatenate 'string acc separator item))\n          (rest strings)\n          :initial-value (or (first strings) \"\")))",
+    "kit": true,
+    "session": "web-kit",
+    "prompts": [],
+    "call": "(join-strings '(\"Buy\" \"milk\") \" \")",
+    "tests": [
+      {
+        "call": "(join-strings '(\"Buy\" \"milk\") \" \")",
+        "expect": "\"Buy milk\"",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(join-strings '() \", \")",
+        "expect": "\"\"",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(join-strings '(\"solo\") \"-\")",
+        "expect": "\"solo\"",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(join-strings '(\"a\" \"b\" \"c\") \" -- \")",
+        "expect": "\"a -- b -- c\"",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      }
+    ],
+    "mode": "live",
+    "uses": 6
+  },
+  {
+    "name": "parse-number",
+    "description": "Parse a string into a number, returning NIL if invalid",
+    "definition": "(defun parse-number (s)\n  \"Parse a string into a number, returning NIL if invalid\" (let ((result (multiple-value-bind (num ok) (parse-integer s :junk-allowed t) (if ok num nil)))) result))",
+    "tests": [
+      {
+        "call": "(parse-number \"150000\")",
+        "expect": "150000",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(parse-number \"abc\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(parse-number \"-42\")",
+        "expect": "-42",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(parse-number \"\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "44bdfb6d97",
+    "prompts": [],
+    "call": "(parse-number \"150000\")",
+    "eval_ms": 0.6,
+    "created": 1791646767.39,
+    "mode": "live",
+    "uses": 21
+  },
+  {
+    "name": "fmt-integer",
+    "description": "Formats a non-negative integer with commas as thousands separators",
+    "definition": "(defun fmt-integer (n)\n  \"Formats a non-negative integer with commas as thousands separators\"\n  (let ((s (format nil \"~a\" n)))\n    (if (<= (length s) 3)\n        s\n        (let ((rest (fmt-integer (floor n 1000)))\n              (last3 (format nil \"~3,'0d\" (mod n 1000))))\n          (format nil \"~a,~a\" rest last3)))))",
+    "tests": [
+      {
+        "call": "(fmt-integer 1234567)",
+        "expect": "\"1,234,567\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-integer 1000)",
+        "expect": "\"1,000\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-integer 999)",
+        "expect": "\"999\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-integer 0)",
+        "expect": "\"0\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "44bdfb6d97",
+    "prompts": [],
+    "call": "(fmt-integer 1234567)",
+    "eval_ms": 0.7,
+    "created": 1791646772.855,
+    "mode": "live",
+    "uses": 3
+  },
+  {
+    "name": "fmt-decimal",
+    "description": "Formats a non-negative number to two decimal places with commas in the integer part",
+    "definition": "(defun fmt-decimal (n)\n  \"Formats a non-negative number to two decimal places with commas in the integer part\"\n  (let* ((int-part (floor n))\n         (frac-part (mod n 1))\n         (int-str (fmt-integer int-part))\n         (frac-str (format nil \"~2,'0d\" (round (* frac-part 100)))))\n    (concatenate 'string int-str \".\" frac-str)))",
+    "tests": [
+      {
+        "call": "(fmt-decimal 1234.5)",
+        "expect": "\"1,234.50\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-decimal 0.05)",
+        "expect": "\"0.05\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-decimal 1000000)",
+        "expect": "\"1,000,000.00\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "44bdfb6d97",
+    "prompts": [],
+    "call": "(fmt-decimal 1234.5)",
+    "eval_ms": 0.9,
+    "created": 1791646773.269,
+    "mode": "live",
+    "uses": 3
+  },
+  {
+    "name": "fmt-money",
+    "description": "Formats a number as a currency string with a dollar sign",
+    "definition": "(defun fmt-money (n)\n  \"Formats a number as a currency string with a dollar sign\" (concatenate 'string \"$\" (fmt-decimal n)))",
+    "tests": [
+      {
+        "call": "(fmt-money 123456.78)",
+        "expect": "\"$123,456.78\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-money 0)",
+        "expect": "\"$0.00\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-money 1000)",
+        "expect": "\"$1,000.00\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "44bdfb6d97",
+    "prompts": [],
+    "call": "(fmt-money 123456.78)",
+    "eval_ms": 0.4,
+    "created": 1791646774.331,
+    "mode": "live",
+    "uses": 16
+  },
+  {
+    "name": "amortization-schedule",
+    "description": "Compute the mortgage amortization schedule rows for a given principal, rate, and term",
+    "definition": "(defun amortization-schedule (principal rate years)\n  \"Compute the mortgage amortization schedule rows for a given principal, rate, and term\" (let* ((n (* years 12)) (r (/ rate 1200.0)) (payment (if (zerop r) (/ (float principal) (float n)) (* (float principal) r (/ 1.0 (- 1.0 (expt (1+ r) (- n))))))) (rows nil) (balance (float principal)) (month 0)) (loop (incf month) (let* ((interest (* balance r)) (principal-paid (- payment interest)) (new-balance (- balance principal-paid))) (push (list month (format nil \"~,2f\" payment) (format nil \"~,2f\" interest) (format nil \"~,2f\" principal-paid) (format nil \"~,2f\" new-balance)) rows) (setf balance new-balance) (when (= month n) (return (nreverse rows)))))))",
+    "tests": [
+      {
+        "call": "(let ((s (amortization-schedule 150000 6.5 30))) (and (listp s) (= (length s) 360) (listp (first s)) (= (length (first s)) 5)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((s (amortization-schedule 150000 6.5 30))) (and (listp s) (= (length s) 360) (listp (first s)) (= (length (first s)) 5)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((s1 (amortization-schedule 150000 6.5 30)) (s2 (amortization-schedule 150000 6.5 30))) (equal s1 s2))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((s (amortization-schedule 150000 6.5 30))) (and (listp s) (= (length s) 360) (listp (first s)) (= (length (first s)) 5)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "44bdfb6d97",
+    "prompts": [],
+    "call": "(amortization-schedule 150000 6.5 30)",
+    "eval_ms": 15.14,
+    "created": 1791646775.0,
+    "mode": "live",
+    "uses": 6
+  },
+  {
+    "name": "monthly-rate",
+    "description": "Converts an annual interest rate percentage to a monthly rate float",
+    "definition": "(defun monthly-rate (annual-rate)\n  \"Converts an annual interest rate percentage to a monthly rate float\" (/ (float annual-rate) 1200.0))",
+    "tests": [
+      {
+        "call": "(monthly-rate 6.5)",
+        "expect": "0.005416666666666667",
+        "confidence": "low",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(monthly-rate 0)",
+        "expect": "0.0",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(monthly-rate 12)",
+        "expect": "0.01",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "44bdfb6d97",
+    "prompts": [],
+    "call": "(monthly-rate 6.5)",
+    "eval_ms": 0.4,
+    "created": 1791646776.282,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "amortization-summary",
+    "description": "Formats a summary string for a mortgage amortization table",
+    "definition": "(defun amortization-summary (id principal rate years)\n  \"Formats a summary string for a mortgage amortization table\"\n  (let* ((payments (* (parse-number years) 12)))\n    (format nil \"amortization table for loan ~a: principal ~a, rate ~a%, term ~a years, ~a payments\" id principal rate years payments)))",
+    "tests": [
+      {
+        "call": "(amortization-summary \"1\" \"100000\" \"5\" \"10\")",
+        "expect": "\"amortization table for loan 1: principal 100000, rate 5%, term 10 years, 120 payments\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortization-summary \"2\" \"250000\" \"6.5\" \"30\")",
+        "expect": "\"amortization table for loan 2: principal 250000, rate 6.5%, term 30 years, 360 payments\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortization-summary \"3\" \"50000\" \"4\" \"15\")",
+        "expect": "\"amortization table for loan 3: principal 50000, rate 4%, term 15 years, 180 payments\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "44bdfb6d97",
+    "prompts": [],
+    "call": "(amortization-summary \"1\" \"100000\" \"5\" \"10\")",
+    "eval_ms": 0.7,
+    "created": 1791646786.161,
+    "mode": "live",
+    "uses": 5
+  },
+  {
+    "name": "fmt-percent",
+    "description": "Formats a number as a percentage string with two decimal places and a percent sign",
+    "definition": "(defun fmt-percent (n)\n  \"Formats a number as a percentage string with two decimal places and a percent sign\" (format nil \"~a%\" (fmt-decimal n)))",
+    "tests": [
+      {
+        "call": "(fmt-percent 6.5)",
+        "expect": "\"6.50%\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-percent 0)",
+        "expect": "\"0.00%\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-percent 100)",
+        "expect": "\"100.00%\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "550876d320",
+    "prompts": [],
+    "call": "(fmt-percent 6.5)",
+    "eval_ms": 0.3,
+    "created": 1791647799.34,
+    "mode": "live",
+    "uses": 10
+  },
+  {
+    "name": "monthly-payment",
+    "description": "Computes the monthly mortgage payment for a given principal, annual rate, and term in years.",
+    "definition": "(defun monthly-payment (principal rate years)\n  \"Computes the monthly mortgage payment for a given principal, annual rate, and term in years.\"\n  (let* ((months (* years 12))\n         (r (monthly-rate rate)))\n    (if (zerop r)\n        (/ (float principal) months)\n        (* (float principal) r (/ 1.0 (- 1.0 (expt (+ 1.0 r) (- months))))))))",
+    "tests": [
+      {
+        "call": "(monthly-payment 120000 0 10)",
+        "expect": "1000.0",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(monthly-payment 100000 6.5 30)",
+        "expect": "632.0687830687831",
+        "confidence": "low",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(monthly-payment 50000 0 5)",
+        "expect": "833.3333333333334",
+        "confidence": "low",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "550876d320",
+    "prompts": [],
+    "call": "(monthly-payment 120000 0 10)",
+    "eval_ms": 0.5,
+    "created": 1791647811.441,
+    "mode": "live",
+    "uses": 17
+  },
+  {
+    "name": "mortgage-totals",
+    "description": "Returns a list of total interest and total cost for a mortgage",
+    "definition": "(defun mortgage-totals (principal payment months)\n  \"Returns a list of total interest and total cost for a mortgage\"\n  (let* ((total-cost (* payment months))\n         (total-interest (- total-cost principal)))\n    (list total-interest total-cost)))",
+    "tests": [
+      {
+        "call": "(mortgage-totals 100000 1000 120)",
+        "expect": "(20000 120000)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(mortgage-totals 0 50 10)",
+        "expect": "(500 500)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(mortgage-totals 1000 100 12)",
+        "expect": "(200 1200)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "550876d320",
+    "prompts": [],
+    "call": "(mortgage-totals 100000 1000 120)",
+    "eval_ms": 0.9,
+    "created": 1791647812.384,
+    "mode": "live",
+    "uses": 13
+  },
+  {
+    "name": "days-in-month",
+    "description": "Returns the number of days in a given month of a year",
+    "definition": "(defun days-in-month (year month)\n  \"Returns the number of days in a given month of a year\"\n  (let* ((leap (and (zerop (mod year 4))\n                    (or (not (zerop (mod year 100)))\n                        (zerop (mod year 400)))))\n         (days (case month\n                 (1 31) (3 31) (5 31) (7 31) (8 31) (10 31) (12 31)\n                 (4 30) (6 30) (9 30) (11 30)\n                 (2 (if leap 29 28))\n                 (t 0))))\n    days))",
+    "tests": [
+      {
+        "call": "(days-in-month 2024 2)",
+        "expect": "29",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(days-in-month 2023 2)",
+        "expect": "28",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(days-in-month 2023 1)",
+        "expect": "31",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(days-in-month 2023 4)",
+        "expect": "30",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "550876d320",
+    "prompts": [],
+    "call": "(days-in-month 2024 2)",
+    "eval_ms": 1.1,
+    "created": 1791647813.079,
+    "mode": "live"
+  },
+  {
+    "name": "days-from-epoch",
+    "description": "Returns the number of days since 1970-01-01 for a Unix timestamp.",
+    "definition": "(defun days-from-epoch (now)\n  \"Returns the number of days since 1970-01-01 for a Unix timestamp.\"\n  (floor now 86400))",
+    "tests": [
+      {
+        "call": "(days-from-epoch 1700000000)",
+        "expect": "19675",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(days-from-epoch 86400)",
+        "expect": "1",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(days-from-epoch 0)",
+        "expect": "0",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "550876d320",
+    "prompts": [],
+    "call": "(days-from-epoch 1700000000)",
+    "eval_ms": 0.5,
+    "created": 1791647813.467,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "fmt-signed-money",
+    "description": "Formats a number as a signed currency string with +, -, or 0 prefix",
+    "definition": "(defun fmt-signed-money (n)\n  \"Formats a number as a signed currency string with +, -, or 0 prefix\" (let* ((sign (cond ((< n 0) \"-\") ((> n 0) \"+\") (t \"0\"))) (abs-n (abs n)) (money (fmt-money abs-n))) (concatenate 'string sign money)))",
+    "tests": [
+      {
+        "call": "(fmt-signed-money -283.01)",
+        "expect": "\"-$283.01\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-signed-money 1000)",
+        "expect": "\"+$1,000.00\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-signed-money 0)",
+        "expect": "\"0$0.00\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6c3f289bf5",
+    "prompts": [],
+    "call": "(fmt-signed-money -283.01)",
+    "eval_ms": 0.8,
+    "created": 1791648571.819,
+    "mode": "live"
+  },
+  {
+    "name": "format-loan-lines",
+    "description": "Formats the lines of a loan report",
+    "definition": "(defun format-loan-lines (loan-id principal rate years monthly-payment total-interest total-cost)\n  \"Formats the lines of a loan report\"\n  (format nil \"Loan #~a~%  Principal: ~a~%  Rate: ~a~%  Term: ~a years~%  Monthly Payment: ~a~%  Total Interest: ~a~%  Total Cost: ~a\" loan-id (fmt-money principal) (fmt-percent rate) years (fmt-money monthly-payment) (fmt-money total-interest) (fmt-money total-cost)))",
+    "tests": [
+      {
+        "call": "(format-loan-lines \"1\" 150000.0 6.5 30 959.93 195574.80 345574.80)",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(format-loan-lines \"2\" 100000.0 5.0 15 805.47 44984.60 144984.60)",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "6c3f289bf5",
+    "prompts": [],
+    "call": "(format-loan-lines \"1\" 150000.0 6.5 30 959.93 195574.80 345574.80)",
+    "eval_ms": 1.3,
+    "created": 1791648575.418,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "loan-to-csv-row",
+    "description": "Converts a loan record list to a CSV string",
+    "definition": "(defun loan-to-csv-row (record)\n  \"Converts a loan record list to a CSV string\" (format nil \"~{~a~^,~}\" record))",
+    "tests": [
+      {
+        "call": "(loan-to-csv-row '(\"1\" 100000 0.05 30 536.82 93255.2 193255.2))",
+        "expect": "\"1,100000,0.05,30,536.82,93255.2,193255.2\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(loan-to-csv-row '(\"2\" 200000 0.06 15 1657.62 99371.8 399371.8))",
+        "expect": "\"2,200000,0.06,15,1657.62,99371.8,399371.8\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "ae7bcff4ac",
+    "prompts": [],
+    "call": "(loan-to-csv-row '(\"1\" 100000 0.05 30 536.82 93255.2 193255.2))",
+    "eval_ms": 1.4,
+    "created": 1791651848.981,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "report-footer",
+    "description": "Returns a static footer string for reports",
+    "definition": "(defun report-footer ()\n  \"Returns a static footer string for reports\" \"=== END OF REPORT ===\")",
+    "tests": [
+      {
+        "call": "(report-footer)",
+        "expect": "\"=== END OF REPORT ===\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e1624d0c4",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-footer)",
+    "eval_ms": 0.5,
+    "created": 1791654711.165,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "fmt-date",
+    "description": "Formats a Unix timestamp as a YYYY-MM-DD string",
+    "definition": "(defun fmt-date (now)\n  \"Formats a Unix timestamp as a YYYY-MM-DD string\"\n  (let* ((days (floor now 86400))\n         (year 1970)\n         (day-of-year 0)\n         (leap-p (lambda (y) (or (and (zerop (mod y 4)) (not (zerop (mod y 100)))) (zerop (mod y 400)))))\n         (days-in-year (lambda (y) (if (funcall leap-p y) 366 365)))\n         (remaining days))\n    (loop while (>= remaining (funcall days-in-year year))\n          do (decf remaining (funcall days-in-year year))\n             (incf year))\n    (setf day-of-year remaining)\n    (let ((month 1)\n          (day 1)\n          (month-days (lambda (m y) (case m\n                                      (1 31) (2 (if (funcall leap-p y) 29 28))\n                                      (3 31) (4 30) (5 31) (6 30)\n                                      (7 31) (8 31) (9 30) (10 31)\n                                      (11 30) (12 31)))))\n      (loop while (>= day-of-year (funcall month-days month year))\n            do (decf day-of-year (funcall month-days month year))\n               (incf month))\n      (setf day (1+ day-of-year))\n      (format nil \"~4d-~2,'0d-~2,'0d\" year month day))))",
+    "tests": [
+      {
+        "call": "(fmt-date 1700000000)",
+        "expect": "\"2023-11-14\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-date 0)",
+        "expect": "\"1970-01-01\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-date 86399)",
+        "expect": "\"1970-01-01\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(fmt-date 86400)",
+        "expect": "\"1970-01-02\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e1624d0c4",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(fmt-date 1700000000)",
+    "eval_ms": 2.2,
+    "created": 1791654711.232,
+    "mode": "live",
+    "uses": 3
+  },
+  {
+    "name": "cmd-list-fancy",
+    "description": "Lists saved loans with fancy formatting and date header",
+    "definition": "(defun cmd-list-fancy (args state now)\n  \"Lists saved loans with fancy formatting and date header\"\n  (let* ((date-str (fmt-date now))\n         (loans (get-loans-table state))\n         (body (if (null loans)\n                   \"No loans saved.\"\n                   (apply #'concatenate 'string (mapcar (lambda (l) (format nil \"~a~%\" (format-loan-lines (first l) (second l) (third l) (fourth l) (fifth l) (sixth l) (seventh l)))) loans))))\n         (output (format nil \"=== MORTGAGE CALCULATOR ===~%Date: ~a~%~%~a~%~%=== END OF REPORT ===\" date-str body)))\n    (list :output output :state state)))",
+    "tests": [
+      {
+        "call": "(cmd-list-fancy '() '() 1700000000)",
+        "expect": "(:output \"=== MORTGAGE CALCULATOR ===~%Date: 2023-11-14~%~%No loans saved.~%~%=== END OF REPORT ===\" :state ())",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e1624d0c4",
+    "harness_fixes": [
+      "added-docstring",
+      "unescaped-quotes-in-expected-value"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-list-fancy '() state 1700000000)",
+    "eval_ms": 2.7,
+    "created": 1791654712.276,
+    "mode": "live",
+    "uses": 5
+  },
+  {
+    "name": "report-header",
+    "description": "Returns a fancy header string for the mortgage calculator with the current date",
+    "definition": "(defun report-header (now)\n  \"Returns a fancy header string for the mortgage calculator with the current date\" (format nil \"=== MORTGAGE CALCULATOR ===~%Date: ~a\" (fmt-date now)))",
+    "tests": [
+      {
+        "call": "(report-header 1700000000)",
+        "expect": "\"=== MORTGAGE CALCULATOR ===~%Date: 2023-11-14\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-header 0)",
+        "expect": "\"=== MORTGAGE CALCULATOR ===~%Date: 1970-01-01\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e1624d0c4",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests",
+      "trimmed-surplus-paren-in-call"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(report-header 1700000000)",
+        "why": "rescue-property-tests",
+        "expect": "\"=== MORTGAGE CALCULATOR ===~%Date: 2023-11-14\""
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-header 1700000000)",
+    "eval_ms": 0.7,
+    "created": 1791654712.789,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "report-fancy-header",
+    "description": "Returns a fancy header string with the current date",
+    "definition": "(defun report-fancy-header (now)\n  \"Returns a fancy header string with the current date\" (format nil \"=== MORTGAGE CALCULATOR ===~%Date: ~a~%~%\" (fmt-date now)))",
+    "tests": [
+      {
+        "call": "(report-fancy-header 1700000000)",
+        "expect": "\"=== MORTGAGE CALCULATOR ===~%Date: 2023-11-14~%~%\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-fancy-header 0)",
+        "expect": "\"=== MORTGAGE CALCULATOR ===~%Date: 1970-01-01~%~%\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e1624d0c4",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-fancy-header 1700000000)",
+    "eval_ms": 1.1,
+    "created": 1791654723.007,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "cmd-report-fancy",
+    "description": "Generates a fancy mortgage report for a loan ID, handling missing loans and arguments gracefully.",
+    "definition": "(defun cmd-report-fancy (args state now)\n  \"Generates a fancy mortgage report for a loan ID, handling missing loans and arguments gracefully.\" (let* ((id (first args)) (loan (when id (loan-lookup state id)))) (cond ((not id) (list :output \"Usage: report <id>\" :state state)) ((not loan) (list :output (format nil \"~a~%~%Loan ~a not found.~%~%~a\" (report-fancy-header now) id (report-footer)) :state state)) (t (let* ((principal (second loan)) (rate (third loan)) (years (fourth loan)) (payment (monthly-payment principal rate years)) (totals (mortgage-totals principal payment (* years 12))) (total-interest (first totals)) (total-cost (second totals))) (list :output (format nil \"~a~%~%Loan ID: ~a~%Principal: ~a~%Rate: ~a~%Term: ~a years~%Monthly Payment: ~a~%Total Interest: ~a~%Total Cost: ~a~%~%~a\" (report-fancy-header now) id (fmt-money principal) (fmt-percent rate) years (fmt-money payment) (fmt-money total-interest) (fmt-money total-cost) (report-footer)) :state state))))))",
+    "tests": [
+      {
+        "call": "(let ((r (cmd-report-fancy '(\"1\") '((\"loans\" ((\"1\" 300000 0.05 30)))) 1700000000))) (and (listp r) (stringp (getf r :output)) (> (length (getf r :output)) 20)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (cmd-report-fancy '() '() 1700000000))) (and (listp r) (string= (getf r :output) \"Usage: report <id>\")))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (cmd-report-fancy '(\"999\") '() 1700000000))) (and (listp r) (stringp (getf r :output)) (search \"Loan 999 not found.\" (getf r :output))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "6e1624d0c4",
+    "harness_fixes": [
+      "added-docstring",
+      "let-to-let-star",
+      "test-call-repair"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-report-fancy '(\"1\") '((\"loans\" ((\"1\" 300000 0.05 30)))) 1700000000)",
+    "eval_ms": 2.0,
+    "created": 1791654737.081,
+    "mode": "live",
+    "uses": 5
+  },
+  {
+    "name": "loan-summary-string",
+    "description": "Takes a loan record (list of 4 strings) and returns the amortization summary string",
+    "definition": "(defun loan-summary-string (record)\n  \"Takes a loan record (list of 4 strings) and returns the amortization summary string\"\n  (amortization-summary (first record) (second record) (third record) (fourth record)))",
+    "tests": [
+      {
+        "call": "(and (stringp (loan-summary-string '(\"1\" \"100000\" \"5\" \"10\"))) (not (null (search \"loan 1\" (loan-summary-string '(\"1\" \"100000\" \"5\" \"10\"))))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(and (stringp (loan-summary-string '(\"2\" \"250000\" \"6.5\" \"15\"))) (not (null (search \"loan 2\" (loan-summary-string '(\"2\" \"250000\" \"6.5\" \"15\"))))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "65d48905f0",
+    "harness_fixes": [
+      "added-docstring",
+      "quoted-bare-expected-string"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(loan-summary-string '(\"1\" \"100000\" \"5\" \"10\"))",
+    "eval_ms": 1.4,
+    "created": 1791655955.936,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "cmd-calc-fancy",
+    "description": "Calculates mortgage with fancy formatting",
+    "definition": "(defun cmd-calc-fancy (args state now)\n  \"Calculates mortgage with fancy formatting\"\n  (declare (ignore state now))\n  (let ((principal (parse-number (first args)))\n        (rate (parse-number (second args)))\n        (years (parse-number (third args))))\n    (if (or (null principal) (null rate) (null years))\n        (list :error \"Invalid input\" :state state)\n        (let* ((months (* years 12))\n               (payment (monthly-payment principal rate years))\n               (totals (mortgage-totals principal payment months))\n               (total-interest (first totals))\n               (total-cost (second totals)))\n          (list :output (format nil \"Payment: ~a~%Total Interest: ~a~%Total Cost: ~a\" (fmt-money payment) (fmt-money total-interest) (fmt-money total-cost)) :state state)))))",
+    "tests": [
+      {
+        "call": "(let ((r (cmd-calc-fancy '(\"300000\" \"5\" \"30\") '() 0))) (and (listp r) (eq (first r) :output) (stringp (second r))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (cmd-calc-fancy '(\"abc\" \"5\" \"30\") '() 0))) (and (listp r) (eq (first r) :error) (string= (second r) \"Invalid input\")))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (cmd-calc-fancy '(\"300000\" \"5\" \"30\") '() 0))) (and (listp r) (eq (first r) :output) (search \"Payment:\" (second r))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "65d48905f0",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests",
+      "trimmed-surplus-paren"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(cmd-calc-fancy '(\"300000\" \"5\" \"30\") '() 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"Payment: $1,618.77~%Total Interest: $282,757.20~%Total Cost: $582,757.20\" :state (\"\"))"
+      },
+      {
+        "call": "(cmd-calc-fancy '(\"abc\" \"5\" \"30\") '() 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"Error: Invalid input\" :state (\"\"))"
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-calc-fancy '(\"300000\" \"5\" \"30\") '() 0)",
+    "eval_ms": 1.8,
+    "created": 1791655972.884,
+    "mode": "live",
+    "uses": 4
+  },
+  {
+    "name": "number-from-string",
+    "description": "The number written in TEXT, such as \"42\", \"-3\" or \"6.5\"; NIL when TEXT is not a number",
+    "definition": "(defun number-from-string (text)\n  \"The number written in TEXT, such as \\\"42\\\", \\\"-3\\\" or \\\"6.5\\\"; NIL when TEXT is not a number.\"\n  (if (numberp text)\n      text\n      (let* ((s (string-trim \" \" (if (stringp text) text \"\")))\n             (neg (and (> (length s) 0) (char= (char s 0) #\\-)))\n             (body (if (and (> (length s) 0) (find (char s 0) \"+-\")) (subseq s 1) s))\n             (dot (position #\\. body))\n             (whole (if dot (subseq body 0 dot) body))\n             (frac (if dot (subseq body (1+ dot)) \"\")))\n        (if (and (> (+ (length whole) (length frac)) 0)\n                 (every (function digit-char-p) whole)\n                 (every (function digit-char-p) frac))\n            (let ((value (+ (if (string= whole \"\") 0 (parse-integer whole))\n                            (if (string= frac \"\") 0\n                                (/ (parse-integer frac) (expt 10 (length frac)))))))\n              (if dot\n                  (float (if neg (- value) value) 1.0d0)\n                  (if neg (- value) value)))\n            nil))))",
+    "kit": true,
+    "session": "web-kit",
+    "prompts": [],
+    "call": "(number-from-string \"6.5\")",
+    "tests": [
+      {
+        "call": "(number-from-string \"6.5\")",
+        "expect": "6.5",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(number-from-string \"42\")",
+        "expect": "42",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(number-from-string \"-3.25\")",
+        "expect": "-3.25",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(number-from-string \" 150000 \")",
+        "expect": "150000",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(number-from-string \".5\")",
+        "expect": "0.5",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(number-from-string \"abc\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(number-from-string \"\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      },
+      {
+        "call": "(number-from-string \"1.2.3\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "web kit (verified in SBCL by the test suite)"
+      }
+    ],
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "loan-numeric-fields",
+    "description": "Extracts id as string and principal, rate, years as numbers from a loan record list.",
+    "definition": "(defun loan-numeric-fields (record)\n  \"Extracts id as string and principal, rate, years as numbers from a loan record list.\"\n  (let* ((id (first record))\n         (principal (number-from-string (second record)))\n         (rate (number-from-string (third record)))\n         (years (number-from-string (fourth record))))\n    (list id principal rate years)))",
+    "tests": [
+      {
+        "call": "(loan-numeric-fields '(\"1\" \"1000\" \"12\" \"1\"))",
+        "expect": "(\"1\" 1000 12 1)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(loan-numeric-fields '(\"2\" \"50000\" \"6.5\" \"30\"))",
+        "expect": "(\"2\" 50000 6.5 30)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(loan-numeric-fields '(\"3\" \"250000\" \"7.25\" \"15\"))",
+        "expect": "(\"3\" 250000 7.25 15)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "5ddd668f84",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(loan-numeric-fields '(\"1\" \"1000\" \"12\" \"1\"))",
+    "eval_ms": 1.6,
+    "created": 1791657257.815,
+    "mode": "live",
+    "uses": 3
+  },
+  {
+    "name": "compare-line",
+    "description": "Formats a comparison row with label and two money values",
+    "definition": "(defun compare-line (label val1 val2)\n  \"Formats a comparison row with label and two money values\" (format nil \"~a: ~a vs ~a\" label (fmt-money val1) (fmt-money val2)))",
+    "tests": [
+      {
+        "call": "(compare-line \"Monthly Payment\" 88.85 88.69)",
+        "expect": "\"Monthly Payment: $88.85 vs $88.69\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-line \"Total Interest\" 12345.67 12345.68)",
+        "expect": "\"Total Interest: $12,345.67 vs $12,345.68\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-line \"Principal\" 100000 99999.99)",
+        "expect": "\"Principal: $100,000.00 vs $99,999.99\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "5ddd668f84",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-line \"Monthly Payment\" 88.85 88.69)",
+    "eval_ms": 0.6,
+    "created": 1791657258.255,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "sim-milestones",
+    "description": "Returns formatted strings for every 12th month in a schedule",
+    "definition": "(defun sim-milestones (schedule)\n  \"Returns formatted strings for every 12th month in a schedule\"\n  (mapcar (lambda (row)\n            (format nil \"Month ~a: Balance ~a\" (first row) (second row)))\n          (remove-if-not (lambda (row)\n                           (zerop (mod (first row) 12)))\n                         schedule)))",
+    "tests": [
+      {
+        "call": "(sim-milestones '((1 100.0) (2 90.0) (12 80.0) (13 70.0) (24 60.0)))",
+        "expect": "(\"Month 12: Balance 80.0\" \"Month 24: Balance 60.0\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-milestones '((1 10.0) (2 20.0) (12 30.0) (23 40.0)))",
+        "expect": "(\"Month 12: Balance 30.0\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-milestones '((1 5.0) (2 4.0)))",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "5ddd668f84",
+    "harness_fixes": [
+      "trimmed-surplus-paren",
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-milestones '((1 100.0) (2 90.0) (12 80.0) (13 70.0) (24 60.0) (36 50.0)))",
+    "eval_ms": 0.7,
+    "created": 1791657261.647,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "sim-format",
+    "description": "Formats a mortgage simulation summary with principal, rate, years, payment, totals, and milestone lines",
+    "definition": "(defun sim-format (principal rate years payment total-interest total-cost milestones)\n  \"Formats a mortgage simulation summary with principal, rate, years, payment, totals, and milestone lines\"\n  (let ((lines (append (list \"Mortgage Simulation\"\n                             (format nil \"Principal: $~a\" (fmt-money principal))\n                             (format nil \"Rate: ~a\" (fmt-percent rate))\n                             (format nil \"Years: ~a\" years)\n                             (format nil \"Payment: $~a\" (fmt-money payment))\n                             (format nil \"Total Interest: $~a\" (fmt-money total-interest))\n                             (format nil \"Total Cost: $~a\" (fmt-money total-cost)))\n                         milestones)))\n    (apply #'concatenate 'string (mapcar (lambda (l) (format nil \"~a~%\" l)) lines))))",
+    "tests": [
+      {
+        "call": "(and (stringp (sim-format 1000 12 1 90.06 80.79 1080.79 '(\"Month 12: Balance 0.0\"))) (search \"Mortgage Simulation\" (sim-format 1000 12 1 90.06 80.79 1080.79 '(\"Month 12: Balance 0.0\"))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(and (search \"Month 12: Balance 0.0\" (sim-format 1000 12 1 90.06 80.79 1080.79 '(\"Month 12: Balance 0.0\"))) (not (search \"Month 12: Balance 0.0\" (sim-format 1000 12 1 90.06 80.79 1080.79 '()))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(search \"$2,000.00\" (sim-format 2000 6 2 87.15 107.60 2092.40 '()))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(not (string= (sim-format 1000 12 1 90.06 80.79 1080.79 '()) (sim-format 2000 12 1 90.06 80.79 1080.79 '())))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "5ddd668f84",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-format 1000 12 1 90.06 80.79 1080.79 '(\"Month 12: Balance 0.0\"))",
+    "eval_ms": 1.6,
+    "created": 1791657267.521,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "compare-row",
+    "description": "Formats a comparison row by delegating to compare-line",
+    "definition": "(defun compare-row (label val1 val2)\n  \"Formats a comparison row by delegating to compare-line\" (compare-line label (float val1) (float val2)))",
+    "tests": [
+      {
+        "call": "(compare-row \"Principal\" 200000 300000)",
+        "expect": "\"Principal: $200,000.00 vs $300,000.00\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-row \"Rate\" 5.5 6.0)",
+        "expect": "\"Rate: $5.50 vs $6.00\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71b6248694",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-row \"Principal\" 200000 300000)",
+    "eval_ms": 1.5,
+    "created": 1791658158.473,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "sim-compute",
+    "description": "Computes mortgage payment, totals, and milestones for a given principal, rate, and years",
+    "definition": "(defun sim-compute (principal rate years)\n  \"Computes mortgage payment, totals, and milestones for a given principal, rate, and years\"\n  (let* ((payment (monthly-payment principal rate years))\n         (months (* years 12))\n         (totals (mortgage-totals principal payment months))\n         (total-interest (first totals))\n         (total-cost (second totals))\n         (schedule (amortization-schedule principal rate years))\n         (milestones (sim-milestones schedule)))\n    (list payment total-interest total-cost milestones)))",
+    "tests": [
+      {
+        "call": "(let ((r (sim-compute 200000 5 30))) (and (listp r) (= (length r) 4) (numberp (first r)) (numberp (second r)) (numberp (third r)) (listp (fourth r))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (sim-compute 100000 4 15))) (and (listp r) (> (first r) 0) (> (second r) 0) (> (third r) (first r))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (sim-compute 50000 3 10))) (and (listp r) (listp (fourth r)) (> (length (fourth r)) 0)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "71b6248694",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-compute 200000 5 30)",
+    "eval_ms": 2.1,
+    "created": 1791658161.089,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "sim-build-output",
+    "description": "Wraps the result of sim-format in a list with the :output keyword",
+    "definition": "(defun sim-build-output (principal rate years payment total-interest total-cost milestones)\n  \"Wraps the result of sim-format in a list with the :output keyword\" (list :output (sim-format principal rate years payment total-interest total-cost milestones)))",
+    "tests": [
+      {
+        "call": "(let ((r (sim-build-output 1000 12 1 90.06 80.79 1080.79 '(\"Month 12: Balance 0.0\")))) (and (listp r) (eq (first r) :output) (stringp (second r)) (search \"Mortgage Simulat\" (second r)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (sim-build-output 200000 5 30 1065.81 183691.0 503691.0 '(\"Month 12: ...\")))) (and (listp r) (eq (first r) :output) (stringp (second r)) (search \"Principal\" (second r)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (sim-build-output 0 0 1 0 0 0 '()))) (and (listp r) (eq (first r) :output) (stringp (second r)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "71b6248694",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-build-output 200000 5 30 1065.81 183691.0 503691.0 '(\"Month 12: ...\"))",
+    "eval_ms": 0.9,
+    "created": 1791658163.049,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "compare-table",
+    "description": "Compares two loan records and returns a formatted string table of their differences.",
+    "definition": "(defun compare-table (id1 id2 rec1 rec2)\n  \"Compares two loan records and returns a formatted string table of their differences.\" (let* ((f1 (loan-numeric-fields rec1)) (f2 (loan-numeric-fields rec2)) (p1 (second f1)) (r1 (third f1)) (y1 (fourth f1)) (p2 (second f2)) (r2 (third f2)) (y2 (fourth f2)) (mp1 (monthly-payment p1 r1 y1)) (mp2 (monthly-payment p2 r2 y2)) (m1 (* mp1 (* y1 12))) (m2 (* mp2 (* y2 12))) (t1 (mortgage-totals p1 mp1 m1)) (t2 (mortgage-totals p2 mp2 m2)) (rows (list (compare-row \"Principal\" p1 p2) (compare-row \"Rate\" r1 r2) (compare-row \"Term\" y1 y2) (compare-row \"Monthly Payment\" mp1 mp2) (compare-row \"Total Interest\" (first t1) (first t2)) (compare-row \"Total Cost\" (second t1) (second t2))))) (format nil \"~{~a~^~%~}\" rows)))",
+    "tests": [
+      {
+        "call": "(let ((r (compare-table \"1\" \"2\" '(\"1\" \"200000\" \"5\" \"30\") '(\"2\" \"300000\" \"6\" \"15\")))) (and (stringp r) (search \"Principal\" r) (search \"Rate\" r) (search \"Term\" r) (search \"Monthly Payment\" r) (search \"Total Interest\" r) (search \"Total Cost\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (compare-table \"a\" \"b\" '(\"a\" \"100000\" \"4\" \"10\") '(\"b\" \"100000\" \"4\" \"10\")))) (and (stringp r) (search \"Principal\" r) (search \"Rate\" r) (search \"Term\" r) (search \"Monthly Payment\" r) (search \"Total Interest\" r) (search \"Total Cost\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (compare-table \"x\" \"y\" '(\"x\" \"50000\" \"3\" \"5\") '(\"y\" \"75000\" \"4.5\" \"7\")))) (and (stringp r) (search \"Principal\" r) (search \"Rate\" r) (search \"Term\" r) (search \"Monthly Payment\" r) (search \"Total Interest\" r) (search \"Total Cost\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "71b6248694",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(compare-table \"1\" \"2\" '(\"1\" \"200000\" \"5\" \"30\") '(\"2\" \"300000\" \"6\" \"15\"))",
+        "why": "rescue-property-tests",
+        "expect": "\"Principal: $200,000.00 vs $300,000.00~%Rate: 5.00% vs 6.00%~%Term: 30.00 vs 15.00~%Monthly Payment: $1,079.65 vs $2,531.60~%Total Interest: $188,674.00 vs $155,688.00~%Total Cost: $388,674.00 vs $455,688.00\""
+      },
+      {
+        "call": "(compare-table \"a\" \"b\" '(\"a\" \"100000\" \"0\" \"10\") '(\"b\" \"100000\" \"0\" \"10\"))",
+        "why": "rescue-property-tests",
+        "expect": "\"Principal: $100,000.00 vs $100,000.00~%Rate: 0.00% vs 0.00%~%Term: 10.00 vs 10.00~%Monthly Payment: $833.33 vs $833.33~%Total Interest: $0.00 vs $0.00~%Total Cost: $100,000.00 vs $100,000.00\""
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-table \"1\" \"2\" '(\"1\" \"200000\" \"5\" \"30\") '(\"2\" \"300000\" \"6\" \"15\"))",
+    "eval_ms": 1.8,
+    "created": 1791658167.508,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "cmd-compare",
+    "description": "Compares two loans by ID and returns formatted comparison or error",
+    "definition": "(defun cmd-compare (args state now)\n  \"Compares two loans by ID and returns formatted comparison or error\"\n  (let ((id1 (first args))\n        (id2 (second args)))\n    (let ((rec1 (loan-lookup state id1))\n          (rec2 (loan-lookup state id2)))\n      (if (or (null rec1) (null rec2))\n          '(:output \"Loan not found\")\n          (list :output (compare-table id1 id2 rec1 rec2))))))",
+    "tests": [
+      {
+        "call": "(cmd-compare '(\"1\" \"99\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\")))) 0)",
+        "expect": "(:output \"Loan not found\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-compare '(\"99\" \"98\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\")))) 0)",
+        "expect": "(:output \"Loan not found\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(let ((r (cmd-compare '(\"1\" \"2\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\") (\"2\" \"300000\" \"6\" \"15\")))) 0))) (and (listp r) (eq (first r) :output) (stringp (second r))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "71b6248694",
+    "harness_fixes": [
+      "added-docstring",
+      "trimmed-surplus-paren",
+      "let-to-let-star",
+      "rescue-property-tests",
+      "test-call-repair",
+      "nested-state-data",
+      "newline-escape-in-expected-string"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(cmd-compare '(\"1\" \"2\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\") (\"2\" \"300000\" \"6\" \"15\")))) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"ID: 1 vs 2~%Principal: 200000 vs 300000~%Rate: 5 vs 6~%Years: 30 vs 15\")"
+      },
+      {
+        "call": "(cmd-compare '(\"1\" \"99\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\")))) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"Loan not found\")"
+      },
+      {
+        "call": "(cmd-compare '(\"1\" \"1\") '((\"loans\" ((\"1\" \"100000\" \"5\" \"10\")))) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"ID: 1 vs 1~%Principal: 100000 vs 100000~%Rate: 5 vs 5~%Years: 10 vs 10\")"
+      },
+      {
+        "call": "(cmd-compare '(\"1\" \"99\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\")))) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:OUTPUT \"Loan not found\")"
+      },
+      {
+        "call": "(cmd-compare '(\"1\" \"2\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\") (\"2\" \"300000\" \"6\" \"15\")))) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:OUTPUT \"ID: 1 vs 2\nPrincipal: 200000 vs 300000\nRate: 5 vs 6\nYears: 30 vs 15\")"
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-compare '(\"1\" \"99\") '((\"loans\" ((\"1\" \"200000\" \"5\" \"30\")))) 0)",
+    "eval_ms": 1.4,
+    "created": 1791658183.696,
+    "mode": "live",
+    "uses": 4
+  },
+  {
+    "name": "get-loans-table",
+    "description": "Extracts the list of loan rows from the state table named \"loans\".",
+    "definition": "(defun get-loans-table (state)\n  \"Extracts the list of loan rows from the state table named 'loans'.\" (table-rows state \"loans\"))",
+    "tests": [
+      {
+        "call": "(get-loans-table '((\"loans\" ((\"150000\" \"6.5\" \"30\")))))",
+        "expect": "((\"150000\" \"6.5\" \"30\"))",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(get-loans-table '((\"loans\" ())))",
+        "expect": "()",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "c361ca231b",
+    "harness_fixes": [
+      "added-docstring",
+      "nested-state-data",
+      "restored-paren-in-call",
+      "dropped-unusable-test"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(get-loans-table '((\"loans\" ((\"100000\" \"5\" \"15\") (\"200000\" \"6\" \"30\"))))",
+        "why": "dropped-unusable-test",
+        "expect": null
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(get-loans-table '((\"loans\" ((\"150000\" \"6.5\" \"30\")))))",
+    "eval_ms": 0.7,
+    "created": 1791660135.482,
+    "mode": "live",
+    "uses": 5
+  },
+  {
+    "name": "loan-row-by-index",
+    "description": "Find a loan row in the loans table by 1-based string index",
+    "definition": "(defun loan-row-by-index (state index)\n  \"Find a loan row in the loans table by 1-based string index\"\n  (let* ((rows (get-loans-table state))\n         (n (parse-number index)))\n    (if (and (integerp n) (> n 0) (<= n (length rows)))\n        (nth (1- n) rows)\n        nil)))",
+    "tests": [
+      {
+        "call": "(loan-row-by-index '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) \"1\")",
+        "expect": "(\"150000\" \"6.5\" \"30\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(loan-row-by-index '((\"loans\" ((\"150000\" \"6.5\" \"30\") (\"200000\" \"5.0\" \"15\")))) \"2\")",
+        "expect": "(\"200000\" \"5.0\" \"15\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(loan-row-by-index '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) \"99\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "c361ca231b",
+    "harness_fixes": [
+      "added-docstring",
+      "dropped-unusable-test"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(loan-row-by-index '((\"loans\" ()))) \"1\")",
+        "why": "dropped-unusable-test",
+        "expect": null
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(loan-row-by-index '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) \"1\")",
+    "eval_ms": 0.7,
+    "created": 1791660140.483,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "loan-summary-plist",
+    "description": "Takes a loan row (list of 3 strings) and returns a plist with :output containing the amortization summary",
+    "definition": "(defun loan-summary-plist (row)\n  \"Takes a loan row (list of 3 strings) and returns a plist with :output containing the amortization summary\" (let ((principal (parse-number (first row))) (rate (parse-number (second row))) (years (parse-number (third row)))) (list :output (amortization-summary \"1\" (format nil \"~a\" principal) (format nil \"~a\" rate) (format nil \"~a\" years)))))",
+    "tests": [
+      {
+        "call": "(let ((r (loan-summary-plist (list \"150000\" \"6.5\" \"30\")))) (and (listp r) (eq (first r) :output) (stringp (second r)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (loan-summary-plist (list \"100000\" \"5\" \"15\")))) (and (listp r) (eq (first r) :output) (stringp (second r)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (loan-summary-plist (list \"200000\" \"7\" \"25\")))) (and (listp r) (eq (first r) :output) (stringp (second r)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "c361ca231b",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(loan-summary-plist (list \"100000\" \"5\" \"10\"))",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"amortization table for loan 1: principal 100000, rate 5.0%, years 10\")"
+      },
+      {
+        "call": "(loan-summary-plist (list \"250000\" \"7.5\" \"30\"))",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"amortization table for loan 1: principal 250000, rate 7.5%, years 30\")"
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(loan-summary-plist (list \"150000\" \"6.5\" \"30\"))",
+    "eval_ms": 1.2,
+    "created": 1791660142.601,
+    "mode": "live"
+  },
+  {
+    "name": "report-calc-section",
+    "description": "Formats the calculation section of a mortgage report",
+    "definition": "(defun report-calc-section (principal rate years)\n  \"Formats the calculation section of a mortgage report\" (let* ((payment (monthly-payment principal rate years)) (months (* years 12)) (totals (mortgage-totals principal payment months)) (total-interest (first totals)) (total-cost (second totals))) (format nil \"Monthly Payment: ~a~%Total Interest: ~a~%Total Cost: ~a\" (fmt-money payment) (fmt-money total-interest) (fmt-money total-cost))))",
+    "tests": [
+      {
+        "call": "(let ((r (report-calc-section 150000 6.5 30))) (and (stringp r) (search \"Monthly Payment:\" r) (search \"Total Interest:\" r) (search \"Total Cost:\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (report-calc-section 100000 5.0 15))) (and (stringp r) (search \"$\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (report-calc-section 200000 7.0 25))) (and (stringp r) (search \"Monthly Payment:\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "c361ca231b",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(report-calc-section 150000 6.5 30)",
+        "why": "rescue-property-tests",
+        "expect": "\"Monthly Payment: $939.15~%Total Interest: $188,094.00~%Total Cost: $338,094.00\""
+      },
+      {
+        "call": "(report-calc-section 100000 5 15)",
+        "why": "rescue-property-tests",
+        "expect": "\"Monthly Payment: $790.71~%Total Interest: $42,527.00~%Total Cost: $142,527.00\""
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-calc-section 150000 6.5 30)",
+    "eval_ms": 1.3,
+    "created": 1791660142.882,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "row-to-csv",
+    "description": "Converts a list of strings to a comma-separated CSV string.",
+    "definition": "(defun row-to-csv (row)\n  \"Converts a list of strings to a comma-separated CSV string.\"\n  (join-strings row \",\"))",
+    "tests": [
+      {
+        "call": "(row-to-csv '(\"150000\" \"6.5\" \"30\"))",
+        "expect": "\"150000,6.5,30\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(row-to-csv '(\"a\" \"b\"))",
+        "expect": "\"a,b\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(row-to-csv '(\"1\"))",
+        "expect": "\"1\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "c361ca231b",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(row-to-csv '(\"150000\" \"6.5\" \"30\"))",
+    "eval_ms": 0.2,
+    "created": 1791660143.124,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "report-loan-section",
+    "description": "Formats a saved loan report by calling calc-mortgage-totals and format-loan-lines",
+    "definition": "(defun report-loan-section (loan-id principal rate years)\n  \"Formats a saved loan report by calling calc-mortgage-totals and format-loan-lines\"\n  (let* ((payment (monthly-payment principal rate years))\n         (totals (mortgage-totals principal payment (* years 12)))\n         (total-interest (first totals))\n         (total-cost (second totals))\n         (header (format nil \"Loan ~a: $~a at ~a%% for ~a years~%\" loan-id (fmt-money principal) (fmt-percent rate) years))\n         (calc-section (report-calc-section principal rate years)))\n    (format nil \"~a~a\" header calc-section)))",
+    "tests": [
+      {
+        "call": "(let ((r (report-loan-section \"1\" 150000 6.5 30))) (and (stringp r) (search \"Loan 1:\" r) (search \"Monthly Payment:\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (report-loan-section \"2\" 200000 5.0 15))) (and (stringp r) (search \"Loan 2:\" r) (search \"$200,000\" r)))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "c361ca231b",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-loan-section \"1\" 150000 6.5 30)",
+    "eval_ms": 2.6,
+    "created": 1791660144.043,
+    "mode": "live",
+    "uses": 3
+  },
+  {
+    "name": "rows-to-csv",
+    "description": "Converts a list of loan rows to a newline-separated CSV string.",
+    "definition": "(defun rows-to-csv (rows)\n  \"Converts a list of loan rows to a newline-separated CSV string.\"\n  (apply #'concatenate 'string\n    (mapcar (lambda (r) (concatenate 'string (row-to-csv r) \"~%\")) rows)))",
+    "tests": [
+      {
+        "call": "(rows-to-csv '((\"150000\" \"6.5\" \"30\") (\"200000\" \"5.0\" \"25\")))",
+        "expect": "\"150000,6.5,30~%200000,5.0,25~%\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(rows-to-csv '((\"100\" \"2\")))",
+        "expect": "\"100,2~%\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(rows-to-csv '())",
+        "expect": "\"\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "c361ca231b",
+    "harness_fixes": [
+      "added-docstring",
+      "test-call-repair"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(rows-to-csv '(\"150000\" \"6.5\" \"30\"))",
+    "eval_ms": 1.1,
+    "created": 1791660204.363,
+    "mode": "live"
+  },
+  {
+    "name": "report-header-line",
+    "description": "Returns a report header string for a given loan ID",
+    "definition": "(defun report-header-line (loan-id)\n  \"Returns a report header string for a given loan ID\" (format nil \"Report for Loan ~a\" loan-id))",
+    "tests": [
+      {
+        "call": "(report-header-line \"1\")",
+        "expect": "\"Report for Loan 1\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-header-line \"42\")",
+        "expect": "\"Report for Loan 42\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-header-line \"A\")",
+        "expect": "\"Report for Loan A\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "ae68a9bc22",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-header-line \"1\")",
+    "eval_ms": 1.0,
+    "created": 1791660377.451,
+    "mode": "live"
+  },
+  {
+    "name": "report-body-lines",
+    "description": "Returns a list of 3 formatted strings for payment, total interest, and total cost.",
+    "definition": "(defun report-body-lines (principal rate years)\n  \"Returns a list of 3 formatted strings for payment, total interest, and total cost.\"\n  (let* ((payment (monthly-payment principal rate years))\n         (totals (mortgage-totals principal payment (* years 12)))\n         (total-interest (first totals))\n         (total-cost (second totals)))\n    (list (format nil \"Payment: $~a\" (fmt-decimal payment))\n          (format nil \"Total Interest: $~a\" (fmt-decimal total-interest))\n          (format nil \"Total Cost: $~a\" (fmt-decimal total-cost)))))",
+    "tests": [
+      {
+        "call": "(report-body-lines 100000 5 30)",
+        "expect": "(\"Payment: $536.82\" \"Total Interest: $93,254.67\" \"Total Cost: $193,254.67\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-body-lines 200000 4 15)",
+        "expect": "(\"Payment: $1,479.38\" \"Total Interest: $66,287.84\" \"Total Cost: $266,287.84\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "ae68a9bc22",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-body-lines 100000 5 30)",
+    "eval_ms": 1.7,
+    "created": 1791660379.658,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-compare-format",
+    "description": "Formats a comparison table for two loan records",
+    "definition": "(defun cmd-compare-format (rec1 rec2)\n  \"Formats a comparison table for two loan records\" (multiple-value-bind (id1 p1 r1 y1) (loan-numeric-fields rec1) (multiple-value-bind (id2 p2 r2 y2) (loan-numeric-fields rec2) (compare-table id1 id2 rec1 rec2))))",
+    "tests": [
+      {
+        "call": "(cmd-compare-format '(\"1\" \"1000\" \"12\" \"1\") '(\"2\" \"2000\" \"6\" \"2\"))",
+        "expect": "\"Principal: $1,000.00 vs $2,000.00~%Rate: $12.00 vs $6.00~%Term: $1.00 vs $2.00~%Monthly Payment: $88.85 vs $88.64~%Total Interest: $93,729.45 vs $186,574.67~%Total Cost: $94,729.45 vs $188,574.67\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-compare-format '(\"A\" \"500\" \"5\" \"10\") '(\"B\" \"500\" \"5\" \"10\"))",
+        "expect": "\"Principal: $500.00 vs $500.00~%Rate: $5.00 vs $5.00~%Term: $10.00 vs $10.00~%Monthly Payment: $5.30 vs $5.30~%Total Interest: $2,874.90 vs $2,874.90~%Total Cost: $3,374.90 vs $3,374.90\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "ae68a9bc22",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-compare-format '(\"1\" 100 5.0 30) '(\"2\" 200 6.0 15))",
+    "eval_ms": 0.5,
+    "created": 1791660380.977,
+    "mode": "live"
+  },
+  {
+    "name": "sim-lookup",
+    "description": "Find a loan record by id string in the state tables",
+    "definition": "(defun sim-lookup (state id)\n  \"Find a loan record by id string in the state tables\"\n  (let ((rows (table-rows state \"loans\")))\n    (let ((row (find id rows :test #'string= :key #'car)))\n      (if row\n          (values row nil)\n          (values nil t)))))",
+    "tests": [
+      {
+        "call": "(multiple-value-list (sim-lookup '((\"loans\" ((\"1\" 100 5 30)))) \"1\"))",
+        "expect": "((\"1\" 100 5 30) NIL)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(multiple-value-list (sim-lookup '((\"loans\" ((\"1\" 100 5 30)))) \"2\"))",
+        "expect": "(NIL T)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(multiple-value-list (sim-lookup '((\"loans\" ((\"a\" 1 2 3) (\"b\" 4 5 6)))) \"b\"))",
+        "expect": "((\"b\" 4 5 6) NIL)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "ae68a9bc22",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(multiple-value-list (sim-lookup '((\"loans\" ((\"1\" 100 5 30)))) \"1\"))",
+    "eval_ms": 1.3,
+    "created": 1791660381.082,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "amortize-parse-row",
+    "description": "Parse a loan row into (principal rate years) as floats",
+    "definition": "(defun amortize-parse-row (row)\n  \"Parse a loan row into (principal rate years) as floats\"\n  (let* ((principal (float (parse-number (second row))))\n         (rate-str (third row))\n         (dot-pos (position #\\. rate-str))\n         (rate (if dot-pos\n                   (+ (parse-number (subseq rate-str 0 dot-pos))\n                      (/ (parse-number (subseq rate-str (1+ dot-pos)))\n                         (expt 10 (length (subseq rate-str (1+ dot-pos))))))\n                   (parse-number rate-str)))\n         (years (float (parse-number (fourth row)))))\n    (list principal (float rate) years)))",
+    "tests": [
+      {
+        "call": "(amortize-parse-row '(\"1\" \"150000\" \"6.5\" \"30\"))",
+        "expect": "(150000.0 6.5 30.0)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortize-parse-row '(\"3\" \"100000\" \"7.25\" \"20\"))",
+        "expect": "(100000.0 7.25 20.0)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortize-parse-row '(\"5\" \"250000\" \"4\" \"15\"))",
+        "expect": "(250000.0 4.0 15.0)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "e74c3f9c79",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(amortize-parse-row '(\"1\" \"150000\" \"6.5\" \"30\"))",
+        "why": "rescue-property-tests",
+        "expect": "(150000.0 6.5 30.0)"
+      },
+      {
+        "call": "(amortize-parse-row '(\"2\" \"200000\" \"5.0\" \"15\"))",
+        "why": "rescue-property-tests",
+        "expect": "(200000.0 5.0 15.0)"
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(amortize-parse-row '(\"1\" \"150000\" \"6.5\" \"30\"))",
+    "eval_ms": 1.6,
+    "created": 1791660434.341,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "amortize-schedule-string",
+    "description": "Formats a mortgage amortization schedule summary string",
+    "definition": "(defun amortize-schedule-string (loan-id principal rate years schedule-rows)\n  \"Formats a mortgage amortization schedule summary string\"\n  (format nil \"Schedule for loan ~a: ~a rows\" loan-id (length schedule-rows)))",
+    "tests": [
+      {
+        "call": "(amortize-schedule-string \"1\" 150000.0 6.5 30.0 '((1 1000 500 149000) (2 1000 501 148000)))",
+        "expect": "\"Schedule for loan 1: 2 rows\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortize-schedule-string \"2\" 200000.0 5.0 15.0 '())",
+        "expect": "\"Schedule for loan 2: 0 rows\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortize-schedule-string \"3\" 100000.0 7.0 20.0 '((1 500 100 99500)))",
+        "expect": "\"Schedule for loan 3: 1 rows\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "e74c3f9c79",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(amortize-schedule-string \"1\" 150000.0 6.5 30.0 '((1 1000 500 149000) (2 1000 501 148000)))",
+    "eval_ms": 0.8,
+    "created": 1791660434.816,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "loan-lookup",
+    "description": "Find a loan in the loans table by 1-based index string",
+    "definition": "(defun loan-lookup (state id)\n  \"Find a loan in the loans table by 1-based index string\"\n  (let* ((rows (table-rows state \"loans\"))\n         (idx (parse-integer id)))\n    (if (and (>= idx 1) (<= idx (length rows)))\n        (nth (1- idx) rows)\n        nil)))",
+    "tests": [
+      {
+        "call": "(loan-lookup '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\"))) ) \"1\")",
+        "expect": "(\"1\" \"150000\" \"6.5\" \"30\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(loan-lookup '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\") (\"2\" \"200000\" \"5.5\" \"15\"))) ) \"2\")",
+        "expect": "(\"2\" \"200000\" \"5.5\" \"15\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(loan-lookup '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\"))) ) \"99\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "e74c3f9c79",
+    "harness_fixes": [
+      "added-docstring",
+      "nested-state-data"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(loan-lookup '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\"))) ) \"1\")",
+    "eval_ms": 0.5,
+    "created": 1791660437.817,
+    "mode": "live",
+    "uses": 7
+  },
+  {
+    "name": "cmd-compare-lookup",
+    "description": "Looks up two loans by ID and returns their records in a plist",
+    "definition": "(defun cmd-compare-lookup (args state now)\n  \"Looks up two loans by ID and returns their records in a plist\"\n  (let* ((id1 (first args))\n         (id2 (second args))\n         (rec1 (loan-lookup state id1))\n         (rec2 (loan-lookup state id2)))\n    (list :rec1 rec1 :rec2 rec2)))",
+    "tests": [
+      {
+        "call": "(cmd-compare-lookup '(\"1\" \"2\") '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\") (\"2\" \"200000\" \"5.5\" \"15\")))) 0)",
+        "expect": "(:rec1 (\"1\" \"150000\" \"6.5\" \"30\") :rec2 (\"2\" \"200000\" \"5.5\" \"15\"))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-compare-lookup '(\"1\" \"99\") '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\")))) 0)",
+        "expect": "(:rec1 (\"1\" \"150000\" \"6.5\" \"30\") :rec2 NIL)",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "e74c3f9c79",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-compare-lookup '(\"1\" \"2\") '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\") (\"2\" \"200000\" \"5.5\" \"15\")))) 0)",
+    "eval_ms": 1.1,
+    "created": 1791660440.071,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-dispatch",
+    "description": "Dispatches a command symbol to its handler or returns an error message",
+    "definition": "(defun cmd-dispatch (sym word args state now)\n  \"Dispatches a command symbol to its handler or returns an error message\" (if (and sym (fboundp sym)) (funcall sym args state now) (list :output (format nil \"Unknown command: ~a\" word) :state state)))",
+    "tests": [
+      {
+        "call": "(cmd-dispatch 'cmd-nonexistent \"nonexistent\" '() nil 0)",
+        "expect": "(:output \"Unknown command: nonexistent\" :state nil)",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-dispatch nil \"help\" '() nil 0)",
+        "expect": "(:output \"Unknown command: help\" :state nil)",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-dispatch 'cmd-clear '() '() nil 0)",
+        "expect": "(:output \"cleared\" :state ((\"loans\" ())))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71e6ca92e2",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(cmd-dispatch 'cmd-nonexistent \"nonexistent\" '() nil 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"Unknown command: nonexistent\" :state nil)"
+      },
+      {
+        "call": "(cmd-dispatch nil \"ghost\" '() nil 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:output \"Unknown command: ghost\" :state nil)"
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-dispatch 'cmd-clear '() '() nil 0)",
+    "eval_ms": 1.2,
+    "created": 1791660598.032,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "amortize-lookup",
+    "description": "Find a loan row by 1-based index string in the loans table, returning the row or NIL",
+    "definition": "(defun amortize-lookup (state id)\n  \"Find a loan row by 1-based index string in the loans table, returning the row or NIL\"\n  (nth (1- (parse-integer id))\n       (table-rows state \"loans\")))",
+    "tests": [
+      {
+        "call": "(amortize-lookup '((\"loans\" ((\"150000\" \"6.5\" \"30\") (\"200000\" \"5.0\" \"15\")))) \"1\")",
+        "expect": "(\"150000\" \"6.5\" \"30\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortize-lookup '((\"loans\" ((\"150000\" \"6.5\" \"30\") (\"200000\" \"5.0\" \"15\")))) \"2\")",
+        "expect": "(\"200000\" \"5.0\" \"15\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(amortize-lookup '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) \"5\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71e6ca92e2",
+    "harness_fixes": [
+      "added-docstring",
+      "unescaped-quotes-in-expected-value",
+      "nested-state-data"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(amortize-lookup '((\"loans\" ((\"150000\" \"6.5\" \"30\") (\"200000\" \"5.0\" \"15\")))) \"1\")",
+    "eval_ms": 0.4,
+    "created": 1791660606.901,
+    "mode": "live"
+  },
+  {
+    "name": "export-get-rows",
+    "description": "Get all loan rows or a single row by index from the loans table",
+    "definition": "(defun export-get-rows (state args)\n  \"Get all loan rows or a single row by index from the loans table\"\n  (let* ((rows (get-loans-table state))\n         (idx (first args)))\n    (if (null idx)\n        rows\n        (let ((row (loan-row-by-index state idx)))\n          (if row (list row) nil)))))",
+    "tests": [
+      {
+        "call": "(export-get-rows '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) '())",
+        "expect": "((\"150000\" \"6.5\" \"30\"))",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(export-get-rows '((\"loans\" ((\"150000\" \"6.5\" \"30\") (\"200000\" \"7.0\" \"15\")))) '(\"1\"))",
+        "expect": "((\"150000\" \"6.5\" \"30\"))",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(export-get-rows '((\"loans\" ((\"150000\" \"6.5\" \"30\") (\"200000\" \"7.0\" \"15\")))) '(\"2\"))",
+        "expect": "((\"200000\" \"7.0\" \"15\"))",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71e6ca92e2",
+    "harness_fixes": [
+      "completed-missing-paren",
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(export-get-rows '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) '())",
+    "eval_ms": 0.6,
+    "created": 1791660612.438,
+    "mode": "live"
+  },
+  {
+    "name": "sim-usage-msg",
+    "description": "Returns the usage string for the simulate command",
+    "definition": "(defun sim-usage-msg ()\n  \"Returns the usage string for the simulate command\" \"Usage: simulate <id>\")",
+    "tests": [
+      {
+        "call": "(sim-usage-msg)",
+        "expect": "\"Usage: simulate <id>\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71e6ca92e2",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-usage-msg)",
+    "eval_ms": 1.1,
+    "created": 1791660613.437,
+    "mode": "live"
+  },
+  {
+    "name": "compare-usage-msg",
+    "description": "Returns the usage string for the compare command",
+    "definition": "(defun compare-usage-msg ()\n  \"Returns the usage string for the compare command\" \"Usage: compare <id1> <id2>\")",
+    "tests": [
+      {
+        "call": "(compare-usage-msg)",
+        "expect": "\"Usage: compare <id1> <id2>\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71e6ca92e2",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-usage-msg)",
+    "eval_ms": 0.5,
+    "created": 1791660613.654,
+    "mode": "live"
+  },
+  {
+    "name": "export-row-to-csv",
+    "description": "Join a 3-element row of strings with commas into a CSV line",
+    "definition": "(defun export-row-to-csv (row)\n  \"Join a 3-element row of strings with commas into a CSV line\"\n  (join-strings row \",\"))",
+    "tests": [
+      {
+        "call": "(export-row-to-csv '(\"150000\" \"6.5\" \"30\"))",
+        "expect": "\"150000,6.5,30\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(export-row-to-csv '(\"100\" \"5\" \"10\"))",
+        "expect": "\"100,5,10\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(export-row-to-csv '(\"a\" \"b\" \"c\"))",
+        "expect": "\"a,b,c\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71e6ca92e2",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(export-row-to-csv '(\"150000\" \"6.5\" \"30\"))",
+    "eval_ms": 0.6,
+    "created": 1791660615.107,
+    "mode": "live"
+  },
+  {
+    "name": "compare-lookup-rows",
+    "description": "Look up two loan rows by 1-based index in the loans table",
+    "definition": "(defun compare-lookup-rows (state id1 id2)\n  \"Look up two loan rows by 1-based index in the loans table\"\n  (let* ((rows (table-rows state \"loans\"))\n         (i1 (parse-integer id1))\n         (i2 (parse-integer id2))\n         (r1 (nth (1- i1) rows))\n         (r2 (nth (1- i2) rows)))\n    (if (and r1 r2)\n        (list r1 r2)\n        nil)))",
+    "tests": [
+      {
+        "call": "(compare-lookup-rows '((\"loans\" ((\"100\" \"5\" \"10\") (\"200\" \"6\" \"20\")))) \"1\" \"2\")",
+        "expect": "((\"100\" \"5\" \"10\") (\"200\" \"6\" \"20\"))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-lookup-rows '((\"loans\" ((\"100\" \"5\" \"10\")))) \"1\" \"2\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-lookup-rows '((\"loans\" ((\"100\" \"5\" \"10\") (\"200\" \"6\" \"20\") (\"300\" \"7\" \"30\")))) \"2\" \"3\")",
+        "expect": "((\"200\" \"6\" \"20\") (\"300\" \"7\" \"30\"))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71e6ca92e2",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-lookup-rows '((\"loans\" ((\"100\" \"5\" \"10\") (\"200\" \"6\" \"20\")))) \"1\" \"2\")",
+    "eval_ms": 1.0,
+    "created": 1791660615.541,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-report",
+    "description": "Generates a mortgage report for a specific loan ID",
+    "definition": "(defun cmd-report (args state now)\n  \"Generates a mortgage report for a specific loan ID\" (if (< (length args) 1) (list :output \"Usage: report <id>\") (let* ((id (first args)) (loan (loan-lookup state id))) (if (null loan) (list :output (format nil \"Loan ~a not found\" id)) (let* ((principal (parse-number (first loan))) (rate (parse-number (second loan))) (years (parse-number (third loan))) (header (report-header now)) (calc (report-calc-section principal rate years)) (loan-section (report-loan-section id principal rate years)) (footer (report-footer)) (output (apply #'concatenate 'string (list header calc loan-section footer)))) (list :output output))))))",
+    "tests": [
+      {
+        "call": "(cmd-report '() '(()) 0)",
+        "expect": "(:OUTPUT \"Usage: report <id>\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-report '(\"1\") '(()) 0)",
+        "expect": "(:OUTPUT \"Loan 1 not found\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-report '(\"1\") '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) 0)",
+        "expect": "(:OUTPUT \"=== MORTGAGE CALCULATOR ===\nDate: 1970-01-01Monthly Payment: $899.33\nTotal Interest: $173,757.41\nTotal Cost: $323,757.41Loan 1: $$150,000.00 at 6.00%%% for 30 years\nMonthly Payment: $899.33\nTotal Interest: $173,757.41\nTotal Cost: $323,757.41=== END OF REPORT ===\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "0474538654",
+    "harness_fixes": [
+      "added-docstring",
+      "nested-state-data",
+      "trimmed-surplus-paren",
+      "let-to-let-star",
+      "newline-escape-in-expected-string"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-report '(\"1\") '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) 0)",
+    "eval_ms": 0.8,
+    "created": 1791660632.025,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "cmd-amortize",
+    "description": "Generates an amortization schedule for a loan by ID",
+    "definition": "(defun cmd-amortize (args state now)\n  \"Generates an amortization schedule for a loan by ID\" (declare (ignore now)) (if (< (length args) 1) (list :output \"Usage: amortize <id>\") (let* ((id (first args)) (loan (loan-lookup state id))) (if (null loan) (list :output (format nil \"Loan ~a not found\" id)) (let* ((principal (parse-number (first loan))) (rate (parse-number (second loan))) (years (parse-number (third loan))) (schedule (amortization-schedule principal rate years)) (output (amortize-schedule-string id principal rate years schedule))) (list :output output))))))",
+    "tests": [
+      {
+        "call": "(cmd-amortize '() '() 0)",
+        "expect": "(:OUTPUT \"Usage: amortize <id>\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-amortize '(\"1\") '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) 0)",
+        "expect": "(:OUTPUT \"Schedule for loan 1: 360 rows\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-amortize '(\"99\") '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) 0)",
+        "expect": "(:OUTPUT \"Loan 99 not found\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "0474538654",
+    "harness_fixes": [
+      "let-to-let-star",
+      "added-docstring",
+      "nested-state-data"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-amortize '(\"1\") '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) 0)",
+    "eval_ms": 0.8,
+    "created": 1791660632.386,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "calc-parse-args",
+    "description": "Parse first three args as numbers, return list or NIL",
+    "definition": "(defun calc-parse-args (args)\n  \"Parse first three args as numbers, return list or NIL\"\n  (let* ((p (if (>= (length args) 1) (parse-number (first args)) nil))\n         (r (if (>= (length args) 2) (parse-number (second args)) nil))\n         (y (if (>= (length args) 3) (parse-number (third args)) nil)))\n    (if (and p r y)\n        (list p r y)\n        nil)))",
+    "tests": [
+      {
+        "call": "(calc-parse-args '(\"100000\" \"5\" \"10\"))",
+        "expect": "(100000.0 5.0 10.0)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(calc-parse-args '(\"abc\" \"5\" \"10\"))",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(calc-parse-args '(\"100\" \"5\"))",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "0474538654",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(calc-parse-args '(\"100000\" \"5\" \"10\"))",
+    "eval_ms": 0.7,
+    "created": 1791660638.053,
+    "mode": "live"
+  },
+  {
+    "name": "compare-lookup-ids",
+    "description": "Looks up two loans by ID in state and returns their records as a list, or NIL if either is missing.",
+    "definition": "(defun compare-lookup-ids (id1 id2 state)\n  \"Looks up two loans by ID in state and returns their records as a list, or NIL if either is missing.\"\n  (let* ((rec1 (loan-lookup state id1))\n         (rec2 (loan-lookup state id2)))\n    (if (and rec1 rec2)\n        (list rec1 rec2)\n        nil)))",
+    "tests": [
+      {
+        "call": "(compare-lookup-ids \"1\" \"2\" '((\"loans\" ((\"100000\" \"5\" \"10\") (\"200000\" \"6\" \"20\")))))",
+        "expect": "((\"100000\" \"5\" \"10\") (\"200000\" \"6\" \"20\"))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-lookup-ids \"1\" \"99\" '((\"loans\" ((\"100000\" \"5\" \"10\") (\"200000\" \"6\" \"20\")))))",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-lookup-ids \"99\" \"1\" '((\"loans\" ((\"100000\" \"5\" \"10\") (\"200000\" \"6\" \"20\")))))",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "0474538654",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-lookup-ids \"1\" \"2\" '((\"loans\" ((\"100000\" \"5\" \"10\") (\"200000\" \"6\" \"20\")))))",
+    "eval_ms": 0.9,
+    "created": 1791660638.467,
+    "mode": "live"
+  },
+  {
+    "name": "calc-compute",
+    "description": "Compute mortgage summary plist",
+    "definition": "(defun calc-compute (principal rate years)\n  \"Compute mortgage summary plist\"\n  (let* ((p (monthly-payment principal rate years))\n         (months (round (* years 12.0)))\n         (totals (mortgage-totals principal p months))\n         (ti (first totals))\n         (tc (second totals))\n         (schedule (amortization-schedule principal rate years))\n         (ms (sim-milestones schedule)))\n    (list :payment p :total-interest ti :total-cost tc :milestones ms)))",
+    "tests": [
+      {
+        "call": "(let ((r (calc-compute 100000.0 5.0 10.0))) (and (listp r) (numberp (getf r :payment)) (numberp (getf r :total-interest)) (numberp (getf r :total-cost)) (listp (getf r :milestones))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (calc-compute 200000.0 6.0 15.0))) (and (listp r) (numberp (getf r :payment)) (numberp (getf r :total-interest)) (numberp (getf r :total-cost)) (listp (getf r :milestones))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (calc-compute 50000.0 4.0 5.0))) (and (listp r) (numberp (getf r :payment)) (numberp (getf r :total-interest)) (numberp (getf r :total-cost)) (listp (getf r :milestones))))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "0474538654",
+    "harness_fixes": [
+      "added-docstring",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(calc-compute 100000.0 5.0 10.0)",
+    "eval_ms": 1.2,
+    "created": 1791660698.731,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "cmd-list",
+    "description": "List saved loans from state",
+    "definition": "(defun cmd-list (args state now)\n  \"List saved loans from state\"\n  (let ((rows (get-loans-table state)))\n    (if (null rows)\n        (list :output \"No loans saved.\" :state state)\n        (let ((lines (mapcar (lambda (row) (format nil \"~a ~a ~a\" (first row) (second row) (third row))) rows)))\n          (list :output (apply #'concatenate 'string (mapcar (lambda (l) (format nil \"~a~%\" l)) lines)) :state state)))))",
+    "tests": [
+      {
+        "call": "(cmd-list '() '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) 0)",
+        "expect": "(:OUTPUT \"150000 6.5 30~%\" :STATE ((\"loans\" ((\"150000\" \"6.5\" \"30\")))))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-list '() '((\"loans\" ())) 0)",
+        "expect": "(:OUTPUT \"No loans saved.\" :STATE ((\"loans\" ())))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "0474538654",
+    "harness_fixes": [
+      "added-docstring",
+      "nested-state-data",
+      "trimmed-surplus-paren"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-list '() '((\"loans\" ())) 0)",
+    "eval_ms": 1.6,
+    "created": 1791660709.231,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "cmd-help",
+    "description": "Returns a plist with formatted help text for the mortgage calculator commands.",
+    "definition": "(defun cmd-help (args state now)\n  \"Returns a plist with formatted help text for the mortgage calculator commands.\"\n  (let ((lines (list \"Usage:\" \"\" \"Commands:\" \"  help - Show this help\" \"  calc <principal> <rate> <years> - Calculate monthly payment\" \"  save <principal> <rate> <years> - Save a loan\" \"  list - List saved loans\" \"  report <id> - Show loan report\" \"  amortize <id> - Show amortization schedule\" \"  simulate <principal> <rate> <years> - Simulate loan\" \"  compare <id1> <id2> - Compare two loans\" \"  export - Export loans to CSV\" \"  clear - Clear all saved loans\" \"\" \"Example:\" \"  save 150000 6.5 30\" \"  list\" \"  1  150000  6.5  30\" \"  report 1\" \"  amortize 1\")))\n    (list :output (apply #'concatenate 'string (mapcar (lambda (l) (format nil \"~a~%\" l)) lines)) :state state)))",
+    "tests": [
+      {
+        "call": "(cmd-help '() nil 0)",
+        "expect": "(:OUTPUT \"Usage:~%~%Commands:~%  help - Show this help~%  calc <principal> <rate> <years> - Calculate monthly payment~%  save <principal> <rate> <years> - Save a loan~%  list - List saved loans~%  report <id> - Show loan report~%  amortize <id> - Show amortization schedule~%  simulate <principal> <rate> <years> - Simulate loan~%  compare <id1> <id2> - Compare two loans~%  export - Export loans to CSV~%  clear - Clear all saved loans~%~%Example:~%  save 150000 6.5 30~%  list~%  1  150000  6.5  30~%  report 1~%  amortize 1~%\" :STATE NIL)",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-help '(\"help\") '((\"loans\" ((1 150000 6.5 30)))) 123)",
+        "expect": "(:OUTPUT \"Usage:~%~%Commands:~%  help - Show this help~%  calc <principal> <rate> <years> - Calculate monthly payment~%  save <principal> <rate> <years> - Save a loan~%  list - List saved loans~%  report <id> - Show loan report~%  amortize <id> - Show amortization schedule~%  simulate <principal> <rate> <years> - Simulate loan~%  compare <id1> <id2> - Compare two loans~%  export - Export loans to CSV~%  clear - Clear all saved loans~%~%Example:~%  save 150000 6.5 30~%  list~%  1  150000  6.5  30~%  report 1~%  amortize 1~%\" :STATE ((\"loans\" ((1 150000 6.5 30)))))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "0474538654",
+    "harness_fixes": [
+      "completed-missing-paren",
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-help '() nil 0)",
+    "eval_ms": 1.4,
+    "created": 1791660710.195,
+    "mode": "live",
+    "uses": 2
+  },
+  {
+    "name": "cmd-history",
+    "description": "Get amortization summary for a loan by ID",
+    "definition": "(defun cmd-history (args state now)\n  \"Get amortization summary for a loan by ID\"\n  (let ((id (first args)))\n    (if (null id)\n        (list :output \"Usage: history <id>\")\n        (let ((row (loan-lookup state id)))\n          (if (null row)\n              (list :output (format nil \"Loan ~a not found\" id))\n              (list :output (amortization-summary (first row) (second row) (third row) (fourth row))\n                    :state state :now now))))))",
+    "tests": [
+      {
+        "call": "(cmd-history '() '((\"loans\" ((\"1\" 100000 5.0 10)))) 0)",
+        "expect": "(:OUTPUT \"Usage: history <id>\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-history '(\"99\") '((\"loans\" ((\"1\" 100000 5.0 10)))) 0)",
+        "expect": "(:OUTPUT \"Loan 99 not found\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71a10cf2c5",
+    "harness_fixes": [
+      "trimmed-surplus-paren",
+      "added-docstring",
+      "let-to-let-star",
+      "newline-escape-in-expected-string"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-history '(\"1\") '((\"loans\" ((\"1\" 100000 5.0 10)))) 0)",
+    "eval_ms": 1.2,
+    "created": 1791660745.884,
+    "mode": "live"
+  },
+  {
+    "name": "compare-args-ok-p",
+    "description": "Returns T if args has at least 2 elements, else NIL",
+    "definition": "(defun compare-args-ok-p (args)\n  \"Returns T if args has at least 2 elements, else NIL\"\n  (>= (length args) 2))",
+    "tests": [
+      {
+        "call": "(compare-args-ok-p '())",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-args-ok-p '(1))",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-args-ok-p '(1 2))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(compare-args-ok-p '(1 2 3))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "71a10cf2c5",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-args-ok-p '())",
+    "eval_ms": 1.0,
+    "created": 1791660754.654,
+    "mode": "live"
+  },
+  {
+    "name": "sim-lookup-id",
+    "description": "Extracts the loan record for a given ID from the state table.",
+    "definition": "(defun sim-lookup-id (state id)\n  \"Extracts the loan record for a given ID from the state table.\"\n  (let ((rows (table-rows state \"loans\")))\n    (find id rows :key #'car :test #'string=)))",
+    "tests": [
+      {
+        "call": "(sim-lookup-id '((\"loans\" ((\"1\" 100000 0.05 30)))) \"1\")",
+        "expect": "(\"1\" 100000 0.05 30)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-lookup-id '((\"loans\" ((\"1\" 100000 0.05 30) (\"2\" 200000 0.06 15)))) \"2\")",
+        "expect": "(\"2\" 200000 0.06 15)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-lookup-id '((\"loans\" ((\"1\" 100000 0.05 30)))) \"99\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71a10cf2c5",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-lookup-id '((\"loans\" ((\"1\" 100000 0.05 30)))) \"1\")",
+    "eval_ms": 0.6,
+    "created": 1791660765.368,
+    "mode": "live"
+  },
+  {
+    "name": "sim-compute-args",
+    "description": "Extracts numeric arguments (principal, rate, years) from a loan record list.",
+    "definition": "(defun sim-compute-args (loan)\n  \"Extracts numeric arguments (principal, rate, years) from a loan record list.\"\n  (list (second loan) (third loan) (fourth loan)))",
+    "tests": [
+      {
+        "call": "(sim-compute-args '(\"1\" 100000 0.05 30))",
+        "expect": "(100000 0.05 30)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-compute-args '(\"2\" 250000 0.06 15))",
+        "expect": "(250000 0.06 15)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-compute-args '(\"3\" 50000 0.04 10))",
+        "expect": "(50000 0.04 10)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "71a10cf2c5",
+    "harness_fixes": [
+      "added-docstring",
+      "quoted-data-list"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-compute-args '(\"1\" 100000 0.05 30))",
+    "eval_ms": 0.4,
+    "created": 1791660766.144,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-simulate-lookup",
+    "description": "Find a loan row by 1-based index string",
+    "definition": "(defun cmd-simulate-lookup (state id)\n  \"Find a loan row by 1-based index string\" (let ((rows (table-rows state 'loans)) (idx (parse-integer id))) (if (and rows (<= 1 idx) (<= idx (length rows))) (nth (1- idx) rows) nil)))",
+    "tests": [
+      {
+        "call": "(cmd-simulate-lookup '((loans ((\"150000\" \"6.5\" \"30\")))) \"1\")",
+        "expect": "(\"150000\" \"6.5\" \"30\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-simulate-lookup '((loans ((\"150000\" \"6.5\" \"30\") (\"200000\" \"5.0\" \"15\")))) \"2\")",
+        "expect": "(\"200000\" \"5.0\" \"15\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-simulate-lookup '((loans ((\"150000\" \"6.5\" \"30\")))) \"2\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-simulate-lookup '((loans ((\"150000\" \"6.5\" \"30\") (\"200000\" \"5.0\" \"15\")))) \"1\")",
+    "eval_ms": 1.0,
+    "created": 1791660792.784,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-word",
+    "description": "Returns the first element of a non-empty list, else NIL",
+    "definition": "(defun cmd-word (args)\n  \"Returns the first element of a non-empty list, else NIL\"\n  (if (and (listp args) (not (null args)))\n      (first args)\n      nil))",
+    "tests": [
+      {
+        "call": "(cmd-word '(\"clear\" \"x\"))",
+        "expect": "\"clear\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-word '())",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-word '(\"calc\" \"100000\" \"5\" \"30\"))",
+        "expect": "\"calc\"",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-word '(\"clear\" \"x\"))",
+    "eval_ms": 0.3,
+    "created": 1791660798.893,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "cmd-clear",
+    "description": "Clears the state and returns a confirmation message.",
+    "definition": "(defun cmd-clear (state now extra)\n  \"Clears the state and returns a confirmation message.\"\n  (declare (ignore state now extra))\n  '(:output \"Cleared.\" :state nil))",
+    "tests": [
+      {
+        "call": "(cmd-clear '() '() 0)",
+        "expect": "(:output \"Cleared.\" :state nil)",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-clear '((\"loans\" ((1 2 3)))) '() 100)",
+        "expect": "(:output \"Cleared.\" :state nil)",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-clear '() '() 0)",
+    "eval_ms": 0.7,
+    "created": 1791660807.733,
+    "mode": "live",
+    "uses": 3
+  },
+  {
+    "name": "cmd-simulate",
+    "description": "Simulate a loan with 3-column layout, returning usage if args are missing",
+    "definition": "(defun cmd-simulate (args state now)\n  \"Simulate a loan with 3-column layout, returning usage if args are missing\"\n  (if (null args)\n      '(:output \"Usage: simulate <id>\")\n      (let ((id (first args)))\n        (let ((row (sim-lookup state id)))\n          (if (null row)\n              '(:output \"Loan not found\")\n              (let ((principal (first row))\n                    (rate (second row))\n                    (years (third row)))\n                (let ((result (sim-compute principal rate years)))\n                  (let ((principal (first result))\n                        (rate (second result))\n                        (years (third result))\n                        (payment (fourth result))\n                        (total-interest (fifth result))\n                        (total-cost (sixth result))\n                        (milestones (seventh result)))\n                    (let ((output (sim-format principal rate years payment total-interest total-cost milestones)))\n                      '(:output output))))))))))",
+    "tests": [
+      {
+        "call": "(cmd-simulate '() '() 0)",
+        "expect": "(:output \"Usage: simulate <id>\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-simulate '(1) '() 0)",
+        "expect": "(:output \"Loan not found\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "trimmed-surplus-paren",
+      "added-docstring",
+      "unescaped-quotes-in-expected-value",
+      "newline-escape-in-expected-string",
+      "dropped-unusable-test"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(cmd-simulate '(\\\"loans\\\" ((150000 6.5 30))) '(:args (1)))",
+        "why": "dropped-unusable-test",
+        "expect": null
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-simulate '() '() 0)",
+    "eval_ms": 3.0,
+    "created": 1791660808.218,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "cmd-symbol",
+    "description": "Takes a word (string) and returns the symbol for the command handler.",
+    "definition": "(defun cmd-symbol (word)\n  \"Takes a word (string) and returns the symbol for the command handler.\"\n  (cond\n    ((string= word \"clear\") 'cmd-clear)\n    ((string= word \"help\") 'cmd-help)\n    ((string= word \"calc\") 'cmd-calc)\n    (t nil)))",
+    "tests": [
+      {
+        "call": "(cmd-symbol \"clear\")",
+        "expect": "CMD-CLEAR",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-symbol \"help\")",
+        "expect": "CMD-HELP",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-symbol \"calc\")",
+        "expect": "CMD-CALC",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-symbol \"clear\")",
+    "eval_ms": 0.5,
+    "created": 1791660812.491,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "report-get-row",
+    "description": "Get a loan row by 1-based index from state",
+    "definition": "(defun report-get-row (state id-string)\n  \"Get a loan row by 1-based index from state\"\n  (let* ((rows (table-rows state \"loans\"))\n         (idx (parse-integer id-string)))\n    (nth (1- idx) rows)))",
+    "tests": [
+      {
+        "call": "(report-get-row '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) \"1\")",
+        "expect": "(\"150000\" \"6.5\" \"30\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-get-row '((\"loans\" ((\"100\" \"5\" \"10\") (\"200\" \"6\" \"20\")))) \"2\")",
+        "expect": "(\"200\" \"6\" \"20\")",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-get-row '((\"loans\" ((\"100\" \"5\" \"10\")))) \"99\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-get-row '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) \"1\")",
+    "eval_ms": 0.6,
+    "created": 1791660813.919,
+    "mode": "live"
+  },
+  {
+    "name": "compare-args-to-numbers",
+    "description": "Converts a list of args to two numbers if at least 2 exist, else NIL",
+    "definition": "(defun compare-args-to-numbers (args)\n  \"Converts a list of args to two numbers if at least 2 exist, else NIL\"\n  (if (>= (length args) 2)\n      (let ((a (if (numberp (first args)) (first args) (parse-number (first args))))\n            (b (if (numberp (second args)) (second args) (parse-number (second args)))))\n        (if (and a b)\n            (list a b)\n            nil))\n      nil))",
+    "tests": [
+      {
+        "call": "(compare-args-to-numbers '(1 2))",
+        "expect": "(1 2)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-args-to-numbers '(\"3\" \"4\"))",
+        "expect": "(3 4)",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-args-to-numbers '(1))",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-args-to-numbers '())",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-args-to-numbers '(1 2))",
+    "eval_ms": 1.4,
+    "created": 1791660814.216,
+    "mode": "live"
+  },
+  {
+    "name": "compare-3col-lines",
+    "description": "Takes two loan rows and returns 3 formatted strings comparing principal, rate, and years.",
+    "definition": "(defun compare-3col-lines (row1 row2)\n  \"Takes two loan rows and returns 3 formatted strings comparing principal, rate, and years.\"\n  (let* ((p1 (second row1))\n         (r1 (third row1))\n         (y1 (fourth row1))\n         (p2 (second row2))\n         (r2 (third row2))\n         (y2 (fourth row2)))\n    (list (format nil \"Principal: ~a vs ~a\" p1 p2)\n          (format nil \"Rate: ~a% vs ~a%\" r1 r2)\n          (format nil \"Years: ~a vs ~a\" y1 y2))))",
+    "tests": [
+      {
+        "call": "(compare-3col-lines '(1 100000 5.0 30) '(2 200000 4.5 15))",
+        "expect": "(\"Principal: 100000 vs 200000\" \"Rate: 5.0% vs 4.5%\" \"Years: 30 vs 15\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(compare-3col-lines '(1 50000 6.0 10) '(2 50000 6.0 10))",
+        "expect": "(\"Principal: 50000 vs 50000\" \"Rate: 6.0% vs 6.0%\" \"Years: 10 vs 10\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(compare-3col-lines '(1 100000 5.0 30) '(2 200000 4.5 15))",
+    "eval_ms": 1.6,
+    "created": 1791660815.416,
+    "mode": "live"
+  },
+  {
+    "name": "report-build-text",
+    "description": "Formats a report line for a loan with id and row fields",
+    "definition": "(defun report-build-text (id-string row)\n  \"Formats a report line for a loan with id and row fields\"\n  (let* ((principal (first row))\n         (rate (second row))\n         (years (third row)))\n    (format nil \"Report for loan ~a: Principal $~a, Rate ~a%, Term ~a years\" id-string principal rate years)))",
+    "tests": [
+      {
+        "call": "(report-build-text \"1\" '(\"150000\" \"6.5\" \"30\"))",
+        "expect": "\"Report for loan 1: Principal $150000, Rate 6.5%, Term 30 years\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(report-build-text \"42\" '(\"200000\" \"5.0\" \"15\"))",
+        "expect": "\"Report for loan 42: Principal $200000, Rate 5.0%, Term 15 years\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(report-build-text \"1\" '(\"150000\" \"6.5\" \"30\"))",
+    "eval_ms": 0.9,
+    "created": 1791660815.657,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-export",
+    "description": "Export loan data to CSV",
+    "definition": "(defun cmd-export (args state now)\n  \"Export loan data to CSV\" (let ((rows (table-rows state \"loans\"))) (list :output (apply #'concatenate 'string (mapcar (lambda (row) (format nil \"~a,~a,~a~%\" (first row) (second row) (third row))) rows)) :state state)))",
+    "tests": [
+      {
+        "call": "(cmd-export '() '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) '())",
+        "expect": "(:output \"150000,6.5,30~%\" :state ((\"loans\" ((\"150000\" \"6.5\" \"30\")))))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-export '() '((\"loans\" ((\"100000\" \"5.0\" \"15\") (\"200000\" \"7.0\" \"25\")))) '())",
+        "expect": "(:output \"100000,5.0,15~%200000,7.0,25~%\" :state ((\"loans\" ((\"100000\" \"5.0\" \"15\") (\"200000\" \"7.0\" \"25\")))))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring",
+      "newline-escape-in-expected-string",
+      "nested-state-data"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-export '() state now)",
+    "eval_ms": 1.1,
+    "created": 1791660881.795,
+    "mode": "live",
+    "uses": 1
+  },
+  {
+    "name": "sim-lookup-row",
+    "description": "Find a loan row by id in the loans table of state",
+    "definition": "(defun sim-lookup-row (state id)\n  \"Find a loan row by id in the loans table of state\"\n  (let ((loans (table-rows state \"loans\")))\n    (find id loans :test #'string= :key #'car)))",
+    "tests": [
+      {
+        "call": "(sim-lookup-row '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\")))) \"1\")",
+        "expect": "(\"1\" \"150000\" \"6.5\" \"30\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-lookup-row '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\") (\"2\" \"200000\" \"5.0\" \"15\")))) \"2\")",
+        "expect": "(\"2\" \"200000\" \"5.0\" \"15\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-lookup-row '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\")))) \"99\")",
+        "expect": "NIL",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-lookup-row '((\"loans\" ((\"1\" \"150000\" \"6.5\" \"30\")))) \"1\")",
+    "eval_ms": 0.6,
+    "created": 1791660885.049,
+    "mode": "live"
+  },
+  {
+    "name": "sim-build-3col",
+    "description": "Formats a 3-column simulation report line for a loan row.",
+    "definition": "(defun sim-build-3col (row)\n  \"Formats a 3-column simulation report line for a loan row.\"\n  (let* ((id (first row))\n         (principal (second row))\n         (rate (third row))\n         (years (fourth row)))\n    (format nil \"Loan ~a: $~a @ ~a% for ~a years\" id principal rate years)))",
+    "tests": [
+      {
+        "call": "(sim-build-3col (list \"1\" \"150000\" \"6.5\" \"30\"))",
+        "expect": "\"Loan 1: $150000 @ 6.5% for 30 years\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(sim-build-3col (list \"2\" \"200000\" \"5.0\" \"15\"))",
+        "expect": "\"Loan 2: $200000 @ 5.0% for 15 years\"",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "6e39ad1635",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(sim-build-3col (list \"1\" \"150000\" \"6.5\" \"30\"))",
+    "eval_ms": 0.9,
+    "created": 1791660885.794,
+    "mode": "live"
+  },
+  {
+    "name": "handle-command",
+    "description": "Dispatches a command list to the matching cmd-<word> tool, returning a plist with :output.",
+    "definition": "(defun handle-command (args state now)\n  \"Dispatches a command list to the matching cmd-<word> tool, returning a plist with :output.\" (let ((word (if (consp args) (string-downcase (first args)) \"\"))) (cond ((string= word \"help\") (list :output \"Usage: help, clear, calc, save, list, export, amortize, report\")) ((string= word \"clear\") (cmd-clear args state now)) ((string= word \"calc\") (cmd-calc args state now)) ((string= word \"save\") (cmd-save args state now)) ((string= word \"list\") (cmd-list args state now)) ((string= word \"export\") (cmd-export args state now)) ((string= word \"amortize\") (cmd-amortize args state now)) ((string= word \"report\") (cmd-report args state now)) (t (list :output \"Usage: help, clear, calc, save, list, export, amortize, report\")))))",
+    "tests": [
+      {
+        "call": "(handle-command '(\"help\") '() 0)",
+        "expect": "(:output \"Usage: help, clear, calc, save, list, export, amortize, report\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(handle-command '(\"unknown\") '() 0)",
+        "expect": "(:output \"Usage: help, clear, calc, save, list, export, amortize, report\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "042d2edece",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(handle-command '(\"help\") '() 0)",
+    "eval_ms": 1.9,
+    "created": 1791661032.132,
+    "mode": "live"
+  },
+  {
+    "name": "initial-state",
+    "description": "Returns the initial state for the mortgage calculator app with an empty loans table.",
+    "definition": "(defun initial-state ()\n  \"Returns the initial state for the mortgage calculator app with an empty loans table.\" '((\"loans\" ())))",
+    "tests": [
+      {
+        "call": "(initial-state)",
+        "expect": "((\"loans\" ()))",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(equal (initial-state) '((\"loans\" ())))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "042d2edece",
+    "harness_fixes": [
+      "added-docstring"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(initial-state)",
+    "eval_ms": 120.2,
+    "created": 1791661053.111,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-calc",
+    "description": "Handles mortgage calculation commands, returning usage help if args are empty.",
+    "definition": "(defun cmd-calc (args state now)\n  \"Handles mortgage calculation commands, returning usage help if args are empty.\"\n  (if (null args)\n      '(:output \"Usage: calc <principal> <rate> <years>\")\n      (let* ((principal (parse-number (first args)))\n             (rate (parse-number (second args)))\n             (years (parse-number (third args)))\n             (payment (monthly-payment principal rate years)))\n        (list :output (format nil \"Monthly payment: ~a\" (fmt-money payment))))))",
+    "tests": [
+      {
+        "call": "(cmd-calc nil nil nil)",
+        "expect": "(:OUTPUT \"Usage: calc <principal> <rate> <years>\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-calc '(\"100000\" \"5\" \"30\") nil nil)",
+        "expect": "(:OUTPUT \"Monthly payment: $536.82\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(cmd-calc '(\"200000\" \"6\" \"15\") nil nil)",
+        "expect": "(:OUTPUT \"Monthly payment: $1,687.71\")",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "042d2edece",
+    "harness_fixes": [
+      "added-docstring",
+      "unescaped-quotes-in-expected-value"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-calc nil nil nil)",
+    "eval_ms": 1.1,
+    "created": 1791661054.024,
+    "mode": "live"
+  },
+  {
+    "name": "cmd-save",
+    "description": "Saves a loan row to the state",
+    "definition": "(defun cmd-save (args state now)\n  \"Saves a loan row to the state\"\n  (let* ((principal (first args))\n         (rate (second args))\n         (years (third args))\n         (row (list principal rate years))\n         (loans (or (assoc \"loans\" state :test #'string=) (list \"loans\" ())))\n         (rows (second loans))\n         (new-rows (append rows (list row)))\n         (new-loans (list \"loans\" new-rows))\n         (new-state (append (remove-if (lambda (tbl) (string= (first tbl) \"loans\")) state) (list new-loans)))\n         (id (length new-rows)))\n    (list :output (format nil \"Saved loan ~a\" id) :state new-state)))",
+    "tests": [
+      {
+        "call": "(let ((r (cmd-save '(\"150000\" \"6.5\" \"30\") '((\"loans\" ())) 0))) (and (stringp (getf r :output)) (search \"Saved loan 1\" (getf r :output)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (cmd-save '(\"100\" \"5\" \"10\") '((\"loans\" ((\"1\" \"2\" \"3\")))) 0))) (and (stringp (getf r :output)) (search \"Saved loan 2\" (getf r :output)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      },
+      {
+        "call": "(let ((r (cmd-save '(\"1\" \"2\" \"3\") '((\"other\" ())) 0))) (and (stringp (getf r :output)) (search \"Saved loan 1\" (getf r :output)) t))",
+        "expect": "T",
+        "confidence": "high",
+        "source": "property test (model-written)"
+      }
+    ],
+    "session": "042d2edece",
+    "harness_fixes": [
+      "added-docstring",
+      "completed-paren-in-expected-value",
+      "rescue-property-tests"
+    ],
+    "relaxed_tests": [
+      {
+        "call": "(cmd-save '(\"150000\" \"6.5\" \"30\") '((\"loans\" ())) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:OUTPUT \"Saved loan 1\" :STATE ((\"LOANS\" ((\"150000\" \"6.5\" \"30\")))))"
+      },
+      {
+        "call": "(cmd-save '(\"100000\" \"5\" \"15\") '((\"loans\" ((\"150000\" \"6.5\" \"30\")))) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:OUTPUT \"Saved loan 2\" :STATE ((\"LOANS\" ((\"150000\" \"6.5\" \"30\") (\"100000\" \"5\" \"15\")))))"
+      },
+      {
+        "call": "(cmd-save '(\"50000\" \"4\" \"10\") '((\"notes\" (\"a\" \"b\")) (\"loans\" ())) 0)",
+        "why": "rescue-property-tests",
+        "expect": "(:OUTPUT \"Saved loan 1\" :STATE ((\"NOTES\" (\"A\" \"B\")) (\"LOANS\" ((\"50000\" \"4\" \"10\")))))"
+      }
+    ],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(cmd-save '(\"150000\" \"6.5\" \"30\") '((\"loans\" ())) 0)",
+    "eval_ms": 2.9,
+    "created": 1791661054.257,
+    "mode": "live"
+  },
+  {
+    "name": "clear-loans-table",
+    "description": "Returns a new state list with the 'loans' table rows set to NIL, preserving order and other tables.",
+    "definition": "(defun clear-loans-table (state)\n  \"Returns a new state list with the 'loans' table rows set to NIL, preserving order and other tables.\"\n  (mapcar (lambda (table)\n            (let ((name (first table))\n                  (rows (second table)))\n              (if (string-equal name \"loans\")\n                  (list name nil)\n                  table)))\n          state))",
+    "tests": [
+      {
+        "call": "(clear-loans-table '((\"loans\" ((\"1\" \"2\"))) (\"other\" ((\"a\")))))",
+        "expect": "((\"loans\" NIL) (\"other\" ((\"a\"))))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(clear-loans-table '((\"LOANS\" ((\"x\"))) (\"notes\" ((\"y\")))))",
+        "expect": "((\"LOANS\" NIL) (\"notes\" ((\"y\"))))",
+        "confidence": "medium",
+        "source": "model-written, matched by the code"
+      },
+      {
+        "call": "(clear-loans-table '((\"other\" ((\"a\")))))",
+        "expect": "((\"other\" ((\"a\"))))",
+        "confidence": "high",
+        "source": "model-written, matched by the code"
+      }
+    ],
+    "session": "042d2edece",
+    "harness_fixes": [
+      "added-docstring",
+      "restored-paren-in-call"
+    ],
+    "relaxed_tests": [],
+    "harness": {
+      "kit": true,
+      "advice": true
+    },
+    "prompts": [],
+    "call": "(clear-loans-table state)",
+    "eval_ms": 1.0,
+    "created": 1791661056.041,
+    "mode": "live"
+  }
+]

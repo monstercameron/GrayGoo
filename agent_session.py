@@ -21,6 +21,7 @@ process-level only (documents/adversarial-report.md).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -206,18 +207,25 @@ MAX_INTEGRATION_TOTAL = 16           # kept per project
 # question goes to the model in a call of its own, as a reviewer and not as the author.
 GOAL_REVIEW_SYSTEM = (
     "You review software against what its user asked for. You did not write it. Reply "
-    "with ONE JSON object and nothing else: {\"action\":\"review\",\"missing\":[\"...\"],"
-    "\"why\":\"one sentence\"}. \"missing\" lists what the user asked for that the functions, "
-    "as described and tested, do not do; it is an empty list when nothing is missing.\n"
+    "with ONE JSON object and nothing else: {\"action\":\"review\",\"met\":true,"
+    "\"missing\":[],\"why\":\"one sentence\"}. \"met\" is true when the functions, as "
+    "described and tested, do what the user asked; then \"missing\" is empty. Otherwise "
+    "\"met\" is false and \"missing\" lists what the user asked for that is not there.\n"
     "RULES\n"
     "- Judge only against the user's own words. Every condition they state counts, above "
     "all one they call the challenge, the point or the hard part.\n"
     "- Look at how the functions are CALLED in their tests: that is all a user can do "
     "with them. If the user said they may give anything, or only some of the values, "
     "and every test spells out every value in one fixed form, that part is missing.\n"
-    "- If the answer shown is not an answer to the user's question (the value of a "
-    "helper, a bare fraction such as 200/3, an example that ignores the user's own "
-    "numbers), say so.\n"
+    "- \"Any\" means any reasonable input of the kind the user describes, not every "
+    "input that exists. A table of the common cases, together with a way for the user "
+    "to give the value themselves when theirs is not in the table, meets it: do not "
+    "call a table missing or hardcoded.\n"
+    "- If the answer shown is not an answer to the user's latest question or example "
+    "(the value of a helper, a bare fraction such as 200/3, an example with other "
+    "numbers than the user's), say so.\n"
+    "- List only what a user following their own words would run into. What works is "
+    "not listed, not even to say that it works.\n"
     "- Each entry says what a user would give and what should come back, concretely "
     "enough to build it. At most 4 entries.\n"
     "- Do not ask for more than the user did: no extra features, formats, error "
@@ -515,9 +523,12 @@ WEB_REMINDER = (
 # The same for a command-line app. Until 2026-10-10 such an app was sent WEB_REMINDER
 # (it has kit tools), and in seven live builds 64% of 1,025 test runs failed: web-style
 # expected values, tables picked apart by hand, text used as numbers.
+CLI_REMINDER_ADVICE = (
+    "A command tool is (cmd-<word> args state now), and its ARGS holds only the words "
+    "typed AFTER the command word. ")
 CLI_REMINDER = (
-    "COMMAND-LINE APP: a command tool is (cmd-<word> args state now). ARGS holds the "
-    "words typed after the command word, always as text, e.g. '(\"150000\" \"6.5\" "
+    "COMMAND-LINE APP: the harness calls (handle-command args state now). The words the "
+    "user typed arrive as text, e.g. '(\"150000\" \"6.5\" "
     "\"30\"); turn a word into a number with (number-from-string word), exactly once. "
     "STATE is a list of (name rows) tables, e.g. '((\"entries\" ((\"blue kite\")))): "
     "read a table with (table-rows state \"entries\") and store new rows with "
@@ -677,6 +688,19 @@ class ToolRegistry:
                         t["call"] = call
                     t["uses"] = t.get("uses", 0) + 1
             self._write(tools)
+
+    def forget_prompt(self, prompt):
+        """Stop answering PROMPT from the cache: the build it was noted in did not end as done."""
+        key = normalize_prompt(prompt)
+        with self._lock:
+            tools, changed = self._raw(), False
+            for t in tools:
+                if self._mine(t) and key in (t.get("prompts") or []):
+                    t["prompts"] = [p for p in t["prompts"] if p != key]
+                    changed = True
+            if changed:
+                self._write(tools)
+        return changed
 
     def find_cached(self, prompt):
         key = normalize_prompt(prompt)
@@ -2196,6 +2220,8 @@ class Session:
         self._later = set()               # plan steps still to be built after this one
         self._failed_steps = []           # app-plan steps that could not be built
         self.prior_goals = []             # earlier prompts of this project
+        self.prior_missing = []           # what a review of the last build found still missing
+        self.prior_unfinished = False     # the last build of this project did not end as done
         self.project = projects.BUILTIN   # which program this session works on
         self.project_note = ""            # one line of project context for the model
         self.events = []
@@ -2225,6 +2251,13 @@ class Session:
         self.write_integration = False    # ask the model for them when the project has none
         self.save_integration = None      # callable(text), set by whoever owns the project
         self._integ = None                # the last run: {"results", "summary"}
+        # Checks kept back from the builder. A test that is shown in every prompt gets met;
+        # whether the app is right shows on a check its builder never saw. One line in three of
+        # the first set is put here (HOLD_OUT), never shown in a prompt, and run with the rest.
+        self.hold_out = False
+        self.held_out_text = ""
+        self.save_held_out = None         # callable(text)
+        self._held = None                 # the last run: {"results", "summary"}
         # At its spending limit an interactive build waits for the user; a build with
         # nobody to ask (a test, an experiment, the no-memory twin) stops there instead.
         self.pause_on_spend = False
@@ -2268,7 +2301,8 @@ class Session:
         self._lane_index = {}             # step name -> position in the plan
         self._lane_done = []              # one Event per plan step, set when it ends
         self._pending = set()             # plan steps not finished yet
-        self._halt = False                # a plan that is not an app stops at a failed step
+        self._halt = False                # the lanes of a plan stop: it was cancelled or hit a limit
+        self._step_fail = {}              # name -> how its last attempt in a plan failed
         self._think = {"calls": 0, "fallbacks": 0, "reasoning_tokens": 0}
         self._kept = []                   # planned changes the model declined to make
         self._cancel = False              # the user asked to stop
@@ -2630,7 +2664,9 @@ class Session:
         if not full and any(t.get("kit") for t in tools) and (
                 self._cli or any(t["name"] == "handle-command" for t in tools)) and \
                 not any(t["name"] == "handle-request" for t in tools):
-            text += "\n" + CLI_REMINDER
+            text += "\n" + (CLI_REMINDER.replace(
+                "COMMAND-LINE APP: ", "COMMAND-LINE APP: " + CLI_REMINDER_ADVICE, 1)
+                if self.use_advice else CLI_REMINDER)
         elif not full and any(t["name"] == "handle-request" or t.get("kit") for t in tools):
             text += "\n" + WEB_REMINDER
         if self.lessons is not None and not full:
@@ -2717,6 +2753,11 @@ class Session:
         else:
             if self.state == "running":
                 self.state = "done"
+        if self.state != "done":
+            try:
+                self.registry.forget_prompt(self.prompt)     # only a build that ended as done is an answer
+            except Exception:  # noqa: BLE001
+                pass
         self.emit("summary", **self._summary())
         if self.state != "done" and self.postmortem_dir:
             try:
@@ -2887,12 +2928,14 @@ class Session:
             # the verdict of the qualifier: proven, unproven or disproven, and on what basis
             "integration": dict(self._integ["summary"]) if self._integ else None,
             "goal": dict(self._goal) if self._goal else None,
+            "held_out": dict(self._held["summary"]) if self._held else None,
             "connections": ({"checked": len(self._connections),
                              "rebuilt": sum(1 for c in self._connections.values() if c["rebuilt"]),
                              "left": [n for n, c in self._connections.items() if c["faults"]][:8]}
                             if self._connections else None),
             "qualification": ({"verdict": self._qual["verdict"], "failed": self._qual["failed"],
-                               "basis": self._qual["basis"]} if self._qual else None),
+                               "basis": self._qual["basis"],
+                               "strength": self._qual.get("strength")} if self._qual else None),
         }
 
     def _missing_now(self):
@@ -2953,7 +2996,10 @@ class Session:
         # An app's answer is the app, not the call of one function that happened to be built
         # under the same prompt (live build a5a5e63eae answered "verify that the project is
         # complete" by calling cmd-amortize and reported it done at no cost).
-        cached = None if self._has_entry() else self.registry.find_cached(self.prompt)
+        # ...and not after a build that did not end as done: "try again" sent a fifth time was
+        # answered from the cache as a success, with the call of the fourth, failed build.
+        cached = None if self._has_entry() or self.prior_unfinished \
+            else self.registry.find_cached(self.prompt)
         if cached:
             self.emit("decision", action="cache", plan={
                 "why": "this exact prompt was solved before by tool '%s': "
@@ -3021,6 +3067,10 @@ class Session:
             if facts:
                 note += (" PROOF FACTS - the saved app was tried just now and fails these; a plan that "
                          "leaves them as they are is not done: " + " ".join(facts)[:1500])
+        if self.prior_missing:
+            note += (" THE LAST BUILD OF THIS PROJECT DID NOT END AS DONE. A review of it against the "
+                     "user's words found this still missing, and this build has to deliver it: "
+                     + "; ".join(self.prior_missing)[:1200] + ".")
         note += self._shared_facts()
         if self._app and self.use_advice:
             note += (" Every step that reads or writes stored data states the SAME row layout in its "
@@ -3053,6 +3103,17 @@ class Session:
             elif not self._run_steps(plan):
                 return
             self._recover()                  # what failed is tried again, with the evidence
+            if not self._app and self._failed_steps:
+                # recovery could not build it either: now it is the user's turn
+                left = list(dict.fromkeys(self._failed_steps))
+                name = next((n for n in left if not (self._step_fail.get(n) or {}).get("skipped")), left[0])
+                fail = self._step_fail.get(name) or {}
+                self.state = "failed"
+                # its last failure that says something, not "the same code as before"
+                self.emit("gave_up", detail=self._evidence.get(name.lower()) or fail.get("detail", ""),
+                          hint=fail.get("hint", ""),
+                          attempts=fail.get("attempts", 0), step=True, name=name, left=left)
+                return
             if self._app and self._failed_steps and not self._has_entry():
                 # nothing to try the app through: the entry point itself could not be built
                 self.state = "failed"
@@ -3071,7 +3132,7 @@ class Session:
                 "All planned helper tools are built and saved. Now finish the "
                 "original goal: reply with action use and a call of the "
                 "top-level tool using literal data from the goal, or build "
-                "one last small tool that composes them."), "final")
+                "one last small tool that composes them." + self._own_example()), "final")
         prelude = self.registry.prelude()
         action = plan.get("action")
         self.emit("decision", action=action, plan=plan)
@@ -3321,6 +3382,13 @@ class Session:
                       "than %d steps" % self._max_steps, hint="", attempts=1)
             return False
         self.max_calls = MAX_MODEL_CALLS_PLAN
+        # A value that passed is frozen so that a REPAIR cannot bend a test to fit wrong code. A
+        # plan is a decision to change the function: what it returned before is no longer owed
+        # (live build ac9b924383 could not extend a table because NIL had passed one round earlier).
+        planned = {(x.get("name") or "").lower() for x in steps}
+        for call in [c for c in self._frozen if (re.match(r"\s*\(\s*([^\s()]+)", c) or [None, ""])[1].lower()
+                     in planned]:
+            del self._frozen[call]
         self.emit("decision", action="plan", plan={
             "why": "this goal needs several functions: building %d small "
                    "tools, each with its own tests" % len(steps)})
@@ -3336,27 +3404,30 @@ class Session:
                 self._in_step = False
                 self._pending = set()
         pool = self._draft_ahead(steps)
+        deps, failed_here = step_deps(steps), set()
         try:
             for i, step in enumerate(steps, 1):
                 self.emit("step", i=i, n=len(steps), name=step.get("name", ""),
                           spec=step["spec"])
                 self._later = {(x.get("name") or "").lower() for x in steps[i:]}
-                if not self._build_step(step, 0):
-                    fail = getattr(self, "_last_failure", {}) or {}
-                    if self._fixing or self._recovering or self._app:
-                        # One part failing must not leave the app unwired: note it,
-                        # build the rest, and report the gap at the end. A change
-                        # asked for by the screenshot check simply stays unmade.
-                        (self._fix_failed if self._fixing else self._failed_steps).append(
-                            step.get("name", ""))
-                        self.emit("step_failed", name=step.get("name", ""),
-                                  detail=fail.get("detail", "")[:400])
-                        continue
-                    self.state = "failed"
-                    self.emit("gave_up", detail=fail.get("detail", ""),
-                              hint=fail.get("hint", ""),
-                              attempts=fail.get("attempts", 0), step=True)
-                    return False
+                blocked = [] if self._app else [names[j] for j in deps[i - 1] if names[j] in failed_here]
+                if blocked or not self._build_step(step, 0):
+                    # One part failing ends neither an app nor any other plan: it is noted, the
+                    # parts that do not need it are built, and a recovery round takes it up
+                    # with what was seen. (A plan that was not an app used to stop here and
+                    # wait for the user.) A part that calls a failed one is not attempted: it
+                    # could only fail on the missing function. A change asked for by the
+                    # screenshot check simply stays unmade.
+                    fail = ({"detail": "not built: it calls %s, which could not be built"
+                             % ", ".join(blocked), "hint": "", "attempts": 0, "skipped": True}
+                            if blocked else dict(getattr(self, "_last_failure", {}) or {}))
+                    failed_here.add(names[i - 1])
+                    self._step_fail[step.get("name", "")] = fail
+                    (self._fix_failed if self._fixing else self._failed_steps).append(
+                        step.get("name", ""))
+                    self.emit("step_failed", name=step.get("name", ""),
+                              detail=fail.get("detail", "")[:400])
+                    continue
                 self._connect(step)
         finally:
             self._in_step = False
@@ -3405,6 +3476,12 @@ class Session:
                             out[i] = {"skipped": True, "detail":
                                       "not built: an earlier step of the plan failed"}
                             return
+                        blocked = [] if self._app else [names[j] for j in deps[i] if out[j] is not None]
+                        if blocked:
+                            out[i] = {"skipped": True, "hint": "", "attempts": 0, "detail":
+                                      "not built: it calls %s, which could not be built"
+                                      % ", ".join(blocked)}
+                            return
                         self.emit("step", i=i + 1, n=len(steps), name=name,
                                   spec=step["spec"], lane=name)
                         ok = self._build_step(step, 0)
@@ -3412,7 +3489,6 @@ class Session:
                             self._connect(step)
                         if not ok:
                             out[i] = dict(self._last_failure or {})
-                            self._halt = self._halt or not self._app
                     finally:
                         self._tl.turn = False
             except BaseException as exc:  # noqa: BLE001 - re-raised by the coordinator
@@ -3433,27 +3509,15 @@ class Session:
         if errors:
             raise next((e for e in errors if isinstance(e, Cancelled)), None) or \
                 next((e for e in errors if isinstance(e, BudgetExhausted)), errors[0])
-        stop = at = None
         for i, fail in enumerate(out):
             if fail is None:
                 continue
-            if self._fixing:
-                # a change asked for by the screenshot check: the saved version stays
-                self._fix_failed.append(names[i])
-                self.emit("step_failed", name=names[i], detail=(fail.get("detail") or "")[:400])
-            elif self._recovering or self._app:
-                # One part failing must not leave the app unwired: note it and
-                # report the gap at the end. The other lanes went on regardless.
-                self._failed_steps.append(names[i])
-                self.emit("step_failed", name=names[i], detail=(fail.get("detail") or "")[:400])
-            elif stop is None or (stop.get("skipped") and not fail.get("skipped")):
-                stop, at = fail, i
-        if stop is None:
-            return True
-        self.state = "failed"
-        self.emit("gave_up", detail=stop.get("detail", ""), hint=stop.get("hint", ""),
-                  attempts=stop.get("attempts", 0), step=True, lane=names[at])
-        return False
+            # A part that failed is noted and reported at the end; the other lanes went on
+            # regardless. A change asked for by the screenshot check leaves the saved version.
+            self._step_fail[names[i]] = dict(fail)
+            (self._fix_failed if self._fixing else self._failed_steps).append(names[i])
+            self.emit("step_failed", name=names[i], detail=(fail.get("detail") or "")[:400])
+        return True
 
     def _await_callees(self, step, plan):
         """Wait for planned functions this draft calls that are still being built.
@@ -3839,8 +3903,8 @@ class Session:
 
     # Proofs that decide whether a build ends as done (the others are reported only):
     # a look at screenshots is a model's opinion and never fails a build by itself.
-    DECIDING_PROOFS = ("answers", "wired", "commands", "replay", "state", "integration", "visitor",
-                       "fit", "requirements", "goal")
+    DECIDING_PROOFS = ("answers", "wired", "commands", "replay", "state", "integration", "heldout",
+                       "visitor", "fit", "requirements", "goal")
 
     def _qualify(self, announce=True):
         """Collect the proofs of doneness for the app as it is saved now (see qualify.py)."""
@@ -3870,7 +3934,8 @@ class Session:
             reqs=self._reqs["summary"] if self._reqs else None,
             screens=self._visual["done"] if self._visual["checked"] else None,
             command=command, state=self._web_state,
-            integ=self._integ["summary"] if self._integ else None)
+            integ=self._integ["summary"] if self._integ else None,
+            heldout=self._held["summary"] if self._held else None)
         self._state_note = (self._qual.get("counts") or {}).get("state_facts") or ""
         self._real_rows = self._qual.get("real_rows") or {}
         look = (self._qual["verdict"], [(p["id"], p["ok"], p["detail"]) for p in self._qual["proofs"]])
@@ -3902,6 +3967,7 @@ class Session:
             return
         self._retire_orphans()
         self._qualify()                            # with the last look at the screenshots in it
+        self._reveal_held()
         failed = self._disproven()
         if failed and self.state == "running":
             self.state, self._incomplete = "failed", True
@@ -3911,8 +3977,16 @@ class Session:
                     " If an integration test expects the wrong thing, change or delete it under "
                     "'Your requirements'." if any(i == "integration" for i, _ in failed) else ""))
 
-    def _ask_review(self):
-        """Ask whether what is saved does what the user asked: the list of what is missing, or None."""
+    def _ask_review(self, only=None):
+        """Ask whether what is saved does what the user asked: the list of what is missing, or None.
+
+        ONLY holds the points an earlier review of this build found; the question
+        is then which of THOSE are still open, and nothing new may be raised. In
+        the first live builds every round met the point it was given and was
+        handed a stricter one (give the capacity; then the voltage; then "a table
+        cannot hold every battery"), so no build could end. What a build owes is
+        what its first review found.
+        """
         goals = [g for g in dict.fromkeys(list(self.prior_goals or []) + [self.prompt]) if g][-4:]
         lines = []
         for tool in [t for t in self.registry.load() if not t.get("kit")][-24:]:
@@ -3925,18 +3999,35 @@ class Session:
         shown = next((e for e in reversed(self.events) if e["kind"] == "result"), None)
         answer = "%s => %s" % (shown.get("call"), shown.get("value") if shown.get("ok") else
                                "an error: %s" % str(shown.get("error"))[:160]) if shown else "nothing"
+        again = ""
+        if only:
+            again = ("\nAN EARLIER REVIEW OF THIS BUILD FOUND THE POINTS BELOW MISSING, AND THEY WERE WORKED "
+                     "ON SINCE. Check ONLY these points against what is built now. List the ones that "
+                     "are still missing, in the same words, and raise nothing new; when none of them "
+                     "is, \"met\" is true.\n%s" % "\n".join("- " + p for p in only))
         try:
             reply = self._ask("WHAT THE USER ASKED (latest last):\n%s\nWHAT WAS BUILT:\n%s\n"
-                              "THE ANSWER SHOWN TO THE USER: %s" % (
+                              "THE ANSWER SHOWN TO THE USER: %s%s" % (
                                   "\n".join("- " + " ".join(g.split())[:500] for g in goals),
-                                  "\n".join(lines)[:6000], answer[:500]),
+                                  "\n".join(lines)[:6000], answer[:500], again),
                               "goal-review", system=GOAL_REVIEW_SYSTEM)
         except BadReply:
             return None
         missing = reply.get("missing") if isinstance(reply, dict) else None
         if not isinstance(missing, list):
             return None
-        return [" ".join(str(x).split())[:300] for x in missing if str(x).strip()][:4]
+        if reply.get("met") is True:
+            return []                             # the reviewer's own verdict; its remarks are not demands
+        found = [" ".join(str(x).split())[:300] for x in missing if str(x).strip()][:4]
+        return found[:len(only)] if only else found
+
+    def _own_example(self):
+        """A sentence that hands the user's earlier words to the call that answers them."""
+        earlier = [g for g in dict.fromkeys(self.prior_goals or []) if g and g != self.prompt][-3:]
+        if not earlier:
+            return ""
+        return (" When the goal itself names no example, use the latest one in the user's earlier "
+                "words, with their numbers: " + " | ".join(" ".join(g.split())[:240] for g in earlier))
 
     def _goal_round(self, missing):
         """Plan and build what a review found missing, then answer the user's question again."""
@@ -3958,7 +4049,8 @@ class Session:
                 return False
             final = self._ask(self._user_prompt(
                 "The functions are built and saved. Now answer the user's goal: reply with action use "
-                "and ONE call of the top-level tool on the user's own example or numbers."), "final")
+                "and ONE call of the top-level tool on the user's own example or numbers."
+                + self._own_example()), "final")
             if final.get("action") == "use" and final.get("call"):
                 self._finish_call(final["call"], self.registry.prelude())
             return True
@@ -3978,39 +4070,65 @@ class Session:
         (at most MAX_GOAL_ROUNDS times); what is still missing after that keeps
         the build from ending as done.
         """
-        if not self.goal_check or self._app or not self._built or self.state != "running" \
+        wants = bool((self.requirements_text or "").strip())
+        if not (self.goal_check or wants) or self._app or not self._built or self.state != "running" \
                 or self._has_entry():
             return
         self.max_calls = max(self.max_calls, MAX_MODEL_CALLS_PLAN)
-        missing, rounds, asked = None, 0, 0
-        while self._budget_left():
-            found = self._ask_review()
-            if found is None:
-                break                             # no usable review: nothing is concluded from it
-            missing, asked = found, asked + 1
-            self.emit("goal_review", met=not missing, missing=missing, round=asked,
-                      fixing=bool(missing) and rounds < MAX_GOAL_ROUNDS and self._budget_left())
-            if not missing or rounds >= MAX_GOAL_ROUNDS or not self._budget_left():
+        missing, unmet, rounds, asked, owed, reviewed = None, [], 0, 0, None, False
+        while True:
+            if wants:
+                # the user's own lines (a line may call a function: call (f 1) gives 2) come first
+                self._check_requirements()
+                unmet = ["the user's requirement '%s' is not met (%s)" % (
+                    " ".join(r["text"].split()), (r.get("detail") or "").rstrip("."))
+                    for r in self._unmet() if r.get("ok") is False][:4]
+            found = None
+            if self.goal_check and self._budget_left():
+                found = self._ask_review(only=owed)
+                if found is not None:
+                    reviewed = True
+                    if owed is None:
+                        owed = list(found)        # what this build owes; later reviews raise nothing new
+                    missing, asked = found, asked + 1
+                    self.emit("goal_review", met=not missing, missing=missing, round=asked,
+                              fixing=bool(missing) and rounds < MAX_GOAL_ROUNDS and self._budget_left())
+            todo = unmet + list(found or [])
+            if not todo or rounds >= MAX_GOAL_ROUNDS or not self._budget_left():
                 break
             rounds += 1
-            if not self._goal_round(missing):
+            if not self._goal_round(todo):
                 break
-        if missing is None:
-            return
-        self._goal = {"met": not missing, "missing": missing, "rounds": rounds}
-        label = "A review of what was built against your words finds nothing missing"
-        proof = {"id": "goal", "label": label, "ok": not missing,
-                 "detail": "; ".join(missing)[:600] if missing else
-                 "the functions, their tests and the answer were read against what you asked"}
-        self._qual = {"verdict": "disproven" if missing else "proven", "proofs": [proof], "transcript": [],
-                      "failed": ["goal"] if missing else [], "counts": {}, "implicated": [], "real_rows": {},
-                      "basis": ("Not done: %s." % label.replace("finds nothing", "found something") if missing
-                                else "Proven by: %s." % label)}
+        if not reviewed and not wants:
+            return                                # no usable review and no requirements: nothing is concluded
+        proofs = []
+        if wants and self._reqs:
+            counts = self._reqs["summary"]
+            bad = counts["unmet"] + counts["unchecked"]
+            proofs.append({"id": "requirements", "label": "The requirements you wrote are met", "ok": not bad,
+                           "source": "user", "detail": (
+                               "%d of %d not met%s" % (counts["unmet"], counts["total"], ", %d could not be "
+                                                       "checked" % counts["unchecked"] if counts["unchecked"] else "")
+                               if bad else "all %d met, checked as written" % counts["total"])})
+        if reviewed:
+            self._goal = {"met": not missing, "missing": missing, "rounds": rounds}
+            proofs.append({"id": "goal", "label": "A review of what was built against your words finds nothing "
+                           "missing", "ok": not missing, "source": "model", "detail": (
+                               "; ".join(missing)[:600] if missing else
+                               "the functions, their tests and the answer were read against what you asked")})
+        failed = [x for x in proofs if x["ok"] is False]
+        verdict = "disproven" if failed else "proven"
+        self._qual = {"verdict": verdict, "proofs": proofs, "transcript": [],
+                      "failed": [x["id"] for x in failed], "counts": {}, "implicated": [], "real_rows": {},
+                      "strength": qualify.strength_of(proofs, verdict),
+                      "basis": ("Not done: %s." % "; ".join(x["label"] for x in failed) if failed
+                                else "Proven by: %s." % "; ".join(x["label"] for x in proofs))}
         self.emit("qualification", **self._qual)
-        if missing:
+        if failed:
             self.state, self._incomplete = "failed", True
+            said = unmet + list(missing or [])
             self.emit("gave_up", attempts=0, app=True, detail=(
-                "Built, but it does not yet do what you asked: " + "; ".join(missing)[:900]),
+                "Built, but it does not yet do what you asked: " + "; ".join(said)[:900]),
                 hint="Continue works on exactly these.")
 
     def _retire_orphans(self):
@@ -4122,11 +4240,25 @@ class Session:
                     raise RuntimeError(out.get("error") or "the command failed")
                 return out.get("output") or ""
             return run_words
+        prelude = self.registry.prelude()
+        saved = {t["name"] for t in self.registry.load()}
+
+        def fresh_call():
+            def evaluate(form):
+                problem = safe_call_check(form, saved)
+                if problem:
+                    raise RuntimeError("not a call of a saved function: %s" % problem)
+                env = self.worker_fn("%s\n%s" % (prelude, form) if prelude else form)
+                if not env.get("ok"):
+                    raise RuntimeError(" ".join(str(env.get("error") or "the call failed").split())[:300])
+                return str(env.get("return_value") or "")
+            return evaluate
         names = {t["name"] for t in self.registry.load()}
         try:
             results = requirements.run(
                 reqs, app=fresh_app if "handle-request" in names else None,
-                command=fresh_command if "handle-command" in names else None)
+                command=fresh_command if "handle-command" in names else None,
+                call=fresh_call if names else None)
         finally:
             for folder in folders:
                 shutil.rmtree(folder, ignore_errors=True)
@@ -4142,6 +4274,42 @@ class Session:
         results, _ = self._run_lines(text)
         self._integ = {"results": results, "summary": requirements.summarize(results)}
         self.emit("integration", results=results, **self._integ["summary"])
+        self._check_held()
+
+    def _check_held(self):
+        """Run the checks the builder is never shown."""
+        import requirements
+        if not (self.held_out_text or "").strip():
+            self._held = None
+            return
+        results, _ = self._run_lines(self.held_out_text)
+        self._held = {"results": results, "summary": requirements.summarize(results)}
+        self.emit("held_out", results=results, **self._held["summary"])
+
+    def _reveal_held(self):
+        """A held-out check that still fails at the end has done its work: it becomes a shown test.
+
+        Kept back for good, it would hold the build at "not done" with nothing
+        the builder could act on. From the next build on it is an integration
+        test like the others; the checks that pass stay held out.
+        """
+        failing = [" ".join(r["text"].split()) for r in (self._held or {}).get("results", [])
+                   if r.get("ok") is False]
+        if not failing:
+            return
+        shown = [x.strip() for x in (self.integration_text or "").splitlines() if x.strip()]
+        kept_back = [x.strip() for x in (self.held_out_text or "").splitlines()
+                     if x.strip() and " ".join(x.split()) not in failing]
+        self.integration_text = "\n".join(shown + [x for x in failing if x not in shown]) + "\n"
+        self.held_out_text = "\n".join(kept_back) + ("\n" if kept_back else "")
+        for saver, text in ((self.save_integration, self.integration_text),
+                            (self.save_held_out, self.held_out_text)):
+            if saver:
+                try:
+                    saver(text)
+                except Exception:  # noqa: BLE001
+                    pass
+        self.emit("heldout_revealed", lines=failing)
 
     def _check_requirements(self):
         """Run the user's own requirements against the finished app, as written."""
@@ -4169,11 +4337,25 @@ class Session:
                     raise RuntimeError(out.get("error") or "the command failed")
                 return out.get("output") or ""
             return run_words
+        prelude = self.registry.prelude()
+        saved = {t["name"] for t in self.registry.load()}
+
+        def fresh_call():
+            def evaluate(form):
+                problem = safe_call_check(form, saved)
+                if problem:
+                    raise RuntimeError("not a call of a saved function: %s" % problem)
+                env = self.worker_fn("%s\n%s" % (prelude, form) if prelude else form)
+                if not env.get("ok"):
+                    raise RuntimeError(" ".join(str(env.get("error") or "the call failed").split())[:300])
+                return str(env.get("return_value") or "")
+            return evaluate
         names = {t["name"] for t in self.registry.load()}
         try:
             results = requirements.run(
                 reqs, app=fresh_app if "handle-request" in names else None,
-                command=fresh_command if "handle-command" in names else None)
+                command=fresh_command if "handle-command" in names else None,
+                call=fresh_call if names else None)
         finally:
             for folder in folders:
                 shutil.rmtree(folder, ignore_errors=True)
@@ -4191,6 +4373,7 @@ class Session:
         return (bool(self._smoke_ok), (self._accept or {}).get("failed", 0)
                 + len([r for r in self._unmet() if r.get("ok") is False])
                 + int(((self._integ or {}).get("summary") or {}).get("unmet") or 0)
+                + int(((self._held or {}).get("summary") or {}).get("unmet") or 0)
                 + self._proof_debt())
 
     def _proof_debt(self):
@@ -4261,6 +4444,13 @@ class Session:
         unproven += ["the integration test '%s' fails (%s)" % (
             " ".join(r["text"].split()), (r.get("detail") or "").rstrip("."))
             for r in (self._integ or {}).get("results", []) if r.get("ok") is False][:4]
+        held = [r["text"] for r in (self._held or {}).get("results", []) if r.get("ok") is False]
+        if held:
+            words = sorted(qualify.typed_commands(held)) or sorted(
+                {p for text in held for p in re.findall(r"(?:GET|POST)\s+(/\S*)", text, re.I)})
+            unproven.append("%d check%s that the builder is not shown fail%s; %s what is typed there: %s"
+                            % (len(held), "" if len(held) == 1 else "s", "s" if len(held) == 1 else "",
+                               "this is" if len(words) == 1 else "these are", ", ".join(words) or "unknown"))
         idle = ((self._qual or {}).get("counts") or {}).get("uncovered") or []
         found = ["the user's requirement '%s' is not met (%s)" % (
                      " ".join(r["text"].split()), (r.get("detail") or "").rstrip(".")) for r in unmet[:5]] + \
@@ -4434,8 +4624,18 @@ class Session:
             if sure not in kept + have:
                 kept.append(sure)
         kept = kept[:limit]
-        self.emit("integration_written", lines=kept, dropped=len(lines or []) - len(kept), added=bool(have),
-                  eased=eased[:8])
+        hidden = []
+        if self.hold_out and not have and len(kept) >= 4 and not (self.held_out_text or "").strip():
+            hidden = kept[2::3]
+            kept = [x for x in kept if x not in hidden]
+            self.held_out_text = "\n".join(hidden) + "\n"
+            if self.save_held_out:
+                try:
+                    self.save_held_out(self.held_out_text)
+                except Exception:  # noqa: BLE001 - they still count for this build
+                    pass
+        self.emit("integration_written", lines=kept, dropped=len(lines or []) - len(kept) - len(hidden),
+                  added=bool(have), eased=eased[:8], held_out=len(hidden))
         if not kept:
             return
         self.integration_text = "\n".join(have + kept) + "\n"
@@ -4447,7 +4647,8 @@ class Session:
 
     def _integration_blame(self):
         """The handlers of the commands that failing integration tests type."""
-        failing = [r["text"] for r in (self._integ or {}).get("results", []) if r.get("ok") is False]
+        failing = [r["text"] for r in (self._integ or {}).get("results", []) if r.get("ok") is False] + \
+            [r["text"] for r in (self._held or {}).get("results", []) if r.get("ok") is False]
         if not failing:
             return set()
         tools = self.registry.load()
@@ -5882,7 +6083,7 @@ class SessionManager:
                 % (meta["name"], " - " + meta["description"] if meta["description"] else ""))
 
     def start(self, prompt, mode="demo", compare=False, expected=None,
-              oracle=None, project=None, visual=True):
+              oracle=None, project=None, visual=True, advice=True):
         """Returns (session_id, None) or (None, error).
 
         ``compare`` also runs the same prompt against an empty, throwaway
@@ -5921,7 +6122,15 @@ class SessionManager:
             sess.visual = sess.visual and bool(visual)
             sess.requirements_text = self.projects.requirements(sess.project)
             sess.integration_text = self.projects.integration(sess.project)
+            sess.held_out_text = self.projects.held_out(sess.project)
+            # Guidance on how to structure an app (one function per command or page). Without
+            # it the model chooses the structure itself; the proofs do not depend on either.
+            sess.use_advice = bool(advice) and os.environ.get("GRAYGOO_ADVICE", "1").strip().lower() \
+                not in ("0", "off", "false", "no")
             if mode == "live":
+                sess.hold_out = True
+                sess.save_held_out = (lambda text, pid=sess.project:
+                                      self.projects.set_held_out(pid, text))
                 sess.goal_check = True
                 sess.write_integration = True
                 sess.save_integration = (lambda text, pid=sess.project:
@@ -5932,6 +6141,11 @@ class SessionManager:
             if sess.project != projects.BUILTIN:
                 sess.prior_goals = [r.get("prompt") for r in self.history(60, sess.project)
                                     if r.get("mode") == mode and r.get("arm") == "main"]
+                last = self._last_summary(sess.project, mode)
+                if last is not None:
+                    sess.prior_unfinished = last.get("outcome") != "success"
+                    goal = (last.get("verification") or {}).get("goal") or {}
+                    sess.prior_missing = [str(x) for x in goal.get("missing") or []][:4]
             sess.compare = "running" if compare else None
             self._sessions[sess.id] = sess
         threading.Thread(target=self._chain, args=(sess, compare),
@@ -6055,6 +6269,26 @@ class SessionManager:
                     "elapsed_ms": out.get("elapsed_ms")}) + "\n")
         except OSError:
             pass
+
+    def _last_summary(self, project, mode):
+        """The summary of the newest main build of PROJECT in MODE, or None."""
+        rows = [r for r in self.history(60, project) if r.get("mode") == mode and r.get("arm") == "main"]
+        if not rows:
+            return None
+        found = None
+        try:
+            text = (AGENT_DIR / "sessions" / (rows[-1]["session_id"] + ".jsonl")).read_text(encoding="utf-8")
+        except OSError:
+            return None
+        for line in text.splitlines():
+            if '"summary"' in line:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("kind") == "summary":
+                    found = ev
+        return found
 
     def history(self, limit=40, project=None):
         """Per-session summaries from the JSONL logs, oldest first.

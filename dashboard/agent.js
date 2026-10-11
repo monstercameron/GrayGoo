@@ -2415,6 +2415,14 @@
       else if (rqNo > 0) row(BAD, "v-warn", rqMet + " of your " + rq.total + " requirements met; " + rqNo + " could not be checked (see the lines marked in Your requirements)");
       else row(OK, "v-ok", "all " + rq.total + " of your own requirements are met, checked as you wrote them");
     }
+    var ho = v.held_out && typeof v.held_out === "object" ? v.held_out : null;
+    if (ho && ho.total > 0) {
+      if (ho.unmet > 0) row(BAD, "v-warn", ho.unmet + " of " + ho.total + " held-out checks fail (checks the model was never shown)");
+      else if (ho.met > 0) row(OK, "v-ok", "all " + ho.met + " held-out checks pass (the model was never shown them)");
+    }
+    var qs = m.qualification && typeof m.qualification === "object" ? m.qualification : null;
+    if (qs && qs.verdict === "proven" && qs.strength === "self")
+      row(NA, "v-muted", "everything that passed was written by the builder itself; write requirements to have it checked against your own");
     var gl = v.goal && typeof v.goal === "object" ? v.goal : null;
     if (gl) {
       var glMissing = Array.isArray(gl.missing) ? gl.missing : [];
@@ -2484,6 +2492,7 @@
     if (qualProofs.some(function (p) { return p && p.id === "commands"; }))
       verRows = verRows.filter(function (r) { return r.text !== "the app was not tried like a visitor"; });
     var verdict = qual ? String(qual.verdict || "") : "";
+    var strength = qual ? String(qual.strength || "") : "";
     var verBad = verRows.some(function (r) { return r.mark === "✗"; });
     // a finished run with missing features, a failed self-check, unfixed screenshot problems or a failed independent check is not a plain success
     var notProven = m.outcome === "success" && verdict === "unproven";
@@ -2500,7 +2509,10 @@
     } else if (m.outcome === "success") {
       title = m.flow === "cache" ? "\u2713 Answered instantly from a saved tool"
         : m.flow === "reuse" ? "\u2713 Answered by a tool you already had"
-        : m.flow === "plan" ? (verdict === "proven" ? "\u2713 Done and proven: built " : "\u2713 Done: built ") + m.built.length + " tools and put them together"
+        : m.flow === "plan" ? (verdict !== "proven" ? "\u2713 Done: built "
+            : strength === "user" ? "\u2713 Done, and your requirements are met: built "
+            : strength === "independent" ? "\u2713 Done, and it passes checks its builder never saw: built "
+            : "\u2713 Done by its own tests only: built ") + m.built.length + " tools and put them together"
         : m.flow === "build" ? "\u2713 Built and verified a new tool" : "\u2713 Done";
     } else if (m.outcome === "cancelled") {
       title = "Cancelled";
@@ -2919,6 +2931,16 @@
       case "spend_resumed":
         say("Going on: you allowed more, up to $" + (Number(ev.limit_usd) || 0).toFixed(2) + " for this build.", "note");
         break;
+      case "held_out":
+        var hoRes = Array.isArray(ev.results) ? ev.results : [];
+        say("Ran the " + hoRes.length + " held-out check" + (hoRes.length === 1 ? "" : "s") + " that no prompt ever showed the model: " + (ev.met || 0) + " pass" + (ev.unmet ? ", " + ev.unmet + " fail" : "") + ".", ev.unmet ? "fail" : "pass");
+        break;
+      case "heldout_revealed":
+        var hrLines = Array.isArray(ev.lines) ? ev.lines : [];
+        say(hrLines.length + " held-out check" + (hrLines.length === 1 ? "" : "s") + " still failed at the end. " + (hrLines.length === 1 ? "It is" : "They are") + " now shown as integration tests, so the next build can work on " + (hrLines.length === 1 ? "it" : "them") + ":", "note");
+        hrLines.slice(0, 6).forEach(function (line) { say(String(line), "note"); });
+        loadIntegration();
+        break;
       case "goal_review":
         var grMissing = Array.isArray(ev.missing) ? ev.missing : [];
         if (!grMissing.length) say("Reviewed what was built against your words" + (ev.round > 1 ? " again" : "") + ": nothing is missing.", "pass");
@@ -2949,6 +2971,7 @@
       case "integration_written":
         var iwLines = Array.isArray(ev.lines) ? ev.lines : [];
         var iwEased = Array.isArray(ev.eased) ? ev.eased : [];
+        if (ev.held_out) say(ev.held_out + " more check" + (ev.held_out === 1 ? " was" : "s were") + " written and kept back: the model is never shown " + (ev.held_out === 1 ? "it" : "them") + ".", "note");
         if (iwEased.length) say(iwEased.length + " of the lines expected a heading or a format nobody has seen the app print yet; " + (iwEased.length === 1 ? "it was" : "they were") + " kept as \u201cworks\u201d checks (the commands must run without an error).", "note");
         if (iwLines.length) loadIntegration();      // the box shows what was just stored
         if (iwLines.length) {
@@ -3483,7 +3506,7 @@
     state.view = "session"; state.picked = true; state.pick = null;
     setBusy(true);
     var visual = $("ag-visual").checked && !$("ag-visual").disabled;
-    return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle, project: state.project, visual: visual }).then(function (r) {
+    return api("POST", "/api/agent/prompt", { prompt: prompt, mode: mode, compare: compare, expected: expected, oracle: oracle, project: state.project, visual: visual, advice: !$("ag-advice") || $("ag-advice").checked }).then(function (r) {
       if (r.status !== 200) {
         setBusy(false);
         if (/spending limit/i.test((r.data && r.data.error) || "")) { loadConfig(); $("ag-spend").scrollIntoView({ block: "center" }); }
@@ -3757,6 +3780,7 @@
       list.appendChild(h("li", "", "Line " + e.line + " could not be read: " + String(e.problem || "") ));
     });
     if (data && typeof data.integration === "string") showIntegration(data.integration, "");
+    showHeld(data && data.held_out);
     $("ag-reqs-status").textContent = saved
       ? (n ? "Saved. " + n + " requirement" + (n === 1 ? "" : "s") + " will be checked after the next build." : "Saved. This project has no requirements.")
       : "";
@@ -3771,11 +3795,20 @@
     if ($("ag-integ-badge")) $("ag-integ-badge").textContent = lines.length ? " + " + lines.length + " integration test" + (lines.length === 1 ? "" : "s") + " from the agent" : "";
     $("ag-integ-status").textContent = status || "";
   }
+  function showHeld(lines) {
+    lines = Array.isArray(lines) ? lines : [];
+    if (!$("ag-held")) return;
+    $("ag-held").hidden = !lines.length;
+    if (lines.length) $("ag-integ").hidden = false;
+    $("ag-held-sum").textContent = lines.length + " held-out check" + (lines.length === 1 ? "" : "s") + " the model is never shown";
+    clear($("ag-held-list"));
+    lines.forEach(function (line) { $("ag-held-list").appendChild(h("li", "", String(line))); });
+  }
   function loadIntegration() {
     if (window.location.protocol === "file:") return;
     var pid = state.project;
     api("GET", "/api/agent/projects/" + encodeURIComponent(pid) + "/integration").then(function (r) {
-      if (pid === state.project && r.status === 200) showIntegration(r.data.text, "");
+      if (pid === state.project && r.status === 200) { showIntegration(r.data.text, ""); showHeld(r.data.held_out); }
     }).catch(function () {});
   }
   function saveIntegration() {

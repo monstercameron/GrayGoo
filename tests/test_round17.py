@@ -51,7 +51,7 @@ class ReminderTests(unittest.TestCase):
             script.fixing = True
             ti.run(script, tmp)
             for prompt in (p for p in script.prompts if "GOAL: (cmd-" in p):
-                self.assertIn("COMMAND-LINE APP: a command tool is (cmd-<word> args state now)", prompt)
+                self.assertIn("COMMAND-LINE APP: A command tool is (cmd-<word> args state now)", prompt)
                 self.assertNotIn("WEB APP: REQUEST is a plist", prompt)
                 self.assertNotIn("html-page", prompt)
 

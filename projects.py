@@ -201,6 +201,30 @@ class ProjectStore:
             tmp.replace(path)
         return True, None
 
+    def held_out_path(self, project_id):
+        """Where a project keeps the checks its builder is never shown (same language as requirements)."""
+        return self.requirements_path(project_id).with_name("held-out.txt")
+
+    def held_out(self, project_id):
+        try:
+            return self.held_out_path(project_id).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    def set_held_out(self, project_id, text):
+        """``(ok, error)``. Saves the held-out checks of a project."""
+        if not isinstance(text, str) or len(text) > self.MAX_REQUIREMENTS_CHARS:
+            return False, "held-out checks must be text of at most %d characters" % self.MAX_REQUIREMENTS_CHARS
+        if project_id != BUILTIN and not self.exists(project_id):
+            return False, "unknown project"
+        path = self.held_out_path(project_id)
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(text.encode("utf-8"))
+            tmp.replace(path)
+        return True, None
+
     def integration_path(self, project_id):
         """Where a project keeps the integration tests written for it (same language as requirements)."""
         return self.requirements_path(project_id).with_name("integration.txt")

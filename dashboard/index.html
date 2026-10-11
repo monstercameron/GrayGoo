@@ -230,6 +230,7 @@
       </div>
       <p id="ag-proj-hint" class="muted ag-proj-hint"></p>
       <label class="ag-check"><input type="checkbox" id="ag-compare" checked> Also run without memory (on Live this roughly doubles the tokens, about half a cent per prompt)</label>
+      <label class="ag-check" id="ag-advice-row"><input type="checkbox" id="ag-advice" checked> Give the model building advice (one function per command or page). Untick to let it choose its own structure; the proofs are the same either way.</label>
       <label class="ag-check" id="ag-visual-row"><input type="checkbox" id="ag-visual" checked> Check the finished app with screenshots (Live web apps; one or two extra model calls)</label>
       <details class="ag-reqs" id="ag-reqs">
         <summary>Your requirements <span id="ag-reqs-count" class="muted">(none yet)</span><span id="ag-integ-badge" class="muted"></span></summary>
@@ -250,6 +251,11 @@
             <button type="button" id="ag-integ-save" class="ag-ghost">Save integration tests</button>
             <span id="ag-integ-status" class="muted" role="status"></span>
           </div>
+          <details id="ag-held" class="ag-held" hidden>
+            <summary id="ag-held-sum">Held-out checks</summary>
+            <p class="ag-reqs-lede">These were written with the tests above and then kept back: no prompt ever shows them to the model. They are run after every build. One that fails at the end of a build is moved up into the tests above, so the next build can work on it.</p>
+            <ol id="ag-held-list"></ol>
+          </details>
         </div>
         <div id="ag-reqs-help" class="ag-reqs-help">
           <div class="muted">How to write a line</div>

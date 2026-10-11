@@ -27,13 +27,25 @@ Command lines (checked through the command-line app's run_words):
     run "add a" then run "list" prints "a"
     run "add a" then run "list" works        (the commands run without an error)
 
+Call lines (checked through a saved Lisp project's functions). A call line
+evaluates one parenthesised Lisp form and checks what it returns:
+
+    call (battery-life '(:type :aa :count 2 :power-mw 200)) gives "Battery life: 36.00 hours"
+    call (square 12) gives 144
+    call (battery-life '(:type :aa)) shows "hours"
+    call (battery-life '(:type :aa)) does not show "error"
+    call (square 12) works                  (the call completes without a Lisp error)
+
+"gives" compares the printed value (as PRIN1 shows it) with printed_matches,
+which ignores case outside strings and treats numbers as equal within 1e-4.
+
 Sequencing: each line starts from the app's initial state and no cookies. A
 block of lines indented under a line "scenario: some name" shares state and
 cookies in order and counts as one requirement, which passes only when every
 step passes. Comments start with "#" and blank lines are ignored.
 
     parse(text) -> (requirements, errors)
-    run(requirements, app=None, command=None) -> results
+    run(requirements, app=None, command=None, call=None) -> results
     summarize(results) -> counts
     fingerprint(text) -> sha256 hex of the text with line endings normalised
     main(argv)        -> runs a file against a saved project
@@ -43,9 +55,11 @@ step passes. Comments start with "#" and blank lines are ignored.
 import argparse
 import hashlib
 import itertools
+import re
 import shutil
 import sys
 import tempfile
+from fractions import Fraction
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlencode, urljoin, urlsplit
@@ -56,12 +70,26 @@ MAX_DETAIL = 200
 SNIPPET = 120
 WEB_EXAMPLE = 'GET /notes shows "Buy milk"'
 RUN_EXAMPLE = 'run "list" prints "Buy milk"'
+CALL_EXAMPLE = 'call (square 12) gives 144'
 SCENARIO_EXAMPLE = ('scenario: add then list, with the steps indented under it, for example '
                     'run "add Buy milk" then run "list" prints "Buy milk"')
 WEB_WORDS = ("get", "post")
 TEXT_SKIPPED = ("script", "style")
 CHECK_WORDS = ("then", "shows", "does", "answers", "redirects")
 REDIRECTS = (301, 302, 303, 307, 308)
+CALL_WORD = re.compile(r"call\b", re.IGNORECASE)
+GIVES_WORD = re.compile(r"\s*gives(?=\s|$)", re.IGNORECASE)
+KIND_NAMES = {"web": "GET or POST", "command": "run", "call": "call"}
+FACTORY_NAMES = {"web": "web app", "command": "command-line app", "call": "Lisp evaluator"}
+MISSING = {
+    "web": "could not be checked: there is no web app to send GET or POST lines to.",
+    "command": "could not be checked: there is no command-line app to run run lines against.",
+    "call": "could not be checked: there is no Lisp evaluator to run call lines against.",
+}
+NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdDfFsSlL][+-]?\d{1,3})?")
+RATIO = re.compile(r"[+-]?\d+/\d+")
+STRING_LITERAL = re.compile(r'"(?:\\.|[^"\\])*"?', re.DOTALL)
+NUMBER_TOLERANCE = Fraction(1, 10000)
 
 
 class _Bad(Exception):
@@ -275,30 +303,93 @@ def _parse_command(args):
     return {"kind": "command", "words": words, "then": then, "expect": expect, "value": value}
 
 
+def _call_form(line, start):
+    """``(form, end)``: the balanced Lisp form that follows START, and the index just after it.
+
+    Parentheses inside a double-quoted string do not count, and a backslash
+    escapes the character after it inside a string. A ";" is not a comment.
+    """
+    i, n = start, len(line)
+    while i < n and line[i].isspace():
+        i += 1
+    if i >= n or line[i] != "(":
+        raise _Bad("after call comes one Lisp form in parentheses, for example (square 12)")
+    depth, j, quoted = 0, i, False
+    while j < n:
+        ch = line[j]
+        if quoted:
+            if ch == "\\":
+                j += 1                 # the escaped character is part of the string
+            elif ch == '"':
+                quoted = False
+        elif ch == '"':
+            quoted = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return line[i:j + 1], j + 1
+        j += 1
+    if quoted:
+        raise _Bad("a string inside the Lisp form is missing its closing double quote")
+    raise _Bad("the Lisp form after call is missing a closing parenthesis")
+
+
+def _parse_call(line):
+    form, end = _call_form(line, CALL_WORD.match(line).end())
+    rest = line[end:]
+    gives = GIVES_WORD.match(rest)
+    if gives:
+        value = rest[gives.end():].strip()
+        if not value:
+            raise _Bad("gives must be followed by the printed value, for example gives 144")
+        return {"kind": "call", "form": form, "expect": "gives", "value": value}
+    args = _args(rest)
+    head = _arg(args, 0)
+    if _word(head, "works"):
+        expect, value, i = "works", "", 1
+    elif _word(head, "shows"):
+        expect, value, i = "shows", _quoted_text(args, 1), 2
+    elif _word(head, "does") and _word(_arg(args, 1), "not") and _word(_arg(args, 2), "show"):
+        expect, value, i = "not_shows", _quoted_text(args, 3), 4
+    else:
+        raise _Bad("after the Lisp form comes gives VALUE, shows \"text\", does not show \"text\" "
+                   "or works")
+    if i != len(args):
+        raise _Bad("the line has words after the check that it does not use")
+    return {"kind": "call", "form": form, "expect": expect, "value": value}
+
+
 def _problem(reason, head):
     if head in WEB_WORDS:
         example = WEB_EXAMPLE
     elif head == "run":
         example = RUN_EXAMPLE
+    elif head == "call":
+        example = CALL_EXAMPLE
     else:
-        example = "%s, or %s" % (WEB_EXAMPLE, RUN_EXAMPLE)
+        example = "%s, %s, or %s" % (WEB_EXAMPLE, RUN_EXAMPLE, CALL_EXAMPLE)
     return "%s. Example of a valid line: %s." % (reason[:1].upper() + reason[1:], example)
 
 
 def _step(line):
     """The step that LINE describes. Raises _Bad with a full problem sentence."""
     words = line.split()
-    head = words[0].lower() if words else ""
+    is_call = CALL_WORD.match(line) is not None
+    head = "call" if is_call else (words[0].lower() if words else "")
     if line.lower().startswith("scenario:"):
         raise _Bad(_problem("a scenario cannot sit inside another scenario", head))
     try:
+        if is_call:
+            return _parse_call(line)
         args = _args(line)
         first = _bare(args[0]) if args else None
         if first and first.lower() in WEB_WORDS:
             return _parse_web(args)
         if first and first.lower() == "run":
             return _parse_command(args)
-        raise _Bad("a line must start with GET, POST or run")
+        raise _Bad("a line must start with GET, POST, run or call")
     except _Bad as exc:
         raise _Bad(_problem(str(exc), head))
 
@@ -350,8 +441,9 @@ def parse(text):
             if block["kind"] is None:
                 block["kind"] = step["kind"]
             elif block["kind"] != step["kind"]:
-                fail(number, line, "A scenario cannot mix GET or POST lines with run lines. "
-                     "Example of a valid block: %s." % SCENARIO_EXAMPLE)
+                fail(number, line, "A scenario cannot mix %s lines with %s lines. "
+                     "Example of a valid block: %s." % (KIND_NAMES[block["kind"]],
+                                                        KIND_NAMES[step["kind"]], SCENARIO_EXAMPLE))
                 block["broken"] = True
                 continue
             block["steps"].append(step)
@@ -419,13 +511,63 @@ def _shows(html, text):
     return "<" in text and text in str(html)
 
 
+def _clip(text):
+    """A detail sentence: whitespace collapsed, at most MAX_DETAIL characters."""
+    text = _collapse(text)
+    return text if len(text) <= MAX_DETAIL else text[:MAX_DETAIL - 3].rstrip() + "..."
+
+
 def _plain(text):
     """A detail sentence: tags removed, whitespace collapsed, at most MAX_DETAIL characters."""
     text = str(text)
     if "<" in text:
         text = visible_text(text)
-    text = _collapse(text)
-    return text if len(text) <= MAX_DETAIL else text[:MAX_DETAIL - 3].rstrip() + "..."
+    return _clip(text)
+
+
+def _printed_form(text):
+    """TEXT with whitespace runs collapsed and letters lowered outside string literals.
+
+    Text inside a double-quoted string keeps its letter case and its escapes.
+    """
+    parts, last = [], 0
+    for match in STRING_LITERAL.finditer(text):
+        parts.append(text[last:match.start()].lower())
+        parts.append(match.group())
+        last = match.end()
+    parts.append(text[last:].lower())
+    return " ".join("".join(parts).split())
+
+
+def _as_number(text):
+    """The exact value of TEXT when it is one integer, decimal or ratio, else None."""
+    if len(text) > 80:
+        return None
+    try:
+        if NUMBER.fullmatch(text):
+            return Fraction(re.sub("[a-zA-Z]", "e", text))
+        if RATIO.fullmatch(text):
+            return Fraction(text)
+    except (ValueError, ZeroDivisionError, OverflowError):
+        return None
+    return None
+
+
+def printed_matches(expected, actual):
+    """True when the printed value ACTUAL is the printed value EXPECTED.
+
+    Both are compared after collapsing whitespace and lowering letter case
+    outside string literals. Two single numbers (integers, decimals or ratios
+    such as 200/3) also match when they differ by at most 1e-4 of the larger
+    magnitude, so 36 matches 36.0 and 66.6667 matches 200/3.
+    """
+    want, got = _printed_form(str(expected)), _printed_form(str(actual))
+    if want == got:
+        return True
+    x, y = _as_number(want), _as_number(got)
+    if x is None or y is None:
+        return False
+    return abs(x - y) <= NUMBER_TOLERANCE * max(abs(x), abs(y))
 
 
 def _once(app, method, target, jar, fields):
@@ -505,7 +647,35 @@ def _do_command(run_words, step):
     return False, '%s printed "%s", which it must not.' % (label, step["value"])
 
 
-def _run_one(req, app, command):
+def _do_call(evaluate, step):
+    """``(ok, detail)`` for one call step. EVALUATE runs the form and returns its printed value.
+
+    A Lisp error raised by EVALUATE fails the step, and its message is reported.
+    """
+    label = "call %s" % step["form"]
+    try:
+        printed = str(evaluate(step["form"]))
+    except Exception as exc:  # noqa: BLE001 - a Lisp error fails the step and is reported
+        message = str(exc) or type(exc).__name__
+        return False, "%s raised: %s%s" % (label, message, "" if message.endswith(".") else ".")
+    shown = _collapse(printed)
+    if step["expect"] == "works":
+        return True, "%s ran without an error; it gave %s." % (label, shown)
+    if step["expect"] == "gives":
+        if printed_matches(step["value"], printed):
+            return True, "%s gave %s." % (label, shown)
+        return False, "%s gave %s, not %s." % (label, shown, step["value"])
+    found = _collapse(step["value"]) in shown
+    if step["expect"] == "shows":
+        if found:
+            return True, '%s gave %s, which shows "%s".' % (label, shown, step["value"])
+        return False, '%s gave %s, which does not show "%s".' % (label, shown, step["value"])
+    if not found:
+        return True, '%s gave %s, which does not show "%s".' % (label, shown, step["value"])
+    return False, '%s gave %s, which shows "%s", but it must not.' % (label, shown, step["value"])
+
+
+def _run_one(req, app, command, call=None):
     base = {"id": req["id"], "text": req["text"]}
     steps = req.get("steps")
     if steps is None:
@@ -513,27 +683,27 @@ def _run_one(req, app, command):
             "could not be checked: the line does not follow the grammar (see the error for "
             "line %d)." % req["line"]))
     kind = steps[0]["kind"]
-    if kind == "web" and app is None:
-        return dict(base, ok=None, steps=[], detail=(
-            "could not be checked: there is no web app to send GET or POST lines to."))
-    if kind == "command" and command is None:
-        return dict(base, ok=None, steps=[], detail=(
-            "could not be checked: there is no command-line app to run run lines against."))
+    factory = {"web": app, "command": command, "call": call}[kind]
+    if factory is None:
+        return dict(base, ok=None, steps=[], detail=MISSING[kind])
     try:
-        session = app() if kind == "web" else command()
+        session = factory()
     except Exception as exc:  # noqa: BLE001 - a factory that fails fails the requirement
         return dict(base, ok=False, steps=[], detail=_plain(
-            "could not start a fresh %s app: %s: %s." % (kind, type(exc).__name__, exc)))
+            "could not start a fresh %s: %s: %s." % (FACTORY_NAMES[kind], type(exc).__name__, exc)))
+    tidy = _clip if kind == "call" else _plain
     jar, results = {}, []
     for step in steps:
         try:
             if kind == "web":
                 ok, detail = _do_web(session, step, jar)
-            else:
+            elif kind == "command":
                 ok, detail = _do_command(session, step)
+            else:
+                ok, detail = _do_call(session, step)
         except Exception as exc:  # noqa: BLE001 - a step that raises is a failed step
             ok, detail = False, "the step raised %s: %s." % (type(exc).__name__, exc)
-        results.append({"ok": ok, "detail": _plain(detail)})
+        results.append({"ok": ok, "detail": tidy(detail)})
         if not ok:
             break
     failed = not results[-1]["ok"]
@@ -543,24 +713,26 @@ def _run_one(req, app, command):
         detail = "Step %d of %d failed: %s" % (len(results), len(steps), results[-1]["detail"])
     else:
         detail = "All %d steps passed." % len(steps)
-    return dict(base, ok=not failed, detail=_plain(detail), steps=results)
+    return dict(base, ok=not failed, detail=tidy(detail), steps=results)
 
 
-def run(requirements, app=None, command=None):
+def run(requirements, app=None, command=None, call=None):
     """Check each requirement and return one result per requirement, in order.
 
     APP is a zero-argument factory returning a fresh web app (anything with
     ``handle(method, target, headers, body)``); COMMAND is a zero-argument
-    factory returning a fresh ``run_words(list_of_words) -> output text``. A
-    fresh one is made for every requirement, so no line sees another's state.
-    Passing an app object instead of a factory is refused, because it would
-    carry state from one requirement to the next.
+    factory returning a fresh ``run_words(list_of_words) -> output text``;
+    CALL is a zero-argument factory returning a fresh ``evaluate(form_source)
+    -> printed value text``, which raises when the Lisp call signals an error.
+    A fresh one is made for every requirement, so no line sees another's
+    state. Passing an app object instead of a factory is refused, because it
+    would carry state from one requirement to the next.
     """
-    for name, factory in (("app", app), ("command", command)):
+    for name, factory in (("app", app), ("command", command), ("call", call)):
         if factory is not None and not callable(factory):
             raise TypeError("%s must be a factory such as make_%s, not an object: an object "
                             "keeps its state from one requirement to the next" % (name, name))
-    return [_run_one(req, app, command) for req in requirements]
+    return [_run_one(req, app, command, call) for req in requirements]
 
 
 def summarize(results):
@@ -632,11 +804,19 @@ def main(argv=None):
             return out["output"]
         return run_words
 
+    def make_call():
+        app = mount.MountedApp(registry, fresh_store())
+
+        def evaluate(form):
+            return app._eval("(let ((*print-pretty* nil)) %s)" % form)["return_value"]
+        return evaluate
+
     try:
         requirements, errors = parse(text)
         results = run(requirements,
                       app=make_app if mount.HANDLER in names else None,
-                      command=make_command if mount.COMMAND in names else None)
+                      command=make_command if mount.COMMAND in names else None,
+                      call=make_call if names else None)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     for err in errors:

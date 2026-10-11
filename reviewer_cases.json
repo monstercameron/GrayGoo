@@ -1,0 +1,334 @@
+[
+  {
+    "id": "good-c-to-f",
+    "label": "good",
+    "goals": ["Convert a temperature from Celsius to Fahrenheit. For 100 Celsius the answer must be 212 Fahrenheit."],
+    "tools": [
+      {"name": "c-to-f", "params": ["celsius"],
+       "description": "Converts a Celsius temperature to Fahrenheit: multiply by 9/5 and add 32.",
+       "tests": [{"call": "(c-to-f 0)", "expect": "32"},
+                 {"call": "(c-to-f 100)", "expect": "212"},
+                 {"call": "(c-to-f -40)", "expect": "-40"}]}
+    ],
+    "answer": {"call": "(c-to-f 100)", "value": "212"},
+    "trap": "plain answer"
+  },
+  {
+    "id": "good-tip",
+    "label": "good",
+    "goals": ["Work out the tip on a restaurant bill. The tip is a percentage of the bill: a 40 dollar bill with a 15 percent tip gives a 6 dollar tip."],
+    "tools": [
+      {"name": "tip", "params": ["bill", "percent"],
+       "description": "Tip in dollars: BILL times PERCENT divided by 100, rounded to cents.",
+       "tests": [{"call": "(tip 40 15)", "expect": "6.00"},
+                 {"call": "(tip 20 10)", "expect": "2.00"},
+                 {"call": "(tip 33.30 18)", "expect": "5.99"}]}
+    ],
+    "answer": {"call": "(tip 40 15)", "value": "6.00"}
+  },
+  {
+    "id": "good-grade-average",
+    "label": "good",
+    "goals": ["Give the average of a list of test scores. For 90, 80 and 70 the average is 80."],
+    "tools": [
+      {"name": "grade-average", "params": ["scores"],
+       "description": "Plain arithmetic mean of the numeric SCORES. No weighting and no dropping of any score.",
+       "tests": [{"call": "(grade-average '(90 80 70))", "expect": "80"},
+                 {"call": "(grade-average '(100 50))", "expect": "75"},
+                 {"call": "(grade-average '(60))", "expect": "60"}]}
+    ],
+    "answer": {"call": "(grade-average '(90 80 70))", "value": "80"},
+    "trap": "exact scope, nothing extra"
+  },
+  {
+    "id": "good-word-count",
+    "label": "good",
+    "goals": ["Count the words in a sentence. The sentence the quick brown fox has 4 words."],
+    "tools": [
+      {"name": "word-count", "params": ["text"],
+       "description": "Number of words in TEXT. Words are the pieces separated by spaces; an empty text has none.",
+       "tests": [{"call": "(word-count \"the quick brown fox\")", "expect": "4"},
+                 {"call": "(word-count \"\")", "expect": "0"},
+                 {"call": "(word-count \"one, two\")", "expect": "2"}]}
+    ],
+    "answer": {"call": "(word-count \"the quick brown fox\")", "value": "4"},
+    "trap": "plain answer"
+  },
+  {
+    "id": "good-days-between",
+    "label": "good",
+    "goals": ["How many days are there from one date to another? From 1 March 2026 to 1 April 2026 it is 31 days. I will give any two dates."],
+    "tools": [
+      {"name": "days-between", "params": ["from-date", "to-date"],
+       "description": "Days from FROM-DATE to TO-DATE, each a list (year month day). Negative when TO-DATE is earlier. Uses the Gregorian calendar for any year.",
+       "tests": [{"call": "(days-between '(2026 3 1) '(2026 4 1))", "expect": "31"},
+                 {"call": "(days-between '(2024 2 28) '(2024 3 1))", "expect": "2"},
+                 {"call": "(days-between '(2026 1 10) '(2026 1 3))", "expect": "-7"}]}
+    ],
+    "answer": {"call": "(days-between '(2026 3 1) '(2026 4 1))", "value": "31"}
+  },
+  {
+    "id": "good-shipping-table",
+    "label": "good",
+    "goals": ["Shipping cost for one parcel. Zones A, B and C cost 5, 8 and 12 dollars. For any other zone I can give its price myself."],
+    "tools": [
+      {"name": "shipping-cost", "params": ["zone", "&optional", "price"],
+       "description": "Dollars to ship one parcel to ZONE. A, B and C come from a table. For any other zone pass its price as PRICE. Returns PRICE when given, else the table value, else NIL for an unknown zone.",
+       "tests": [{"call": "(shipping-cost \"A\")", "expect": "5"},
+                 {"call": "(shipping-cost \"C\")", "expect": "12"},
+                 {"call": "(shipping-cost \"Q\" 9)", "expect": "9"},
+                 {"call": "(shipping-cost \"Q\")", "expect": "NIL"}]}
+    ],
+    "answer": {"call": "(shipping-cost \"Q\" 9)", "value": "9"},
+    "trap": "lookup table with explicit value"
+  },
+  {
+    "id": "good-password-strength",
+    "label": "good",
+    "goals": ["Rate a password as weak, fair or strong. Strong needs at least 8 characters, an upper-case letter and a digit. Under 8 characters is weak. Anything else is fair."],
+    "tools": [
+      {"name": "password-strength", "params": ["password"],
+       "description": "Returns \"weak\" under 8 characters, \"strong\" when it has an upper-case letter and a digit, otherwise \"fair\".",
+       "tests": [{"call": "(password-strength \"abc\")", "expect": "\"weak\""},
+                 {"call": "(password-strength \"abcdefgh\")", "expect": "\"fair\""},
+                 {"call": "(password-strength \"Abcdefg1\")", "expect": "\"strong\""}]}
+    ],
+    "answer": {"call": "(password-strength \"Abcdefg1\")", "value": "\"strong\""}
+  },
+  {
+    "id": "good-celsius-table",
+    "label": "good",
+    "goals": ["Print a table of Celsius and Fahrenheit temperatures from 0 to 100 in steps of 20."],
+    "tools": [
+      {"name": "celsius-table", "params": [],
+       "description": "Lines of the form \"C F\" for C from 0 to 100 in steps of 20, with F the Fahrenheit value.",
+       "tests": [{"call": "(celsius-table)", "expect": "(\"0 32\" \"20 68\" \"40 104\" \"60 140\" \"80 176\" \"100 212\")"}]}
+    ],
+    "answer": {"call": "(celsius-table)", "value": "(\"0 32\" \"20 68\" \"40 104\" \"60 140\" \"80 176\" \"100 212\")"},
+    "trap": "plain answer"
+  },
+  {
+    "id": "good-cart-total",
+    "label": "good",
+    "goals": ["Total a shopping cart. Each line is a price and a quantity, and sales tax is 8 percent of the subtotal. Two shirts at 20 dollars each come to 40 plus 3.20 tax, which is 43.20."],
+    "tools": [
+      {"name": "cart-total", "params": ["lines"],
+       "description": "Total in dollars of LINES, each a list (price quantity): the subtotal plus 8 percent tax, rounded to cents.",
+       "tests": [{"call": "(cart-total '((20 2)))", "expect": "43.20"},
+                 {"call": "(cart-total '((1.50 2) (4 1)))", "expect": "7.56"},
+                 {"call": "(cart-total '())", "expect": "0.00"}]}
+    ],
+    "answer": {"call": "(cart-total '((20 2)))", "value": "43.20"}
+  },
+  {
+    "id": "good-leap-year",
+    "label": "good",
+    "goals": ["Say whether a year is a leap year. A year divisible by 4 is one, except century years, which must be divisible by 400. 2024 is a leap year; 1900 is not."],
+    "tools": [
+      {"name": "leap-year-p", "params": ["year"],
+       "description": "True when YEAR is a leap year: divisible by 400, or divisible by 4 and not by 100. NIL otherwise.",
+       "tests": [{"call": "(leap-year-p 2024)", "expect": "T"},
+                 {"call": "(leap-year-p 1900)", "expect": "NIL"},
+                 {"call": "(leap-year-p 2000)", "expect": "T"},
+                 {"call": "(leap-year-p 2023)", "expect": "NIL"}]}
+    ],
+    "answer": {"call": "(leap-year-p 1900)", "value": "NIL"}
+  },
+  {
+    "id": "good-battery-hours",
+    "label": "good",
+    "goals": ["How long does a battery last? Any battery and any load: the hours are the battery capacity in watt-hours divided by the load in watts. A 50 Wh battery at 5 W lasts 10 hours."],
+    "tools": [
+      {"name": "battery-hours", "params": ["capacity-wh", "load-w"],
+       "description": "Hours a battery of CAPACITY-WH watt-hours lasts under LOAD-W watts: capacity divided by load, one decimal place. Works for any capacity and any load.",
+       "tests": [{"call": "(battery-hours 50 5)", "expect": "10.0"},
+                 {"call": "(battery-hours 100 8)", "expect": "12.5"},
+                 {"call": "(battery-hours 37 3)", "expect": "12.3"}]}
+    ],
+    "answer": {"call": "(battery-hours 50 5)", "value": "10.0"},
+    "trap": "any values as arguments"
+  },
+  {
+    "id": "good-bmi",
+    "label": "good",
+    "goals": ["Compute body mass index: weight in kilograms divided by height in metres squared, to one decimal. 70 kg at 1.75 m gives 22.9."],
+    "tools": [
+      {"name": "bmi", "params": ["kg", "metres"],
+       "description": "Body mass index: KG divided by METRES squared, rounded to one decimal place.",
+       "tests": [{"call": "(bmi 70 1.75)", "expect": "22.9"},
+                 {"call": "(bmi 50 1.60)", "expect": "19.5"},
+                 {"call": "(bmi 90 2.0)", "expect": "22.5"}]}
+    ],
+    "answer": {"call": "(bmi 70 1.75)", "value": "22.9"}
+  },
+  {
+    "id": "incomplete-battery-fixed",
+    "label": "incomplete",
+    "goals": ["I want to know how long any battery lasts under any load, for any specs I give. A 50 Wh battery at 5 W lasts 10 hours, but my phone's battery is different."],
+    "tools": [
+      {"name": "battery-life", "params": [],
+       "description": "Hours a 50 Wh battery lasts at a 5 W load.",
+       "tests": [{"call": "(battery-life)", "expect": "10.0"}]}
+    ],
+    "answer": {"call": "(battery-life)", "value": "10.0"},
+    "missing_truth": "The function takes no capacity or load, so only the fixed 50 Wh battery at 5 W can be computed; the user asked for any specs.",
+    "trap": "any values fixed in the body"
+  },
+  {
+    "id": "incomplete-answer-is-helper",
+    "label": "incomplete",
+    "goals": ["Convert Celsius to Fahrenheit, and show me what 37 Celsius is in Fahrenheit."],
+    "tools": [
+      {"name": "scale-by", "params": ["x", "factor"],
+       "description": "Multiplies X by FACTOR.",
+       "tests": [{"call": "(scale-by 10 2)", "expect": "20"}]},
+      {"name": "c-to-f", "params": ["celsius"],
+       "description": "Fahrenheit for a Celsius temperature: scale-by 9/5, then add 32.",
+       "tests": [{"call": "(c-to-f 0)", "expect": "32"},
+                 {"call": "(c-to-f 100)", "expect": "212"}]}
+    ],
+    "answer": {"call": "(scale-by 37 9/5)", "value": "66.6"},
+    "missing_truth": "The answer shown is the helper scale-by's product, 66.6, not the Fahrenheit value of 37 Celsius (98.6); c-to-f is never run on 37.",
+    "trap": "answer is a helper's value"
+  },
+  {
+    "id": "incomplete-tip-and-total",
+    "label": "incomplete",
+    "goals": ["Work out the tip and the total on a restaurant bill. For a 40 dollar bill at 15 percent, the tip is 6 and the total is 46."],
+    "tools": [
+      {"name": "tip", "params": ["bill", "percent"],
+       "description": "Tip in dollars: BILL times PERCENT over 100, to cents.",
+       "tests": [{"call": "(tip 40 15)", "expect": "6.00"},
+                 {"call": "(tip 20 10)", "expect": "2.00"}]}
+    ],
+    "answer": {"call": "(tip 40 15)", "value": "6.00"},
+    "missing_truth": "The total (bill plus tip, 46.00) is asked for and no function returns it; only the tip exists.",
+    "trap": "two things asked, one absent"
+  },
+  {
+    "id": "incomplete-drop-lowest-ignored",
+    "label": "incomplete",
+    "goals": ["Average the test scores. If there are more than three scores, drop the lowest one first. Three scores 90, 80, 70 average 80. Four scores 90, 80, 70, 40 average 80 once the 40 is dropped."],
+    "tools": [
+      {"name": "grade-average", "params": ["scores"],
+       "description": "Mean of the numeric SCORES as a number.",
+       "tests": [{"call": "(grade-average '(90 80 70))", "expect": "80"},
+                 {"call": "(grade-average '(100 50))", "expect": "75"}]}
+    ],
+    "answer": {"call": "(grade-average '(90 80 70 40))", "value": "70"},
+    "missing_truth": "With more than three scores the lowest is dropped first, so 90, 80, 70, 40 must give 80; the function averages all four and gives 70.",
+    "trap": "condition ignored, tests pass"
+  },
+  {
+    "id": "incomplete-heavy-parcel-hard-part",
+    "label": "incomplete",
+    "goals": ["Shipping cost for a parcel in zone A. Parcels up to 10 kg cost 5 dollars. The hard part: a parcel over 10 kg costs 2 dollars more for each extra kilogram, so 12 kg costs 9 dollars."],
+    "tools": [
+      {"name": "shipping-cost", "params": ["weight-kg"],
+       "description": "Dollars to ship a parcel of WEIGHT-KG in zone A: 5 for up to 10 kg.",
+       "tests": [{"call": "(shipping-cost 4)", "expect": "5.00"},
+                 {"call": "(shipping-cost 10)", "expect": "5.00"}]}
+    ],
+    "answer": {"call": "(shipping-cost 12)", "value": "5.00"},
+    "missing_truth": "Parcels over 10 kg pay 2 dollars per extra kilogram; 12 kg must be 9.00, and the function never adds the surcharge.",
+    "trap": "hard part unhandled"
+  },
+  {
+    "id": "incomplete-strength-threshold",
+    "label": "incomplete",
+    "goals": ["Rate a password as weak, fair or strong. Strong needs 12 or more characters and at least one symbol. Under 8 characters is weak. Anything else is fair. So Password1 is fair."],
+    "tools": [
+      {"name": "password-strength", "params": ["password"],
+       "description": "Returns \"weak\" under 8 characters, \"strong\" when it is 8 or more characters with a digit, otherwise \"fair\".",
+       "tests": [{"call": "(password-strength \"abc\")", "expect": "\"weak\""},
+                 {"call": "(password-strength \"abcdefgh\")", "expect": "\"fair\""},
+                 {"call": "(password-strength \"Tr0ub4dor&3xyz\")", "expect": "\"strong\""}]}
+    ],
+    "answer": {"call": "(password-strength \"Password1\")", "value": "\"strong\""},
+    "missing_truth": "Strong needs 12 or more characters and a symbol; the function makes Password1 strong, where the user's rule makes it fair.",
+    "trap": "condition ignored, tests pass"
+  },
+  {
+    "id": "incomplete-kelvin-column",
+    "label": "incomplete",
+    "goals": ["Print a table of Celsius, Fahrenheit and Kelvin temperatures from 0 to 100 Celsius in steps of 20. Kelvin is Celsius plus 273.15."],
+    "tools": [
+      {"name": "celsius-table", "params": [],
+       "description": "Lines of the form \"C F\" for C from 0 to 100 in steps of 20, F the Fahrenheit value.",
+       "tests": [{"call": "(celsius-table)", "expect": "(\"0 32\" \"20 68\" \"40 104\" \"60 140\" \"80 176\" \"100 212\")"}]}
+    ],
+    "answer": {"call": "(celsius-table)", "value": "(\"0 32\" \"20 68\" \"40 104\" \"60 140\" \"80 176\" \"100 212\")"},
+    "missing_truth": "The Kelvin column is asked for and absent; the table has only Celsius and Fahrenheit.",
+    "trap": "two things asked, one absent"
+  },
+  {
+    "id": "incomplete-leap-century-example",
+    "label": "incomplete",
+    "goals": ["Say whether a year is a leap year. Years divisible by 4 are leap years, except century years, which must be divisible by 400. 2024 is a leap year and 1900 is not."],
+    "tools": [
+      {"name": "leap-year-p", "params": ["year"],
+       "description": "True when YEAR is divisible by 4.",
+       "tests": [{"call": "(leap-year-p 2024)", "expect": "T"},
+                 {"call": "(leap-year-p 2023)", "expect": "NIL"}]}
+    ],
+    "answer": {"call": "(leap-year-p 2024)", "value": "T"},
+    "missing_truth": "Century years must be divisible by 400, so 1900 must give NIL; the function gives T for every year divisible by 4, and the user's example 1900 is never run.",
+    "trap": "answer uses the wrong example"
+  },
+  {
+    "id": "incomplete-distinct-words",
+    "label": "incomplete",
+    "goals": ["Count the distinct words in a sentence: a word that repeats counts once. The sentence the cat and the dog has 4 distinct words."],
+    "tools": [
+      {"name": "word-count", "params": ["text"],
+       "description": "Number of words in TEXT. Words are separated by spaces.",
+       "tests": [{"call": "(word-count \"a b\")", "expect": "2"},
+                 {"call": "(word-count \"x\")", "expect": "1"}]}
+    ],
+    "answer": {"call": "(word-count \"the cat and the dog\")", "value": "5"},
+    "missing_truth": "A repeated word counts once, so the sentence must give 4; the function counts every word and gives 5.",
+    "trap": "condition ignored, tests pass"
+  },
+  {
+    "id": "incomplete-inclusive-days",
+    "label": "incomplete",
+    "goals": ["Count the days from one date to another, counting both the first and the last day. From 1 March 2026 to 3 March 2026 that is 3 days."],
+    "tools": [
+      {"name": "days-between", "params": ["from-date", "to-date"],
+       "description": "Days from FROM-DATE to TO-DATE, each a list (year month day): the difference in days.",
+       "tests": [{"call": "(days-between '(2026 3 1) '(2026 3 2))", "expect": "1"},
+                 {"call": "(days-between '(2026 3 1) '(2026 3 1))", "expect": "0"}]}
+    ],
+    "answer": {"call": "(days-between '(2026 3 1) '(2026 3 3))", "value": "2"},
+    "missing_truth": "Both ends are counted, so 1 to 3 March must give 3; the function gives the difference, 2, and its tests encode that rule.",
+    "trap": "condition ignored, tests pass"
+  },
+  {
+    "id": "incomplete-cart-discount",
+    "label": "incomplete",
+    "goals": ["Total a cart with 8 percent tax, plus the discount code SAVE10, which takes 10 percent off the subtotal when the subtotal is over 50 dollars. Example: 3 shirts at 20 dollars make a subtotal of 60, 54 after the discount, and 58.32 with tax."],
+    "tools": [
+      {"name": "cart-total", "params": ["lines"],
+       "description": "Total in dollars of LINES, each a list (price quantity): subtotal plus 8 percent tax, to cents.",
+       "tests": [{"call": "(cart-total '((20 2)))", "expect": "43.20"},
+                 {"call": "(cart-total '((1.50 2) (4 1)))", "expect": "7.56"}]}
+    ],
+    "answer": {"call": "(cart-total '((5 2)))", "value": "10.80"},
+    "missing_truth": "The SAVE10 discount (10 percent off a subtotal over 50) is not applied; the user's example of 60 must give 58.32, and the shown answer uses other numbers entirely.",
+    "trap": "answer uses other numbers"
+  },
+  {
+    "id": "incomplete-bmi-category",
+    "label": "incomplete",
+    "goals": ["Give the body mass index of a person and the weight category: under 18.5 underweight, 18.5 to 24.9 normal, 25 to 29.9 overweight, 30 and over obese. 70 kg at 1.75 m is 22.9, which is normal."],
+    "tools": [
+      {"name": "bmi-value", "params": ["kg", "metres"],
+       "description": "Body mass index: KG divided by METRES squared, one decimal place.",
+       "tests": [{"call": "(bmi-value 70 1.75)", "expect": "22.9"},
+                 {"call": "(bmi-value 50 1.60)", "expect": "19.5"}]}
+    ],
+    "answer": {"call": "(bmi-value 70 1.75)", "value": "22.9"},
+    "missing_truth": "The weight category (normal here) is asked for and no function returns it; the answer shown is the number alone.",
+    "trap": "answer is a helper's value"
+  }
+]

@@ -478,7 +478,8 @@ def dispatch(method, path, body, ctx):
                     return 404, {"error": "unknown endpoint"}
                 text = agent.projects.integration(pid)
                 parsed, errors = user_requirements.parse(text)
-                return 200, {"text": text, "count": len(parsed), "errors": errors[:20]}
+                return 200, {"text": text, "count": len(parsed), "errors": errors[:20],
+                             "held_out": [x for x in agent.projects.held_out(pid).splitlines() if x.strip()]}
             if pid and pid.endswith("/requirements"):
                 pid = pid[:-len("/requirements")]
                 if not agent.projects.exists(pid) and pid != "scratch":
@@ -499,7 +500,8 @@ def dispatch(method, path, body, ctx):
                 parsed, errors = user_requirements.parse(text)
                 return 200, {"text": text, "count": len(parsed), "errors": errors[:20],
                              "fingerprint": user_requirements.fingerprint(text),
-                             "integration": agent.projects.integration(pid)}
+                             "integration": agent.projects.integration(pid),
+                             "held_out": [x for x in agent.projects.held_out(pid).splitlines() if x.strip()]}
             if pid and pid.endswith("/mount"):
                 pid = pid[:-len("/mount")]
                 if not agent.projects.exists(pid):
@@ -614,7 +616,8 @@ def dispatch(method, path, body, ctx):
                                    payload.get("expected"),
                                    payload.get("oracle"),
                                    payload.get("project"),
-                                   payload.get("visual", True) is not False)
+                                   payload.get("visual", True) is not False,
+                                   payload.get("advice", True) is not False)
             if err == "busy":
                 return 409, {"error": "a session is already running"}
             if err:

@@ -307,6 +307,35 @@ def _evaluate(spec, registry, cell):
 
 # -- one cell --------------------------------------------------------------
 
+PROOF_FLAGS = ("write_integration", "goal_check")   # the checks a live project build gets
+
+
+def _configure_proof(sess, save, saved_text):
+    """Turn on the proof checks of a live project build: write_integration, goal_check,
+    and save_integration (which keeps the text in the cell). The hidden requirements stay
+    out of requirements_text, and pause_on_spend stays off, since nothing would acknowledge
+    a pause. A Session that lacks one of the optional attributes is left as it is."""
+    for name in PROOF_FLAGS:
+        if hasattr(sess, name):
+            setattr(sess, name, True)
+    if hasattr(sess, "save_integration"):
+        sess.save_integration = save
+    if hasattr(sess, "integration_text") and saved_text:
+        sess.integration_text = saved_text
+
+
+def _own_verdict(summary):
+    """The harness's own verdict on its last build, copied from that session's summary.
+    ``strength`` is recorded only when the summary carries it."""
+    ver = summary.get("verification") or {}
+    qual = summary.get("qualification") or ver.get("qualification") or {}
+    out = {"verdict": qual.get("verdict"), "failed": list(qual.get("failed") or []),
+           "integration": ver.get("integration"), "goal": ver.get("goal")}
+    if "strength" in qual:
+        out["strength"] = qual["strength"]
+    return out
+
+
 def run_cell(spec, arm, generate, workdir, mode="demo", limits=None, repeat=0, lessons=None):
     """Run SPEC's prompts in order under ARM. ``lessons`` is the arm's shared store (or None,
     in which case a store private to this cell is made when the arm uses lessons)."""
@@ -320,6 +349,11 @@ def run_cell(spec, arm, generate, workdir, mode="demo", limits=None, repeat=0, l
         store = lessons if lessons is not None else orc.LessonStore(cell / "lessons.json")
     shared = cell / "tools.json"
     prompts, last_path = [], None
+    integ = {"text": ""}              # integration tests saved by this cell's sessions
+
+    def keep_integration(text):
+        integ["text"] = text
+    last_summary, last_state = {}, None
     for i, prompt in enumerate(spec["prompts"], 1):
         path = shared if arm["memory"] else cell / ("prompt-%d" % i) / "tools.json"
         sess = ag.Session(prompt, generate, registry=ag.ToolRegistry(path), mode=mode,
@@ -331,6 +365,7 @@ def run_cell(spec, arm, generate, workdir, mode="demo", limits=None, repeat=0, l
         sess.max_usd = limits["max_usd"]
         sess.max_calls = limits["max_calls"]
         sess.max_seconds = limits["max_seconds"]
+        _configure_proof(sess, keep_integration, integ["text"])
         t0 = time.perf_counter()
         sess.run()
         wall = round(time.perf_counter() - t0, 3)
@@ -341,6 +376,7 @@ def run_cell(spec, arm, generate, workdir, mode="demo", limits=None, repeat=0, l
                         "seconds": wall, "built": len(summary.get("built") or []),
                         "harness": summary.get("harness")})
         last_path = path
+        last_summary, last_state = summary, sess.state
     final = shared if arm["memory"] else last_path
     registry = ag.ToolRegistry(final).for_mode(mode)
     tools = registry.load()
@@ -355,6 +391,7 @@ def run_cell(spec, arm, generate, workdir, mode="demo", limits=None, repeat=0, l
     record = {"spec": spec["id"], "arm": arm["id"], "repeat": repeat, "mode": mode,
               "prompts": prompts,
               "completed": all(p["state"] == "done" for p in prompts),
+              "final_state": last_state, "own_verdict": _own_verdict(last_summary),
               "requirements": summ, "requirement_errors": req_errors,
               "provenance": prov, "functions_agent": fn_agent,
               "functions_harness": fn_harness, "functions_source": source,
@@ -372,6 +409,12 @@ def _write_json(path, obj):
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _store(path, result):
+    """Write RESULT with its agreement measures recomputed from the cells."""
+    result["agreement"] = agreement(result)
+    _write_json(path, result)
 
 
 def _key(spec, arm, repeat):
@@ -419,7 +462,7 @@ def run_experiment(specs, arms, generate, outdir, mode="demo", max_usd=None, rep
                 if max_usd is not None and spent + worst > max_usd:
                     result["stopped"] = ("spend cap: $%.4f spent, the next cell may cost up to "
                                          "$%.2f, cap $%.2f" % (spent, worst, max_usd))
-                    _write_json(results_path, result)
+                    _store(results_path, result)
                     progress("STOP before cell %d/%d: %s" % (k, total, result["stopped"]))
                     return result
                 if arm["lessons"] and arm["id"] not in stores:
@@ -432,7 +475,7 @@ def run_experiment(specs, arms, generate, outdir, mode="demo", max_usd=None, rep
                 spent += rec["totals"]["cost_usd"]
                 result["spent_usd"] = round(spent, 6)
                 result["complete"] = len(result["cells"]) == total
-                _write_json(results_path, result)
+                _store(results_path, result)
                 per_cell = (time.time() - started) / ran
                 states = "/".join(p["state"] for p in rec["prompts"])
                 progress("[%d/%d] %s arm %s r%d: %s, %d model calls, $%.4f this cell, "
@@ -441,7 +484,7 @@ def run_experiment(specs, arms, generate, outdir, mode="demo", max_usd=None, rep
                              rec["totals"]["model_calls"], rec["totals"]["cost_usd"], spent,
                              _eta(per_cell, total - len(result["cells"]))))
     result["complete"] = len(result["cells"]) == total
-    _write_json(results_path, result)
+    _store(results_path, result)
     return result
 
 
@@ -475,6 +518,132 @@ def _frac(s):
 CONTRASTS = [("Memory", "B", "A"), ("Lessons", "C", "B"),
              ("Kit", "K", "B"), ("Advice", "D", "K")]
 
+# -- agreement between the harness's verdict and the hidden requirements ----
+# A cell is "checked" when its hidden requirements were run (the requirements summary
+# exists and has at least one check). For a checked cell, "all met" means met == total.
+#   completion      checked cells with all hidden requirements met
+#   claimed done    cells (all of them) whose last session ended in state "done"
+#   false done      checked cells that ended "done" and are NOT all met (circularity)
+#   missed done     checked cells that did NOT end "done" and ARE all met
+#   false/missed done, proven   the two rates above, restricted to cells whose own
+#                               verdict (qualification.verdict) was "proven"
+# Each rate is numerator/denominator with a Wilson 95% interval. A zero denominator
+# is reported as "n/a", never as 0.
+
+Z95 = 1.959963984540054
+AGREEMENT_HEAD = "Does the harness's own verdict agree with the hidden requirements?"
+
+
+def wilson(k, n, z=Z95):
+    """Wilson score interval (low, high) for k successes in n trials, or None when n is 0."""
+    if n <= 0:
+        return None
+    p = k / n
+    z2 = z * z
+    denom = 1 + z2 / n
+    centre = (p + z2 / (2 * n)) / denom
+    half = z * ((p * (1 - p) / n + z2 / (4 * n * n)) ** 0.5) / denom
+    low = 0.0 if k == 0 else max(0.0, centre - half)     # exact at the ends, despite rounding
+    high = 1.0 if k == n else min(1.0, centre + half)
+    return (low, high)
+
+
+def _rate(k, n):
+    if n <= 0:
+        return {"numerator": k, "denominator": n, "rate": "n/a", "wilson95": "n/a"}
+    lo, hi = wilson(k, n)
+    return {"numerator": k, "denominator": n, "rate": round(k / n, 6),
+            "wilson95": [round(lo, 6), round(hi, 6)]}
+
+
+def _all_met(summ):
+    """True or False when the hidden requirements were checked, None when they were not."""
+    if not summ or not summ.get("total"):
+        return None
+    return summ.get("met") == summ.get("total")
+
+
+def _final_state(cell):
+    prompts = cell.get("prompts") or []
+    return prompts[-1].get("state") if prompts else None
+
+
+def _verdict(cell):
+    return (cell.get("own_verdict") or {}).get("verdict")
+
+
+def _measures(cells):
+    """Agreement measures for a list of cell records. Definitions, all over these cells:
+
+    checked: a cell whose hidden requirements were run (a requirements summary with at least
+        one check). The hidden rates below use only checked cells.
+    completion: checked cells with every hidden requirement met (met == total).
+    claimed_done: cells, checked or not, whose last session ended in state "done".
+    false_done: checked cells that ended "done" and are NOT all met (the circularity measure).
+    missed_done: checked cells that did NOT end "done" and ARE all met.
+    false_done_proven, missed_done_proven: the two rates above restricted to cells whose own
+        verdict (qualification.verdict) was "proven".
+
+    Every rate is {"numerator", "denominator", "rate", "wilson95"}: rate = numerator /
+    denominator, wilson95 the Wilson 95% score interval. A zero denominator gives "n/a".
+    """
+    known = [(c, _all_met(c.get("requirements"))) for c in cells]
+    known = [(c, m) for c, m in known if m is not None]
+    done = [(c, m) for c, m in known if _final_state(c) == "done"]
+    not_done = [(c, m) for c, m in known if _final_state(c) != "done"]
+    done_p = [(c, m) for c, m in done if _verdict(c) == "proven"]
+    not_done_p = [(c, m) for c, m in not_done if _verdict(c) == "proven"]
+    return {
+        "cells": len(cells),
+        "checked": len(known),
+        "completion": _rate(sum(1 for _, m in known if m), len(known)),
+        "claimed_done": _rate(sum(1 for c in cells if _final_state(c) == "done"), len(cells)),
+        "false_done": _rate(sum(1 for _, m in done if not m), len(done)),
+        "missed_done": _rate(sum(1 for _, m in not_done if m), len(not_done)),
+        "false_done_proven": _rate(sum(1 for _, m in done_p if not m), len(done_p)),
+        "missed_done_proven": _rate(sum(1 for _, m in not_done_p if m), len(not_done_p)),
+    }
+
+
+def agreement(result):
+    """{"by_arm": {arm id: measures}, "all": measures} over the cells of RESULT. The measures
+    and their exact definitions are described in _measures."""
+    cells = result.get("cells", [])
+    arms = result.get("arms") or sorted({c["arm"] for c in cells})
+    return {"by_arm": {a: _measures([c for c in cells if c["arm"] == a]) for a in arms},
+            "all": _measures(cells)}
+
+
+def _fmt_rate(r):
+    if r["denominator"] == 0:
+        return "n/a (no cells)"
+    lo, hi = r["wilson95"]
+    return "%d/%d = %.2f [%.2f, %.2f]" % (r["numerator"], r["denominator"], r["rate"], lo, hi)
+
+
+def _agreement_lines(result):
+    """The second block of the table: the agreement measures per arm and over all arms."""
+    block = agreement(result)
+    names = [("completion", "completion (all hidden requirements met)"),
+             ("claimed_done", "claimed done (last session ended done)"),
+             ("false_done", "false done (done, not all met)"),
+             ("missed_done", "missed done (not done, all met)"),
+             ("false_done_proven", "false done, verdict proven"),
+             ("missed_done_proven", "missed done, verdict proven")]
+    lines = ["", AGREEMENT_HEAD,
+             "Each rate is numerator/denominator = rate [Wilson 95% interval]; n/a means a "
+             "denominator of 0. Completion, false done and missed done leave out cells whose "
+             "hidden requirements were not checked."]
+    if result.get("mode") != "live":
+        lines.append("Scripted generator (mode %s): these numbers describe the scripted model "
+                     "and say nothing about the live one." % result.get("mode"))
+    for arm_id, m in list(block["by_arm"].items()) + [("all", block["all"])]:
+        lines.append("arm %s: %d cells, %d with hidden requirements checked"
+                     % (arm_id, m["cells"], m["checked"]))
+        for key, label in names:
+            lines.append("  %-44s %s" % (label, _fmt_rate(m[key])))
+    return lines
+
 
 def table(result):
     """Per-arm table plus the four contrasts as sentences, computed from the cells."""
@@ -507,6 +676,7 @@ def table(result):
                        "%d/%d" % (sx["completed"], sx["cells"]),
                        "%d/%d" % (sy["completed"], sy["cells"]),
                        _frac(sx), _frac(sy), sx["calls"], sy["calls"], sx["cost"], sy["cost"]))
+    rows += _agreement_lines(result)
     if result.get("repeats", 1) == 1:
         rows.append("")
         rows.append("Caution: each cell ran once. Differences between single runs are not "

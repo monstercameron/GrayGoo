@@ -853,3 +853,6 @@ details.ag-math[open] > summary { margin-bottom: .6rem; }
 .ag-integ { margin-top: .9rem; padding-top: .7rem; border-top: 1px solid #2a3147; }
 #ag-integ-text { width: 100%; box-sizing: border-box; min-height: 6.5rem; resize: vertical; padding: .5rem .6rem; border: 1px solid #3a4260; border-radius: 6px; background: #0e1016; color: #f1f4fb; font: .8rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 #ag-integ-text:focus-visible { outline: 2px solid var(--ag-cyan); outline-offset: 1px; }
+.ag-held { margin-top: .6rem; font-size: .84rem; }
+.ag-held ol { margin: .2rem 0 0; padding-left: 1.4rem; font: .78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; color: #cfe8ff; }
+.ag-held li { overflow-wrap: anywhere; }

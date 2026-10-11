@@ -40,7 +40,7 @@ WORD_IN_TEXT = re.compile(r"[a-z][a-z0-9_-]{0,23}")
 UNKNOWN_PROBE = "zzqx-no-such-command"
 MAX_TRANSCRIPT = 12
 MAX_REPLAYS = 40
-BEHAVIOUR = ("replay", "visitor", "requirements", "integration")   # proofs that show the app doing its job
+BEHAVIOUR = ("replay", "visitor", "requirements", "integration", "heldout")   # proofs that show the app doing its job
 HELP_NOISE = frozenset(("commands", "command", "usage", "help", "available", "options", "and", "or", "the",
                         "for", "with", "list", "of", "a", "an", "to", "type", "use", "try", "see"))
 
@@ -138,6 +138,14 @@ def _uses(node, names, found):
     if _is_symbol(head, "quote") or _is_symbol(head, "function"):
         if len(node) == 2 and _is_symbol(node[1]) and node[1].lower() in names:
             found.add(node[1].lower())
+        elif _is_symbol(head, "quote") and len(node) == 2:
+            # A quoted list that names saved functions is a table of them, as in
+            # '(("help" . cmd-help)): that is how an app hands a command to FUNCALL without a
+            # COND. Counting them errs on the side of "used", which is the safe side here: a
+            # function wrongly thought unused would be reported as dead and put away.
+            for sub in _walk(node[1]):
+                if _is_symbol(sub) and sub.lower() in names:
+                    found.add(sub.lower())
         return                                   # anything else under QUOTE is data
     if _is_symbol(head) and head.lower() in BINDERS and len(node) >= 2 and isinstance(node[1], list):
         if head.lower() in ("let", "let*", "do", "do*", "symbol-macrolet"):
@@ -822,8 +830,32 @@ DIRECTIVE = re.compile(r"~[%&]|~\d{0,3}[aAsSdD]")
 
 # ------------------------------------------------------------------ the proofs
 
+# Who wrote what a proof rests on. A test the builder wrote and then passed is evidence of
+# its own kind: it shows the code does what its author thought of, and nothing more.
+SOURCES = {"answers": "harness", "wired": "harness", "commands": "harness", "state": "harness",
+           "visitor": "harness", "fit": "harness", "replay": "agent", "integration": "agent",
+           "heldout": "held-out", "requirements": "user", "screens": "model", "goal": "model"}
+
+
 def _proof(pid, label, ok, detail):
-    return {"id": pid, "label": label, "ok": ok, "detail": " ".join(str(detail).split())[:420]}
+    return {"id": pid, "label": label, "ok": ok, "detail": " ".join(str(detail).split())[:420],
+            "source": SOURCES.get(pid, "harness")}
+
+
+def strength_of(proofs, verdict):
+    """How far a verdict of proven reaches: ``"user"``, ``"independent"``, ``"self"`` or None.
+
+    user         the user's own requirements, checked as written, are met
+    independent  checks the builder never saw hold: the held-out cases, or the visitor checks
+    self         only tests the builder wrote itself hold (its unit tests typed in, its
+                 integration tests): the app does what its author thought of
+    """
+    if verdict != "proven":
+        return None
+    passing = {p["id"] for p in proofs if p["ok"] is True}
+    if "requirements" in passing:
+        return "user"
+    return "independent" if passing & {"heldout", "visitor"} else "self"
 
 
 def _clip(text, n=160):
@@ -965,7 +997,7 @@ def command_proofs(tools, run_command, evaluate, prelude, checker, read_state=No
 
 
 def qualify(tools, planned_built=(), smoke_ok=None, accept=None, iface=(), reqs=None, screens=None,
-            command=None, state=None, integ=None):
+            command=None, state=None, integ=None, heldout=None):
     """The proofs and the verdict for a finished build.
 
     COMMAND, for a command-line app, is ``(proofs, transcript)`` from
@@ -1024,6 +1056,13 @@ def qualify(tools, planned_built=(), smoke_ok=None, accept=None, iface=(), reqs=
             "%d of %d fail: %s" % (unmet, integ["total"], "; ".join(integ.get("unmet_texts") or [])[:300]) if unmet
             else "all %d pass%s" % (met, ", %d could not be run" % unchecked if unchecked else "") if met
             else "none could be run"))
+    if heldout is not None and heldout.get("total"):
+        unmet, unchecked, met = (int(heldout.get(k) or 0) for k in ("unmet", "unchecked", "met"))
+        proofs.append(_proof(
+            "heldout", "The app passes checks its builder was never shown", False if unmet else (True if met else None),
+            "%d of %d fail" % (unmet, heldout["total"]) if unmet
+            else "all %d pass%s" % (met, ", %d could not be run" % unchecked if unchecked else "") if met
+            else "none could be run"))
     if screens is not None:
         proofs.append(_proof("screens", "The screenshots show what was asked for", bool(screens),
                              "they match" if screens else "they still show problems"))
@@ -1049,7 +1088,8 @@ def qualify(tools, planned_built=(), smoke_ok=None, accept=None, iface=(), reqs=
         implicated |= names & set(ENTRY_POINTS)
     return {"verdict": verdict, "proofs": proofs, "transcript": transcript[:MAX_TRANSCRIPT],
             "failed": [p["id"] for p in failed], "basis": basis, "counts": counts,
-            "implicated": sorted(n for n in implicated if n), "real_rows": real or {}}
+            "implicated": sorted(n for n in implicated if n), "real_rows": real or {},
+            "strength": strength_of(proofs, verdict)}
 
 
 def failures(qualification, ids=("wired", "commands", "replay", "state")):

@@ -126,10 +126,18 @@ class PortableBehaviourTests(unittest.TestCase):
                 with self.assertRaises(ossandbox.SandboxError):
                     ossandbox.popen([sys.executable, "-c", "pass"])
 
-    def test_default_mode_falls_back_and_records_why(self):
+    def test_default_mode_raises_when_sandbox_unavailable_and_starts_nothing(self):
         with mock.patch.object(ossandbox, "available", return_value=(False, "forced off")), \
+                mock.patch.object(ossandbox, "_plain", side_effect=AssertionError("plain")), \
                 mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(ossandbox.ENV_VAR, None)
+            with self.assertRaises(ossandbox.SandboxError) as caught:
+                ossandbox.popen([sys.executable, "-c", "pass"])
+        self.assertIn("forced off", str(caught.exception))
+
+    def test_permissive_mode_falls_back_and_records_why(self):
+        with mock.patch.object(ossandbox, "available", return_value=(False, "forced off")), \
+                mock.patch.dict(os.environ, {ossandbox.ENV_VAR: "permissive"}):
             proc = ossandbox.popen([sys.executable, "-c", "pass"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
@@ -137,26 +145,87 @@ class PortableBehaviourTests(unittest.TestCase):
             finally:
                 proc.wait(timeout=60)
             state = ossandbox.status()
+        self.assertEqual(state["mode"], "permissive")
+        self.assertFalse(state["fail_closed"])
         self.assertEqual(state["fallback"], "forced off")
         self.assertEqual(state["mechanisms"], [])
+        self.assertIn("permissive", state["notice"])
 
-    def test_unsupported_argument_falls_back_or_raises_in_strict(self):
-        with mock.patch.object(ossandbox, "available", return_value=(True, "forced on")):
+    def test_unsupported_argument_raises_by_default_and_falls_back_in_permissive(self):
+        with mock.patch.object(ossandbox, "available", return_value=(True, "forced on")), \
+                mock.patch.object(ossandbox, "_plain", side_effect=AssertionError("plain")), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(ossandbox.ENV_VAR, None)
             with self.assertRaises(ossandbox.SandboxError):
-                ossandbox.popen([sys.executable, "-c", "pass"], strict=True, text=True)
-        proc = ossandbox.popen([sys.executable, "-c", "pass"], text=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            self.assertIsInstance(proc, subprocess.Popen)
-        finally:
-            proc.wait(timeout=60)
+                ossandbox.popen([sys.executable, "-c", "pass"], text=True,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with mock.patch.dict(os.environ, {ossandbox.ENV_VAR: "permissive"}):
+            proc = ossandbox.popen([sys.executable, "-c", "pass"], text=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                self.assertIsInstance(proc, subprocess.Popen)
+            finally:
+                proc.wait(timeout=60)
         self.assertIn("not supported", ossandbox.status()["fallback"])
+
+    def test_opt_out_values_start_plain_processes(self):
+        for raw in ("0", "off", "false", "no"):
+            with self.subTest(value=raw), \
+                    mock.patch.dict(os.environ, {ossandbox.ENV_VAR: raw}):
+                proc = ossandbox.popen([sys.executable, "-c", "pass"],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    self.assertIsInstance(proc, subprocess.Popen)
+                finally:
+                    proc.wait(timeout=60)
+                state = ossandbox.status()
+                self.assertFalse(state["enabled"])
+                self.assertEqual(state["mode"], "off")
+                self.assertIn("OFF", state["notice"])
+
+    def test_mode_values_map_to_strict_permissive_or_off(self):
+        cases = {"": "strict", "strict": "strict", "anything-else": "strict",
+                 "PERMISSIVE": "permissive", "0": "off", "Off": "off",
+                 "FALSE": "off", "no": "off"}
+        for raw, expected in cases.items():
+            with self.subTest(value=raw), \
+                    mock.patch.dict(os.environ, {ossandbox.ENV_VAR: raw}):
+                self.assertEqual(ossandbox._mode(), expected)
+
+    def test_non_windows_fails_closed_unless_permissive_or_opted_out(self):
+        # Pretend to be a non-Windows host: the boundary is then unavailable.
+        with mock.patch.object(ossandbox.sys, "platform", "linux"), \
+                mock.patch.object(ossandbox, "_plain", side_effect=AssertionError("plain")), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(ossandbox.ENV_VAR, None)
+            with self.assertRaises(ossandbox.SandboxError) as caught:
+                ossandbox.popen([sys.executable, "-c", "pass"])
+            self.assertIn("job-object", str(caught.exception))
+            self.assertIn("permissive", str(caught.exception))
+        with mock.patch.object(ossandbox.sys, "platform", "linux"), \
+                mock.patch.dict(os.environ, {ossandbox.ENV_VAR: "permissive"}):
+            proc = ossandbox.popen([sys.executable, "-c", "pass"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                self.assertIsInstance(proc, subprocess.Popen)
+            finally:
+                proc.wait(timeout=60)
+        self.assertIn("need Windows", ossandbox.status()["fallback"])
 
     def test_status_shape(self):
         state = ossandbox.status()
-        for key in ("enabled", "mode", "mechanisms", "fallback", "not_enforced"):
+        for key in ("enabled", "mode", "fail_closed", "notice", "mechanisms",
+                    "not_applied_to_last_child", "fallback", "not_enforced"):
             self.assertIn(key, state)
         self.assertTrue(any("network" in item for item in state["not_enforced"]))
+
+    def test_status_default_is_fail_closed(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(ossandbox.ENV_VAR, None)
+            state = ossandbox.status()
+        self.assertEqual(state["mode"], "strict")
+        self.assertTrue(state["fail_closed"])
+        self.assertTrue(state["enabled"])
 
 
 @unittest.skipUnless(WINDOWS_SANDBOX, SKIP_WINDOWS or "sandbox unavailable")
@@ -273,11 +342,24 @@ class WindowsBoundaryTests(unittest.TestCase):
             self.assertIsNone(proc._job)
             self.assertFalse(os.path.exists(low_dir))
 
-    def test_forced_mechanism_failure_is_dropped_in_default_mode(self):
+    def test_forced_mechanism_failure_raises_by_default_and_starts_no_child(self):
         forced = ossandbox._Mechanism("job-object", "forced failure for the test")
         with mock.patch.object(ossandbox, "_job_object", side_effect=forced), \
+                mock.patch.object(ossandbox, "_create", side_effect=AssertionError("started")), \
+                mock.patch.object(ossandbox, "_plain", side_effect=AssertionError("plain")), \
                 mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(ossandbox.ENV_VAR, None)
+            with self.assertRaises(ossandbox.SandboxError) as caught:
+                ossandbox.popen([BASE_PY, "-c", "print('must not run')"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        self.assertIn("job-object", str(caught.exception))
+        self.assertIn("forced failure", str(caught.exception))
+
+    def test_forced_mechanism_failure_is_dropped_only_in_permissive_mode(self):
+        forced = ossandbox._Mechanism("job-object", "forced failure for the test")
+        with mock.patch.object(ossandbox, "_job_object", side_effect=forced), \
+                mock.patch.dict(os.environ, {ossandbox.ENV_VAR: "permissive"}):
             proc = ossandbox.popen([BASE_PY, "-c", "print('still runs')"],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
@@ -286,6 +368,7 @@ class WindowsBoundaryTests(unittest.TestCase):
         self.assertIn(b"still runs", out)
         self.assertEqual(tuple(proc.mechanisms), ("low-integrity", "handle-list"))
         self.assertIn("forced failure", ossandbox.status()["fallback"])
+        self.assertEqual(ossandbox.status()["not_applied_to_last_child"], ["job-object"])
 
     def test_forced_mechanism_failure_raises_in_strict_mode(self):
         forced = ossandbox._Mechanism("low-integrity", "forced failure for the test")

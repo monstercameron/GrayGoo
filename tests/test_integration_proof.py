@@ -362,7 +362,8 @@ class RouteTests(unittest.TestCase):
             proj, _ = agent.projects.create("Notebook")
             ctx = SimpleNamespace(root=ROOT, manager=None, agent=agent)
             path = "/api/agent/projects/%s/integration" % proj["id"]
-            self.assertEqual(server.dispatch("GET", path, b"", ctx), (200, {"text": "", "count": 0, "errors": []}))
+            self.assertEqual(server.dispatch("GET", path, b"", ctx),
+                             (200, {"text": "", "count": 0, "errors": [], "held_out": []}))
             status, data = server.dispatch("POST", path, json.dumps({"text": CHAIN + "\nbe nice\n"}).encode(), ctx)
             self.assertEqual((status, data["text"], len(data["errors"])), (200, CHAIN + "\nbe nice\n", 1))
             self.assertEqual(agent.projects.integration(proj["id"]), CHAIN + "\nbe nice\n")

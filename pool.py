@@ -41,6 +41,11 @@ delegated to :func:`workers.run_lisp` for a one-shot run. This is the
 only sanctioned call into the sibling-owned :mod:`workers` module, and
 it is call-only — this file never edits it.
 
+Sandbox: every worker child starts through :func:`ossandbox.popen` and is
+released with :func:`ossandbox.release`. Under the default fail-closed mode a
+child the OS boundary cannot wrap is refused and surfaces as
+:class:`WorkerSpawnError`; there is no unsandboxed fallback.
+
 Secret hygiene: spawned workers get a scrubbed environment
 (:func:`_scrub_env` removes ``CEREBRAS_API_KEY``/``CEREBRAS``); the
 worker script embeds no secrets. See ``documents/secret-policy.md``.
@@ -63,6 +68,8 @@ import tempfile
 import threading
 import time
 import uuid
+
+import ossandbox
 
 try:
     import sandbox as _sandbox
@@ -484,14 +491,22 @@ class PersistentWorker:
                "--non-interactive", "--no-userinit", "--no-sysinit",
                "--disable-debugger", "--load", path]
         try:
-            proc = subprocess.Popen(
+            # Same boundary as lispserver.py and workers.py: the child runs
+            # inside ossandbox (fail closed by default), never a bare Popen.
+            proc = ossandbox.popen(
                 argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=jail_root or None,
                 env=_scrub_env(),
+                memory_mb=max(ossandbox.DEFAULT_MEMORY_MB, int(memory_mb) + 512),
             )
+        except ossandbox.SandboxError as exc:
+            self._remove_script()
+            raise WorkerSpawnError(
+                "OS sandbox refused to start the worker (no child was "
+                "started): %s" % exc) from exc
         except OSError as exc:
             self._remove_script()
             raise WorkerSpawnError("failed to spawn sbcl: %s" % exc)
@@ -738,6 +753,8 @@ class PersistentWorker:
                     stream.close()
                 except (OSError, ValueError):
                     pass
+            # Frees the job handle and the Low temp folder (no-op for plain Popen).
+            ossandbox.release(proc)
         self._remove_script()
 
     def close(self):

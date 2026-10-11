@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -617,6 +618,8 @@ class SummaryTests(unittest.TestCase):
             self.assertEqual(summ["answer"]["tool"], "render-sphere-ascii")
             self.assertEqual(sess.events[-1]["kind"], "done")        # summary comes first
 
+    # the scripted replies end with the plan's own steps: no recovery round is scripted
+    @mock.patch.object(ag, "MAX_RECOVERY_ROUNDS", 0)
     def test_failed_run_summary_lists_partial_progress_and_why(self):
         good = {"action": "build", "name": "dbl", "description": "d",
                 "definition": "(defun dbl (x) (* 2 x))", "call": "(dbl 2)",
@@ -668,6 +671,8 @@ class SplitTests(unittest.TestCase):
             res = [e for e in sess.events if e["kind"] == "result"][-1]
             self.assertEqual(res["value"], "6")
 
+    # the scripted replies end with the plan's own steps: no recovery round is scripted
+    @mock.patch.object(ag, "MAX_RECOVERY_ROUNDS", 0)
     def test_split_that_also_fails_gives_up_cleanly(self):
         bad = self._build("big", '(defun big (x) (error "boom"))', "(big 2)", "4")
         replies = iter([{"action": "plan", "steps": [{"name": "big", "spec": "big"}]},

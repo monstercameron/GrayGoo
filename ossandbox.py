@@ -25,11 +25,20 @@ here); reads of files the user can read (Low integrity still reads Medium
 files); the profile's LocalLow folder (writable at Low integrity by Windows
 design); CPU and wall-clock limits (callers keep their own timeouts).
 
-Environment variable GRAYGOO_OS_SANDBOX: 0, off, false or no starts plain
-processes; strict makes any failure to apply a mechanism raise SandboxError;
-anything else (the default) applies what it can, drops a mechanism that fails,
-and starts a plain process when no mechanism works. The reason is recorded in
-status()["fallback"].
+Environment variable GRAYGOO_OS_SANDBOX (fail closed by default):
+
+* unset, ``strict``, or any value not listed below (the default): every
+  mechanism in MECHANISMS must apply, otherwise :func:`popen` raises
+  SandboxError naming the mechanism and the Win32 error. No plain process is
+  ever started as a fallback. On a platform without this boundary (not
+  Windows) :func:`popen` raises SandboxError for the same reason.
+* ``permissive``: an explicit operator choice. Mechanisms that fail are
+  skipped, the reason is recorded in status()["fallback"], and when no
+  mechanism works the child starts as a plain process.
+* ``0``, ``off``, ``false``, ``no``: plain processes (explicit opt-out).
+
+status() reports the mode in force, whether every mechanism applied to the
+last child, and a plain notice when something is not enforced.
 
 Callers use :func:`popen` where they used subprocess.Popen. The result is a
 :class:`SandboxedProcess` on Windows (the subset of the Popen interface the
@@ -64,7 +73,7 @@ ENV_VAR = "GRAYGOO_OS_SANDBOX"
 DEFAULT_MEMORY_MB = 1024
 MECHANISMS = ("job-object", "low-integrity", "handle-list")
 NOT_ENFORCED = (
-    "outbound network (blocking it needs AppContainer; not attempted)",
+    "outbound network (blocking it needs AppContainer, which is not shipped)",
     "reads of files the user can read (Low integrity still reads Medium files)",
     "the profile LocalLow folder (writable at Low integrity by Windows design)",
     "CPU time and wall-clock limits (callers keep their own timeouts)",
@@ -139,13 +148,19 @@ class _Unsupported(Exception):
     """A Popen argument the sandboxed path does not implement."""
 
 
+MODE_OFF = "off"
+MODE_PERMISSIVE = "permissive"
+MODE_STRICT = "strict"
+
+
 def _mode():
+    """The mode in force: ``off``, ``permissive`` or ``strict`` (the default)."""
     raw = os.environ.get(ENV_VAR, "").strip().lower()
     if raw in ("0", "off", "false", "no"):
-        return "off"
-    if raw == "strict":
-        return "strict"
-    return "on"
+        return MODE_OFF
+    if raw == "permissive":
+        return MODE_PERMISSIVE
+    return MODE_STRICT
 
 
 def _winerror():
@@ -296,10 +311,10 @@ def _probe_windows():
     try:
         api = _api()
     except (OSError, AttributeError) as exc:
-        return False, "Win32 API could not be bound through ctypes: %s" % exc
+        return False, "job-object: Win32 API could not be bound through ctypes: %s" % exc
     job = api.CreateJobObjectW(None, None)
     if not job:
-        return False, "CreateJobObjectW failed (winerror %d)" % _winerror()
+        return False, "job-object: CreateJobObjectW failed (winerror %d)" % _winerror()
     api.CloseHandle(job)
     try:
         token = _low_token(api)
@@ -316,8 +331,9 @@ def available():
     """
     global _probe_result
     if sys.platform != "win32":
-        return False, ("not Windows: job objects and integrity levels are "
-                       "unavailable; plain processes are used")
+        return False, ("job-object, low-integrity and handle-list need Windows; "
+                       "this platform has no boundary (set %s=permissive to run "
+                       "without one, or %s=0 to opt out)" % (ENV_VAR, ENV_VAR))
     if _probe_result is None:
         _probe_result = _probe_windows()
     return _probe_result
@@ -329,10 +345,25 @@ def status():
         mechanisms = list(_last_mechanisms)
         fallback = last_fallback
     mode = _mode()
+    if mode == MODE_OFF:
+        notice = ("OS sandbox OFF (%s is set to an opt-out value): child "
+                  "processes run with no OS boundary at all" % ENV_VAR)
+        not_applied = list(MECHANISMS)
+    elif mode == MODE_PERMISSIVE:
+        notice = ("permissive (%s=permissive): a mechanism that fails is skipped "
+                  "and its child runs without it; see fallback" % ENV_VAR)
+        not_applied = [name for name in MECHANISMS if name not in mechanisms]
+    else:
+        notice = ("strict (default, fail closed): every mechanism must apply or "
+                  "no child is started")
+        not_applied = [name for name in MECHANISMS if name not in mechanisms]
     return {
-        "enabled": mode != "off",
+        "enabled": mode != MODE_OFF,
         "mode": mode,
+        "fail_closed": mode == MODE_STRICT,
+        "notice": notice,
         "mechanisms": mechanisms,
+        "not_applied_to_last_child": not_applied,
         "fallback": fallback,
         "not_enforced": list(NOT_ENFORCED),
     }
@@ -671,7 +702,8 @@ def _spawn_sandboxed(cmd, kwargs, memory_mb, strict):
             _close_quietly(api, token)
             _remove_dir(lowdir)
             if strict:
-                raise SandboxError("OS sandbox could not be applied: %s" % exc) from None
+                raise SandboxError("OS sandbox could not be applied, so no child was "
+                                   "started: %s" % exc) from None
             skipped.append(str(exc))
             want.remove(exc.name)
             continue
@@ -693,16 +725,19 @@ def _plain(cmd, kwargs, reason):
 def popen(cmd, *, strict=None, memory_mb=DEFAULT_MEMORY_MB, **popen_kwargs):
     """Start CMD inside the OS boundary; a Popen-compatible object.
 
-    ``strict`` (default: from GRAYGOO_OS_SANDBOX) makes any failure raise
-    SandboxError. Otherwise the child starts with the mechanisms that worked,
-    or as a plain subprocess.Popen when none did; the reason is recorded.
-    ``memory_mb`` is the job's per-process memory cap.
+    Fail closed by default: any failure to apply a mechanism, a missing
+    boundary, or an unsupported argument raises SandboxError, and no plain
+    process is started. Only GRAYGOO_OS_SANDBOX=permissive lets the child start
+    with the mechanisms that worked (reason recorded in status()["fallback"]),
+    and only the opt-out values (0, off, false, no) start a plain process.
+    ``strict`` overrides the mode for one call. ``memory_mb`` is the job's
+    per-process memory cap.
     """
     mode = _mode()
+    if mode == MODE_OFF:
+        return _plain(cmd, popen_kwargs, "disabled by %s (opt-out value)" % ENV_VAR)
     if strict is None:
-        strict = mode == "strict"
-    if mode == "off":
-        return _plain(cmd, popen_kwargs, "disabled by %s=0" % ENV_VAR)
+        strict = mode != MODE_PERMISSIVE
     ok, reason = available()
     if not ok:
         if strict:

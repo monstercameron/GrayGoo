@@ -624,5 +624,222 @@ class MainTests(unittest.TestCase):
         self.assertEqual(done.stdout.strip(), "False")
 
 
+def _cell(arm, state, met, total, verdict=None, checked=True):
+    """A hand-made cell record with the keys the table and the agreement measures read."""
+    return {"arm": arm, "spec": "queue", "completed": state == "done",
+            "prompts": [{"state": state}],
+            "requirements": {"met": met, "total": total} if checked else None,
+            "own_verdict": {"verdict": verdict, "failed": []} if verdict else {},
+            "totals": {"model_calls": 1, "cost_usd": 0.1, "tokens": 10, "seconds": 1.0},
+            "functions_agent": 1, "functions_harness": 0}
+
+
+class AgreementTests(unittest.TestCase):
+
+    def test_wilson_interval_matches_known_values(self):
+        lo, hi = ae.wilson(5, 10)
+        self.assertAlmostEqual(lo, 0.2366, places=3)
+        self.assertAlmostEqual(hi, 0.7634, places=3)
+        lo, hi = ae.wilson(0, 10)
+        self.assertAlmostEqual(lo, 0.0, places=9)
+        self.assertAlmostEqual(hi, 0.2775, places=3)
+        lo, hi = ae.wilson(10, 10)
+        self.assertAlmostEqual(lo, 0.7225, places=3)
+        self.assertAlmostEqual(hi, 1.0, places=9)
+        self.assertIsNone(ae.wilson(3, 0))
+
+    def test_wilson_interval_always_contains_the_rate(self):
+        for k in range(0, 11):
+            lo, hi = ae.wilson(k, 10)
+            self.assertLessEqual(lo, k / 10)
+            self.assertGreaterEqual(hi, k / 10)
+
+    def test_rates_on_hand_made_cells(self):
+        cells = [
+            _cell("A", "done", 5, 5, "proven"),
+            _cell("A", "done", 3, 5, "unproven"),
+            _cell("A", "failed", 5, 5, "proven"),
+            _cell("A", "failed", 0, 5, "disproven"),
+            _cell("A", "done", None, None, "proven", checked=False),
+        ]
+        m = ae._measures(cells)
+        self.assertEqual((m["cells"], m["checked"]), (5, 4))
+        self.assertEqual((m["completion"]["numerator"], m["completion"]["denominator"]), (2, 4))
+        self.assertEqual((m["claimed_done"]["numerator"], m["claimed_done"]["denominator"]), (3, 5))
+        self.assertEqual((m["false_done"]["numerator"], m["false_done"]["denominator"]), (1, 2))
+        self.assertEqual((m["missed_done"]["numerator"], m["missed_done"]["denominator"]), (1, 2))
+        self.assertEqual((m["false_done_proven"]["numerator"],
+                          m["false_done_proven"]["denominator"]), (0, 1))
+        self.assertEqual((m["missed_done_proven"]["numerator"],
+                          m["missed_done_proven"]["denominator"]), (1, 1))
+        self.assertEqual(m["false_done"]["rate"], 0.5)
+        self.assertEqual(m["false_done_proven"]["rate"], 0.0)
+        self.assertIsInstance(m["false_done_proven"]["wilson95"], list)
+
+    def test_zero_denominators_are_reported_as_not_applicable(self):
+        cells = [_cell("B", "done", 5, 5, "proven"), _cell("B", "done", 5, 5, "proven")]
+        m = ae._measures(cells)
+        self.assertEqual(m["false_done"]["rate"], 0.0)
+        self.assertEqual(m["missed_done"], {"numerator": 0, "denominator": 0,
+                                            "rate": "n/a", "wilson95": "n/a"})
+        self.assertEqual(m["missed_done_proven"]["rate"], "n/a")
+        self.assertEqual(m["missed_done_proven"]["wilson95"], "n/a")
+        empty = ae._measures([])
+        for key in ("completion", "claimed_done", "false_done", "missed_done",
+                    "false_done_proven", "missed_done_proven"):
+            self.assertEqual(empty[key]["rate"], "n/a", key)
+            self.assertEqual(empty[key]["wilson95"], "n/a", key)
+
+    def test_unchecked_cells_leave_the_hidden_rates_out(self):
+        cells = [_cell("A", "failed", None, None, "proven", checked=False)]
+        m = ae._measures(cells)
+        self.assertEqual(m["checked"], 0)
+        self.assertEqual(m["completion"]["rate"], "n/a")
+        self.assertEqual(m["claimed_done"]["denominator"], 1)
+
+    def test_agreement_is_computed_per_arm_and_overall(self):
+        result = {"arms": ["A", "B"], "cells": [
+            _cell("A", "done", 1, 2, "proven"), _cell("B", "done", 2, 2, "proven")]}
+        block = ae.agreement(result)
+        self.assertEqual(block["by_arm"]["A"]["false_done"]["numerator"], 1)
+        self.assertEqual(block["by_arm"]["B"]["false_done"]["numerator"], 0)
+        self.assertEqual(block["all"]["cells"], 2)
+        self.assertEqual(block["all"]["false_done"]["denominator"], 2)
+
+    def test_own_verdict_records_strength_only_when_present(self):
+        summ = {"qualification": {"verdict": "proven", "failed": [], "basis": "x",
+                                  "strength": "independent"},
+                "verification": {"integration": {"passed": 2}, "goal": {"met": True}}}
+        v = ae._own_verdict(summ)
+        self.assertEqual(v["strength"], "independent")
+        self.assertEqual((v["verdict"], v["integration"], v["goal"]),
+                         ("proven", {"passed": 2}, {"met": True}))
+        v2 = ae._own_verdict({"qualification": {"verdict": "unproven", "failed": ["p1"]}})
+        self.assertNotIn("strength", v2)
+        self.assertEqual(v2["failed"], ["p1"])
+        v3 = ae._own_verdict({})
+        self.assertEqual((v3["verdict"], v3["failed"], v3["integration"]), (None, [], None))
+
+    def test_own_verdict_falls_back_to_the_verification_block(self):
+        summ = {"verification": {"qualification": {"verdict": "disproven", "failed": ["x"]}}}
+        self.assertEqual(ae._own_verdict(summ)["verdict"], "disproven")
+
+
+class ProofWiringTests(unittest.TestCase):
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix="ae-proof-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def test_dry_run_cell_records_the_agreement_fields(self):
+        record = ae.run_cell(_spec("queue"), ae.ARMS[3], ae.scripted_generate, self.work)
+        for key in ("final_state", "own_verdict", "requirements"):
+            self.assertIn(key, record)
+        self.assertEqual(record["final_state"], record["prompts"][-1]["state"])
+        self.assertTrue(set(record["own_verdict"]).issuperset(
+            {"verdict", "failed", "integration", "goal"}))
+
+    def test_hidden_requirements_never_reach_the_generator(self):
+        seen = []
+
+        def collecting(system, user):
+            seen.append(user)
+            return ae.scripted_generate(system, user)
+
+        for spec in ae.SPECS:
+            for arm in (ae.ARMS[0], ae.ARMS[3]):
+                ae.run_cell(spec, arm, collecting, self.work)
+        self.assertGreater(len(seen), 0)
+        for spec in ae.SPECS:
+            for line in spec["requirements"].splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                for message in seen:
+                    self.assertNotIn(line, message, "%s: %r" % (spec["id"], line))
+
+    def test_integration_text_saved_in_a_cell_reaches_its_later_prompts(self):
+        texts = []
+
+        def spy(sess):
+            texts.append(sess.integration_text)
+            if len(texts) == 1:
+                sess.save_integration("ping-check\n")
+
+        with mock.patch.object(ag.Session, "run", spy):
+            ae.run_cell(_spec("queue"), ae.ARMS[3], ae.scripted_generate, self.work)
+        self.assertEqual(texts, ["", "ping-check\n", "ping-check\n"])
+
+    def test_requirements_text_stays_empty_and_pause_stays_off(self):
+        flags = []
+
+        def spy(sess):
+            flags.append((sess.requirements_text, sess.pause_on_spend,
+                          sess.write_integration, sess.goal_check))
+
+        with mock.patch.object(ag.Session, "run", spy):
+            for arm in ae.ARMS:
+                ae.run_cell(_spec("queue"), arm, ae.scripted_generate, self.work)
+        self.assertEqual(set(flags), {("", False, True, True)})
+
+    def test_session_without_the_optional_attributes_still_runs(self):
+        class Bare(ag.Session):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                for name in ("write_integration", "save_integration",
+                             "integration_text", "goal_check"):
+                    self.__dict__.pop(name, None)
+
+            def run(self):
+                self.state = "done"
+
+        with mock.patch.object(ag, "Session", Bare):
+            record = ae.run_cell(_spec("expr"), ae.ARMS[3], ae.scripted_generate, self.work)
+        self.assertEqual(record["final_state"], "done")
+        self.assertIsNone(record["own_verdict"]["verdict"])
+
+    def test_dry_run_writes_the_agreement_block_and_says_it_is_scripted(self):
+        out_dir = self.work / "dry"
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ae.main(["--dry-run", "--specs", "queue", "--arms", "A,D",
+                            "--out", str(out_dir)])
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("Does the harness's own verdict agree with the hidden requirements?", text)
+        self.assertIn("describe the scripted model", text)
+        self.assertIn("say nothing about the live one", text)
+        self.assertIn("Memory (B vs A): not run", text)
+        data = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(data["agreement"]["by_arm"]), {"A", "D"})
+
+
+class TableBlockTests(unittest.TestCase):
+
+    def _result(self, mode):
+        return {"arms": ["A", "B"], "repeats": 3, "mode": mode, "cells": [
+            _cell("A", "done", 5, 5, "proven"), _cell("A", "failed", 0, 5, "disproven"),
+            _cell("B", "done", 2, 5, "unproven")]}
+
+    def test_table_keeps_the_existing_lines_and_adds_the_block(self):
+        text = ae.table(self._result("live"))
+        self.assertIn("Memory (B vs A): completed 1/1 vs 1/2", text)
+        self.assertIn("Does the harness's own verdict agree with the hidden requirements?", text)
+        self.assertIn("completion (all hidden requirements met)", text)
+        self.assertNotIn("scripted generator", text)
+
+    def test_table_says_plainly_that_a_scripted_run_describes_the_scripted_model(self):
+        text = ae.table(self._result("demo"))
+        self.assertIn("Scripted generator (mode demo): these numbers describe the scripted model "
+                      "and say nothing about the live one.", text)
+
+    def test_block_shows_n_a_for_an_empty_denominator(self):
+        text = ae.table(self._result("live"))
+        line = [ln for ln in text.splitlines() if "missed done, verdict proven" in ln][0]
+        self.assertIn("n/a", line)
+
+
 if __name__ == "__main__":
     unittest.main()

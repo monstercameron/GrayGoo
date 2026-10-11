@@ -2,6 +2,7 @@
 import contextlib
 import html
 import io
+import re
 import sys
 import tempfile
 import time
@@ -80,6 +81,40 @@ def make_todo():
     return run_words
 
 
+class LispError(Exception):
+    """What the fake Lisp evaluator raises, as the real one raises a Lisp error's message."""
+
+
+def make_lisp():
+    """A fresh fake Lisp evaluator with a few functions; any other form signals an error."""
+    def evaluate(form):
+        m = re.fullmatch(r"\(square (\d+)\)", form)
+        if m:
+            return str(int(m.group(1)) ** 2)
+        if form == "(battery-life '(:type :aa :count 2 :power-mw 200))":
+            return '"Battery life: 36.00 hours"'
+        if form == "(battery-life '(:type :aa))":
+            return '"Battery life: 0 hours (no power given)"'
+        if form == "(ratio)":
+            return "200/3"
+        if form == "(decimal)":
+            return "66.66666666666667"
+        if form == "(items)":
+            return "(1 2 3)"
+        if form == "(nothing)":
+            return "NIL"
+        if form == "(label)":
+            return '"Abc  Def"'
+        if form == "(seven 1)":
+            return "7"
+        if form == "(boom 1)":
+            raise LispError("The variable X is unbound.")
+        if form == "(quiet)":
+            return ""
+        raise LispError("The function %s is undefined." % form)
+    return evaluate
+
+
 def one(text):
     """The single requirement and no errors for a one-line text."""
     reqs, errors = rq.parse(text)
@@ -87,10 +122,10 @@ def one(text):
     return reqs[0]
 
 
-def check(text, app=FakeSite, command=make_todo):
+def check(text, app=FakeSite, command=make_todo, call=make_lisp):
     """Run TEXT and return its results (one per requirement)."""
     reqs, _ = rq.parse(text)
-    return rq.run(reqs, app=app, command=command)
+    return rq.run(reqs, app=app, command=command, call=call)
 
 
 class ParseWebFormsTests(unittest.TestCase):
@@ -442,6 +477,244 @@ class RunCommandTests(unittest.TestCase):
         self.assertIn("empty", result["detail"])
 
 
+class ParseCallFormsTests(unittest.TestCase):
+    def test_gives_shows_does_not_show_and_works(self):
+        step = one('call (square 12) gives 144')["steps"][0]
+        self.assertEqual(step, {"kind": "call", "form": "(square 12)", "expect": "gives", "value": "144"})
+        step = one('call (battery-life \'(:type :aa)) shows "hours"')["steps"][0]
+        self.assertEqual((step["form"], step["expect"], step["value"]),
+                         ("(battery-life '(:type :aa))", "shows", "hours"))
+        step = one('call (battery-life \'(:type :aa)) does not show "error"')["steps"][0]
+        self.assertEqual((step["expect"], step["value"]), ("not_shows", "error"))
+        step = one('call (square 12) works')["steps"][0]
+        self.assertEqual((step["expect"], step["value"]), ("works", ""))
+
+    def test_gives_keeps_the_printed_value_as_written(self):
+        step = one('call (battery-life \'(:type :aa :count 2 :power-mw 200)) gives "Battery life: 36.00 hours"')["steps"][0]
+        self.assertEqual(step["form"], "(battery-life '(:type :aa :count 2 :power-mw 200))")
+        self.assertEqual(step["value"], '"Battery life: 36.00 hours"')
+        self.assertEqual(one("call (f 1) gives (1 2 3)")["steps"][0]["value"], "(1 2 3)")
+        self.assertEqual(one("call (f 1) gives   200/3  ")["steps"][0]["value"], "200/3")
+
+    def test_keywords_are_case_insensitive_and_call_needs_no_space(self):
+        step = one('CALL (square 12) Gives 144')["steps"][0]
+        self.assertEqual((step["kind"], step["expect"]), ("call", "gives"))
+        step = one('call(square 12) WORKS')["steps"][0]
+        self.assertEqual((step["form"], step["expect"]), ("(square 12)", "works"))
+
+    def test_form_with_nested_parentheses_is_kept_whole(self):
+        step = one("call (f (g (h 1)) (k 2)) gives 5")["steps"][0]
+        self.assertEqual(step["form"], "(f (g (h 1)) (k 2))")
+
+    def test_form_with_a_parenthesis_and_escaped_quote_inside_a_string(self):
+        step = one(r'call (f "a)b\"c") works')["steps"][0]
+        self.assertEqual(step["form"], r'(f "a)b\"c")')
+        self.assertEqual(step["expect"], "works")
+
+    def test_form_with_a_quoted_list(self):
+        step = one('call (count \'("a b" "c)")) shows "2"')["steps"][0]
+        self.assertEqual(step["form"], '(count \'("a b" "c)"))')
+
+    def test_semicolon_is_not_a_comment_inside_the_form(self):
+        step = one("call (f 1 ;x) gives 2")["steps"][0]
+        self.assertEqual(step["form"], "(f 1 ;x)")
+
+    def test_missing_form_unbalanced_form_and_bad_strings_are_errors(self):
+        cases = {
+            "call": "after call comes one Lisp form",
+            "call square 12 gives 144": "after call comes one Lisp form",
+            "call (square 12 gives 144": "missing a closing parenthesis",
+            'call (f "abc) works': "missing its closing double quote",
+            "call (f 1)": "after the Lisp form comes",
+            "call (f 1) prints 2": "after the Lisp form comes",
+            "call (f 1) gives": "gives must be followed by the printed value",
+            'call (f 1) shows "x" extra': "words after the check",
+            "call (f 1) works extra": "words after the check",
+            "call (f 1) does not show": "must be in double quotes",
+            'call (f 1) shows ""': "is empty",
+        }
+        for text, phrase in cases.items():
+            with self.subTest(text=text):
+                reqs, errors = rq.parse(text)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(phrase.lower(), errors[0]["problem"].lower())
+                self.assertIn("Example of a valid line: call (square 12) gives 144.",
+                              errors[0]["problem"])
+                self.assertIsNone(reqs[0]["steps"])
+
+    def test_a_long_form_of_unbalanced_parentheses_is_rejected_quickly(self):
+        started = time.perf_counter()
+        for text in ("call " + "(" * 200001, "call (" + "x " * 100000 + " gives 1"):
+            reqs, errors = rq.parse(text)
+            self.assertEqual(len(errors), 1)
+        self.assertLess(time.perf_counter() - started, 2.0)
+
+
+class PrintedMatchesTests(unittest.TestCase):
+    def test_equal_text_matches(self):
+        self.assertTrue(rq.printed_matches("144", "144"))
+        self.assertFalse(rq.printed_matches("144", "143"))
+
+    def test_whitespace_runs_collapse(self):
+        self.assertTrue(rq.printed_matches("(1 2 3)", "(1   2\n 3)"))
+        self.assertTrue(rq.printed_matches("  144 ", "144"))
+        self.assertFalse(rq.printed_matches("(1 2 3)", "(1 2 3 )"))
+
+    def test_letter_case_is_ignored_outside_strings(self):
+        self.assertTrue(rq.printed_matches("NIL", "nil"))
+        self.assertTrue(rq.printed_matches("Foo", "foo"))
+
+    def test_strings_are_compared_exactly(self):
+        self.assertTrue(rq.printed_matches('"Abc"', '"Abc"'))
+        self.assertFalse(rq.printed_matches('"Abc"', '"abc"'))
+        self.assertFalse(rq.printed_matches('"a\\"b"', '"a\\"c"'))
+        self.assertTrue(rq.printed_matches('"Abc  Def"', '"Abc Def"'))
+        self.assertFalse(rq.printed_matches('"144"', "144"))
+
+    def test_lists_compare_as_text(self):
+        self.assertTrue(rq.printed_matches("(1 2 3)", "(1 2 3)"))
+        self.assertFalse(rq.printed_matches("(1 2 3)", "(1 2 4)"))
+
+    def test_integers_match_their_decimal_form(self):
+        self.assertTrue(rq.printed_matches("36", "36.0"))
+        self.assertTrue(rq.printed_matches("36.00", "36"))
+        self.assertTrue(rq.printed_matches("0", "0.0"))
+        self.assertTrue(rq.printed_matches("-5", "-5.0"))
+        self.assertFalse(rq.printed_matches("36", "37"))
+
+    def test_numbers_match_within_a_relative_tolerance(self):
+        self.assertTrue(rq.printed_matches("66.6667", "200/3"))
+        self.assertTrue(rq.printed_matches("200/3", "66.66666666666667"))
+        self.assertFalse(rq.printed_matches("66.5", "200/3"))
+        self.assertTrue(rq.printed_matches("1e3", "1000"))
+        self.assertTrue(rq.printed_matches("1.0d3", "1000"))
+        self.assertFalse(rq.printed_matches("200/3", "200/4"))
+
+    def test_a_number_and_a_string_do_not_match(self):
+        self.assertFalse(rq.printed_matches("1", '"1"'))
+        self.assertFalse(rq.printed_matches("1", "1 2"))
+
+    def test_absurdly_long_numbers_are_text_and_do_not_hang(self):
+        self.assertFalse(rq.printed_matches("1" * 100, "1"))
+        self.assertTrue(rq.printed_matches("1" * 100, "1" * 100))
+
+
+class RunCallTests(unittest.TestCase):
+    def test_gives_passes_and_fails_with_the_printed_value(self):
+        results = check("call (square 12) gives 144\ncall (square 12) gives 143\n")
+        self.assertEqual([r["ok"] for r in results], [True, False])
+        self.assertEqual(results[0]["detail"], "call (square 12) gave 144.")
+        self.assertEqual(results[1]["detail"], "call (square 12) gave 144, not 143.")
+
+    def test_gives_uses_the_numeric_tolerance_and_list_text(self):
+        results = check("call (ratio) gives 66.6667\ncall (decimal) gives 200/3\n"
+                        "call (items) gives (1 2 3)\ncall (nothing) gives nil\n")
+        self.assertEqual([r["ok"] for r in results], [True, True, True, True])
+
+    def test_gives_compares_strings_exactly(self):
+        results = check('call (label) gives "abc  def"\ncall (label) gives "Abc Def"\n')
+        self.assertEqual([r["ok"] for r in results], [False, True])
+
+    def test_battery_life_gives_the_documented_string(self):
+        result = check('call (battery-life \'(:type :aa :count 2 :power-mw 200)) '
+                       'gives "Battery life: 36.00 hours"')[0]
+        self.assertIs(result["ok"], True, result)
+
+    def test_shows_and_does_not_show(self):
+        results = check('call (battery-life \'(:type :aa)) shows "hours"\n'
+                        'call (battery-life \'(:type :aa)) does not show "error"\n'
+                        'call (battery-life \'(:type :aa)) shows "minutes"\n'
+                        'call (battery-life \'(:type :aa)) does not show "hours"\n')
+        self.assertEqual([r["ok"] for r in results], [True, True, False, False])
+        self.assertIn("which shows", results[0]["detail"])
+        self.assertIn("which does not show", results[2]["detail"])
+        self.assertIn("but it must not", results[3]["detail"])
+
+    def test_works_passes_when_the_call_completes(self):
+        result = check("call (seven 1) works")[0]
+        self.assertIs(result["ok"], True)
+        self.assertEqual(result["detail"], "call (seven 1) ran without an error; it gave 7.")
+        self.assertIs(check("call (quiet) works")[0]["ok"], True)
+
+    def test_a_lisp_error_fails_the_step_and_names_the_message(self):
+        for text in ("call (boom 1) gives 1", "call (boom 1) works", 'call (boom 1) does not show "x"'):
+            with self.subTest(text=text):
+                result = check(text)[0]
+                self.assertIs(result["ok"], False)
+                self.assertEqual(result["detail"], "call (boom 1) raised: The variable X is unbound.")
+
+    def test_an_undefined_function_is_a_failed_call(self):
+        result = check("call (nope 1) works")[0]
+        self.assertIs(result["ok"], False)
+        self.assertIn("raised: The function (nope 1) is undefined.", result["detail"])
+
+    def test_call_line_without_a_lisp_evaluator_is_not_checked(self):
+        result = check("call (square 12) gives 144", call=None)[0]
+        self.assertIsNone(result["ok"])
+        self.assertIn("no Lisp evaluator", result["detail"])
+
+    def test_an_evaluator_that_fails_to_start_fails_the_requirement(self):
+        def broken():
+            raise RuntimeError("no worker")
+        result = check("call (square 12) gives 144", call=broken)[0]
+        self.assertIs(result["ok"], False)
+        self.assertEqual(result["detail"],
+                         "could not start a fresh Lisp evaluator: RuntimeError: no worker.")
+
+    def test_printed_text_is_not_stripped_of_angle_brackets(self):
+        result = check('call (square 12) gives "<b>x</b>"',
+                       call=lambda: (lambda form: '"<b>x</b>"'))[0]
+        self.assertIs(result["ok"], True)
+        self.assertIn('"<b>x</b>"', result["detail"])
+
+    def test_call_factory_must_be_a_factory(self):
+        reqs, _ = rq.parse("call (square 12) works")
+        with self.assertRaises(TypeError):
+            rq.run(reqs, call=object())
+
+    def test_a_fresh_evaluator_is_made_per_requirement(self):
+        made = []
+
+        def factory():
+            made.append(make_lisp())
+            return made[-1]
+        check("call (square 1) works\ncall (square 2) works\n"
+              "scenario: two\n  call (square 3) gives 9\n  call (square 4) gives 16\n", call=factory)
+        self.assertEqual(len(made), 3)
+
+    def test_scenario_of_call_lines_runs_every_step(self):
+        results = check("scenario: squares\n  call (square 3) gives 9\n  call (square 4) gives 16\n")
+        self.assertIs(results[0]["ok"], True, results[0])
+        self.assertEqual(results[0]["detail"], "All 2 steps passed.")
+        self.assertEqual([s["ok"] for s in results[0]["steps"]], [True, True])
+
+    def test_scenario_stops_at_the_first_failing_call(self):
+        result = check("scenario: squares\n  call (square 3) gives 9\n  call (square 4) gives 17\n"
+                       "  call (square 5) works\n")[0]
+        self.assertIs(result["ok"], False)
+        self.assertEqual(result["detail"], "Step 2 of 3 failed: call (square 4) gave 16, not 17.")
+        self.assertEqual(len(result["steps"]), 2)
+
+    def test_scenario_mixing_call_with_other_kinds_is_refused(self):
+        for text, phrase in (
+                ('scenario: mixed\n  call (square 3) gives 9\n  GET /notes answers 200\n',
+                 "cannot mix call lines with GET or POST lines"),
+                ('scenario: mixed\n  call (square 3) gives 9\n  run "list" prints "x"\n',
+                 "cannot mix call lines with run lines")):
+            with self.subTest(text=text):
+                reqs, errors = rq.parse(text)
+                self.assertTrue(any(phrase in e["problem"] for e in errors), errors)
+                self.assertIsNone(reqs[0]["steps"])
+
+    def test_summarize_counts_call_results(self):
+        results = check("call (square 12) gives 144\ncall (square 12) gives 143\n"
+                        "call (nope 1) works\ncall (f\n")
+        self.assertEqual(rq.summarize(results), {
+            "total": 4, "met": 1, "unmet": 2, "unchecked": 1,
+            "unmet_ids": ["R2", "R3"], "unmet_texts": ["call (square 12) gives 143",
+                                                       "call (nope 1) works"]})
+
+
 class SummaryAndFingerprintTests(unittest.TestCase):
     def test_summarize_counts_each_outcome(self):
         results = [{"id": "R1", "text": "a", "ok": True}, {"id": "R2", "text": "b", "ok": False},
@@ -539,6 +812,29 @@ class MainTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn("UNMET", out.getvalue())
                 self.assertIn("unmet: R2", out.getvalue())
+
+    def test_call_lines_run_a_saved_project_function(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = projects.ProjectStore(Path(tmp))
+            project, err = store.create("Square test")
+            self.assertIsNone(err)
+            pid = project["id"]
+            ag.ToolRegistry(store.tools_path(pid), "live").add(
+                {"name": "square", "description": "squares a number",
+                 "definition": "(defun square (n) (* n n))", "mode": "live"})
+            reqfile = Path(tmp) / "calls.txt"
+            reqfile.write_text('call (square 12) gives 144\n'
+                               'call (square 12) gives 143\n'
+                               'call (square 12) works\n'
+                               'call (no-such-function 1) works\n', encoding="utf-8")
+            with mock.patch.object(ag, "AGENT_DIR", Path(tmp)):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = rq.main([str(reqfile), "--project", pid])
+            self.assertEqual(code, 1, out.getvalue())
+            self.assertIn("MET", out.getvalue())
+            self.assertIn("call (square 12) gave 144, not 143.", out.getvalue())
+            self.assertIn("2 met, 2 unmet, 0 not checked, of 4 requirement(s).", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+run "help" works
+run "save 150000 6.5 30" then run "list" prints "150000"
+run "save 150000 6.5 30" then run "export" works
+run "save 150000 6.5 30" then run "amortize 1" works
+run "save 150000 6.5 30" then run "report 1" works

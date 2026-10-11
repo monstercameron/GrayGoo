@@ -12,10 +12,12 @@ import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ossandbox
 import pool
 import workers
 
 SBCL_AVAILABLE = os.path.exists(workers.resolve_sbcl())
+POOL_SOURCE = os.path.join(os.path.dirname(os.path.abspath(pool.__file__)), "pool.py")
 
 WORKER_KEYS = {"ok", "stdout", "return_value", "error", "timed_out",
                "elapsed_ms"}
@@ -284,6 +286,76 @@ class FallbackTest(unittest.TestCase):
                        oneshot_fallback=False) as fleet:
             with self.assertRaises(pool.WorkerSpawnError):
                 fleet.run("(+ 4 5)")
+
+
+class SandboxBoundaryTest(unittest.TestCase):
+    """Workers start their child through ossandbox.popen, never a bare Popen."""
+
+    def test_pool_source_has_no_bare_popen(self):
+        with open(POOL_SOURCE, encoding="utf-8") as handle:
+            source = handle.read()
+        self.assertNotIn("subprocess.Popen(", source)
+        self.assertIn("ossandbox.popen(", source)
+
+    def test_worker_child_is_started_through_ossandbox_popen(self):
+        # sys.executable exists, so the spawn reaches popen; popen is patched
+        # to refuse. The refusal must surface as a clear spawn error and no
+        # bare subprocess.Popen may run.
+        refusal = ossandbox.SandboxError("forced refusal for the test")
+        with unittest.mock.patch.object(pool.ossandbox, "popen",
+                                        side_effect=refusal) as spy, \
+                unittest.mock.patch.object(pool.subprocess, "Popen") as bare:
+            with self.assertRaises(pool.WorkerSpawnError) as caught:
+                pool.PersistentWorker(executable=sys.executable,
+                                      generation="test-gen")
+        spy.assert_called_once()
+        argv = spy.call_args[0][0]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertIn("--load", argv)
+        self.assertEqual(spy.call_args[1]["stdin"], pool.subprocess.PIPE)
+        bare.assert_not_called()
+        self.assertIn("OS sandbox refused", str(caught.exception))
+        self.assertIn("forced refusal", str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__, ossandbox.SandboxError)
+
+    def test_pool_refusal_is_a_spawn_error_without_one_shot_fallback(self):
+        refusal = ossandbox.SandboxError("forced refusal for the test")
+        with unittest.mock.patch.object(pool.ossandbox, "popen", side_effect=refusal), \
+                unittest.mock.patch.object(pool.subprocess, "Popen") as bare:
+            fleet = pool.Pool(size=1, sbcl_exe=sys.executable, generation="gen-x",
+                              oneshot_fallback=False)
+            try:
+                self.assertFalse(fleet.prewarm_evidence["all_ok"])
+                with self.assertRaises(pool.WorkerSpawnError):
+                    fleet.run("(+ 1 2)")
+            finally:
+                fleet.shutdown()
+        bare.assert_not_called()
+
+
+@unittest.skipUnless(SBCL_AVAILABLE, "SBCL executable not found")
+class SandboxedWorkerTest(unittest.TestCase):
+    def test_real_worker_child_runs_inside_the_boundary(self):
+        real_popen = ossandbox.popen
+        with unittest.mock.patch.object(pool.ossandbox, "popen",
+                                        wraps=real_popen) as spy:
+            with pool.PersistentWorker(generation="test-gen") as worker:
+                result = worker.run("(+ 1 2)")
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["return_value"], "3")
+                mechanisms = tuple(worker._proc.mechanisms)
+        spy.assert_called_once()
+        if ossandbox.available()[0]:
+            self.assertEqual(set(mechanisms), set(ossandbox.MECHANISMS))
+
+    def test_teardown_releases_the_sandboxed_child(self):
+        real_release = ossandbox.release
+        with unittest.mock.patch.object(pool.ossandbox, "release",
+                                        wraps=real_release) as spy:
+            worker = pool.PersistentWorker(generation="test-gen")
+            proc = worker._proc
+            worker.close()
+        spy.assert_called_once_with(proc)
 
 
 if __name__ == "__main__":

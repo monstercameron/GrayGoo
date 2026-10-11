@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GRAYGOO_SBCL: /usr/bin/sbcl
+      # Linux runners have no Windows OS boundary (ossandbox.py fails closed
+      # there by default). permissive lets the gates run unsandboxed on CI only.
+      GRAYGOO_OS_SANDBOX: permissive
     steps:
       - uses: actions/checkout@v4
 

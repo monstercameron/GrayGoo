@@ -372,8 +372,21 @@ class CallGraphTests(unittest.TestCase):
     # function that is only named in data counts as wired. call_graph walks into every quote form
     # (qualify.py line 127 and the test at line 128). The fix belongs there: do not descend into a
     # quoted list, except for a bare quoted name.
-    def test_a_name_inside_a_quoted_data_list_is_not_a_call(self):
+    def test_a_saved_function_named_in_a_quoted_table_counts_as_used(self):
+        # '(("help" . cmd-help)) is how an app hands a command to FUNCALL without a COND. Counting
+        # the name errs on the side of "used": a handler wrongly thought dead would be put away.
         tools = [tool("handle-command", "(defun handle-command (args state now) (list :output \"x\" '(helper 1)))"),
+                 tool("helper", "(defun helper (x) x)")]
+        self.assertIn("helper", qualify.call_graph(tools)["handle-command"])
+        table = [tool("handle-command", "(defun handle-command (args state now) (let ((f (cdr (assoc (first args) "
+                      "'((\"help\" . cmd-help) (\"list\" . cmd-list)) :test (function string=))))) "
+                      "(funcall f (rest args) state now)))"),
+                 tool("cmd-help", "(defun cmd-help (args state now) (list :output \"x\"))"),
+                 tool("cmd-list", "(defun cmd-list (args state now) (list :output \"y\"))")]
+        self.assertEqual(qualify.reachable(table), {"handle-command", "cmd-help", "cmd-list"})
+
+    def test_a_word_in_a_quoted_list_that_names_no_saved_function_is_data(self):
+        tools = [tool("handle-command", "(defun handle-command (args state now) (list :output \"x\" '(other 1)))"),
                  tool("helper", "(defun helper (x) x)")]
         self.assertNotIn("helper", qualify.call_graph(tools)["handle-command"])
 
